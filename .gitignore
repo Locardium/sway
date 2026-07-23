@@ -43,6 +43,9 @@ tools/itunes-xml-poc/*.xml
 *.log
 *.tmp
 
+# === Graphify (grafo de conocimiento, regenerable con --update) ===
+graphify-out/
+
 # === OS / editor ===
 .DS_Store
 Thumbs.db

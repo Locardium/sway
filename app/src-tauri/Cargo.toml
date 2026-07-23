@@ -1,0 +1,26 @@
+[package]
+name = "sway"
+version = "0.1.0"
+description = "Sway — reproductor/organizador DJ"
+edition = "2021"
+
+[lib]
+name = "sway_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+lofty = "0.21"
+walkdir = "2"
+anyhow = "1"
+
+# Reproduccion desktop (symphonia decodifica FLAC/MP3/WAV/AAC/etc).
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+rodio = { version = "0.19", features = ["symphonia-all"] }
