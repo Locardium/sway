@@ -57,38 +57,65 @@ fn read_meta(path: &Path) -> Meta {
     m
 }
 
+fn is_audio(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase())
+        .is_some_and(|ext| AUDIO_EXTS.contains(&ext.as_str()))
+}
+
+/// Inserta un archivo de audio (o lo encuentra si ya estaba) y devuelve su id.
+fn import_one(conn: &Connection, path: &Path) -> Result<i64> {
+    let m = read_meta(path);
+    conn.execute(
+        "INSERT OR IGNORE INTO tracks (path, title, artist, album, genre, duration_ms, bpm)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            path.to_string_lossy(),
+            m.title,
+            m.artist,
+            m.album,
+            m.genre,
+            m.duration_ms,
+            m.bpm
+        ],
+    )?;
+    let id = conn.query_row(
+        "SELECT id FROM tracks WHERE path = ?1",
+        [path.to_string_lossy()],
+        |r| r.get(0),
+    )?;
+    Ok(id)
+}
+
 /// Escanea `folder` recursivo, lee tags e inserta tracks nuevos. Devuelve
 /// cuantos se insertaron (los ya presentes por `path` se ignoran).
 pub fn import_folder(conn: &Connection, folder: &str) -> Result<usize> {
-    let mut inserted = 0usize;
+    let before: i64 = conn.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))?;
     for entry in WalkDir::new(folder).into_iter().filter_map(|e| e.ok()) {
-        if !entry.file_type().is_file() {
-            continue;
+        if entry.file_type().is_file() && is_audio(entry.path()) {
+            import_one(conn, entry.path())?;
         }
-        let path = entry.path();
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|s| s.to_lowercase())
-            .unwrap_or_default();
-        if !AUDIO_EXTS.contains(&ext.as_str()) {
-            continue;
-        }
-        let m = read_meta(path);
-        let n = conn.execute(
-            "INSERT OR IGNORE INTO tracks (path, title, artist, album, genre, duration_ms, bpm)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                path.to_string_lossy(),
-                m.title,
-                m.artist,
-                m.album,
-                m.genre,
-                m.duration_ms,
-                m.bpm
-            ],
-        )?;
-        inserted += n;
     }
-    Ok(inserted)
+    let after: i64 = conn.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))?;
+    Ok((after - before) as usize)
+}
+
+/// Importa una mezcla de archivos y carpetas (drop desde el OS). Devuelve los
+/// ids de todos los tracks de audio involucrados (nuevos o ya existentes).
+pub fn import_paths(conn: &Connection, paths: &[String]) -> Result<Vec<i64>> {
+    let mut ids = Vec::new();
+    for p in paths {
+        let path = Path::new(p);
+        if path.is_dir() {
+            for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+                if entry.file_type().is_file() && is_audio(entry.path()) {
+                    ids.push(import_one(conn, entry.path())?);
+                }
+            }
+        } else if path.is_file() && is_audio(path) {
+            ids.push(import_one(conn, path)?);
+        }
+    }
+    Ok(ids)
 }

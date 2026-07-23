@@ -25,6 +25,23 @@ fn list_tracks(state: State<AppState>) -> Result<Vec<db::Track>, String> {
 }
 
 #[tauri::command]
+fn import_files(state: State<AppState>, paths: Vec<String>) -> Result<Vec<i64>, String> {
+    let conn = state.db.lock().unwrap();
+    import::import_paths(&conn, &paths).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_tracks(state: State<AppState>, ids: Vec<i64>) -> Result<(), String> {
+    let mut conn = state.db.lock().unwrap();
+    db::delete_tracks(&mut conn, &ids).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_volume(state: State<AppState>, volume: f32) {
+    state.player.set_volume(volume);
+}
+
+#[tauri::command]
 fn list_playlists(state: State<AppState>) -> Result<Vec<db::PlaylistNode>, String> {
     let conn = state.db.lock().unwrap();
     db::list_playlists(&conn).map_err(|e| e.to_string())
@@ -158,7 +175,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             import_folder,
+            import_files,
             list_tracks,
+            delete_tracks,
+            set_volume,
             list_playlists,
             create_playlist,
             rename_playlist,

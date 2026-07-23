@@ -6,7 +6,11 @@ export type Selection = { type: 'library' } | { type: 'playlist'; id: number };
 interface Props {
   nodes: PlaylistNode[];
   selection: Selection;
+  /** Nodo resaltado durante un drag de archivos del OS (null = ninguno). */
+  osDropNodeId: number | null;
+  busy: boolean;
   onSelect: (sel: Selection) => void;
+  onImport: () => void;
   onCreate: (kind: NodeKind, parentId: number | null) => void;
   onRename: (id: number, name: string) => void;
   onDelete: (id: number) => void;
@@ -22,7 +26,10 @@ const NODE_MIME = 'application/x-sway-node';
 export default function Sidebar({
   nodes,
   selection,
+  osDropNodeId,
+  busy,
   onSelect,
+  onImport,
   onCreate,
   onRename,
   onDelete,
@@ -125,8 +132,11 @@ export default function Sidebar({
             'tree-row',
             active ? 'active' : '',
             hint ? `drop-${hint}` : '',
+            osDropNodeId === node.id ? 'drop-into' : '',
           ].join(' ')}
           style={{ paddingLeft: 10 + depth * 16 }}
+          data-drop-node={node.id}
+          data-node-kind={node.kind}
           draggable={editingId !== node.id}
           onDragStart={(e) => {
             e.dataTransfer.setData(NODE_MIME, String(node.id));
@@ -224,6 +234,10 @@ export default function Sidebar({
         {childrenOf(null).map((n) => renderNode(n, 0))}
         {nodes.length === 0 && <p className="tree-empty">Sin playlists todavía.</p>}
       </div>
+
+      <button className="import-btn" onClick={onImport} disabled={busy}>
+        {busy ? 'Importando…' : '+ Importar carpeta'}
+      </button>
 
       {menu && (
         <div className="ctx-menu" style={{ left: menu.x, top: menu.y }}>

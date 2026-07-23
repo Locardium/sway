@@ -44,7 +44,11 @@ export const reorderPlaylistTracks = (playlistId: number, trackIds: number[], in
 
 // Import: escanea una carpeta, lee tags e inserta tracks. Devuelve cuantos.
 export const importFolder = (folder: string) => invoke<number>('import_folder', { folder });
+// Import de archivos/carpetas sueltos (drop del OS). Devuelve ids de tracks.
+export const importFiles = (paths: string[]) => invoke<number[]>('import_files', { paths });
 export const listTracks = () => invoke<Track[]>('list_tracks');
+// Borra de la biblioteca (no toca archivos en disco).
+export const deleteTracks = (ids: number[]) => invoke<void>('delete_tracks', { ids });
 
 // Playback (rodio/symphonia en Rust).
 export const playTrack = (id: number) => invoke<void>('play_track', { id });
@@ -53,3 +57,4 @@ export const resumePlayback = () => invoke<void>('resume_playback');
 export const stopPlayback = () => invoke<void>('stop_playback');
 export const seekTo = (secs: number) => invoke<void>('seek_to', { secs });
 export const playbackPosition = () => invoke<number>('playback_position');
+export const setVolume = (volume: number) => invoke<void>('set_volume', { volume });

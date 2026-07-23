@@ -17,6 +17,7 @@ enum Cmd {
     Resume,
     Stop,
     Seek(u64),
+    Volume(f32),
 }
 
 pub struct Player {
@@ -57,6 +58,9 @@ impl Player {
     pub fn seek(&self, secs: u64) {
         self.send(Cmd::Seek(secs));
     }
+    pub fn set_volume(&self, vol: f32) {
+        self.send(Cmd::Volume(vol.clamp(0.0, 1.0)));
+    }
     pub fn position_secs(&self) -> u64 {
         self.pos_ms.load(Ordering::Relaxed) / 1000
     }
@@ -72,6 +76,7 @@ fn run_audio(rx: Receiver<Cmd>, pos_ms: Arc<AtomicU64>) {
     };
     eprintln!("[player] salida de audio abierta OK");
     let mut sink = Sink::try_new(&handle).expect("sink");
+    let mut vol: f32 = 1.0;
 
     loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
@@ -82,7 +87,7 @@ fn run_audio(rx: Receiver<Cmd>, pos_ms: Arc<AtomicU64>) {
                 match File::open(&path) {
                     Ok(f) => match Decoder::new(BufReader::new(f)) {
                         Ok(src) => {
-                            sink.set_volume(1.0);
+                            sink.set_volume(vol);
                             sink.append(src);
                             sink.play();
                             eprintln!(
@@ -102,9 +107,14 @@ fn run_audio(rx: Receiver<Cmd>, pos_ms: Arc<AtomicU64>) {
             Ok(Cmd::Stop) => {
                 sink.stop();
                 sink = Sink::try_new(&handle).expect("sink");
+                sink.set_volume(vol);
             }
             Ok(Cmd::Seek(secs)) => {
                 let _ = sink.try_seek(Duration::from_secs(secs));
+            }
+            Ok(Cmd::Volume(v)) => {
+                vol = v;
+                sink.set_volume(v);
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,

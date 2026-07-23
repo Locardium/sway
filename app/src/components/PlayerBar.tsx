@@ -5,11 +5,15 @@ interface Props {
   track: Track;
   paused: boolean;
   posMs: number;
+  volume: number;
+  infoOpen: boolean;
   onToggle: () => void;
   onStop: () => void;
   onPrev: () => void;
   onNext: () => void;
   onSeek: (secs: number) => void;
+  onVolume: (v: number) => void;
+  onToggleInfo: () => void;
 }
 
 function fmt(ms: number): string {
@@ -18,7 +22,20 @@ function fmt(ms: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
-export default function PlayerBar({ track, paused, posMs, onToggle, onStop, onPrev, onNext, onSeek }: Props) {
+export default function PlayerBar({
+  track,
+  paused,
+  posMs,
+  volume,
+  infoOpen,
+  onToggle,
+  onStop,
+  onPrev,
+  onNext,
+  onSeek,
+  onVolume,
+  onToggleInfo,
+}: Props) {
   const barRef = useRef<HTMLDivElement>(null);
   const pct = track.durationMs > 0 ? Math.min(100, (posMs / track.durationMs) * 100) : 0;
 
@@ -31,8 +48,11 @@ export default function PlayerBar({ track, paused, posMs, onToggle, onStop, onPr
   return (
     <footer className="player">
       <div className="np">
-        <strong>{track.title}</strong>
-        <span className="np-artist">{track.artist}</span>
+        <div className="np-art" aria-hidden="true">♪</div>
+        <div className="np-text">
+          <strong>{track.title}</strong>
+          <span className="np-artist">{track.artist}</span>
+        </div>
       </div>
       <div className="player-center">
         <div className="controls">
@@ -54,6 +74,24 @@ export default function PlayerBar({ track, paused, posMs, onToggle, onStop, onPr
       </div>
       <div className="player-right">
         {track.bpm != null && <span className="bpm-chip">{track.bpm} BPM</span>}
+        <div className="vol" title={`Volumen ${Math.round(volume * 100)}%`}>
+          <span className="vol-icon" aria-hidden="true">{volume === 0 ? '🔇' : '🔊'}</span>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            value={Math.round(volume * 100)}
+            onChange={(e) => onVolume(Number(e.target.value) / 100)}
+            aria-label="Volumen"
+          />
+        </div>
+        <button
+          className={'ctl info' + (infoOpen ? ' on' : '')}
+          onClick={onToggleInfo}
+          title="Info del track"
+        >
+          ⓘ
+        </button>
       </div>
     </footer>
   );

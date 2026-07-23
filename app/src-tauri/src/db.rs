@@ -84,6 +84,16 @@ pub fn track_path(conn: &Connection, id: i64) -> Result<String> {
     conn.query_row("SELECT path FROM tracks WHERE id = ?1", [id], |r| r.get(0))
 }
 
+/// Borra tracks de la biblioteca (no toca archivos en disco).
+/// El CASCADE los saca de todas las playlists.
+pub fn delete_tracks(conn: &mut Connection, ids: &[i64]) -> Result<()> {
+    let tx = conn.transaction()?;
+    for id in ids {
+        tx.execute("DELETE FROM tracks WHERE id = ?1", [id])?;
+    }
+    tx.commit()
+}
+
 // ---------------------------------------------------------------------------
 // Playlists / folders (jerarquia virtual)
 // ---------------------------------------------------------------------------
