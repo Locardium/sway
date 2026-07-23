@@ -56,6 +56,13 @@ CREATE TABLE IF NOT EXISTS cues (
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+    // Foldea el WAL de la sesion anterior al archivo principal en cada arranque.
+    // Sin esto, un cierre sucio (force-kill en dev, cuelgue) deja todo el estado
+    // en el -wal; si un arranque no lo aplica, la biblioteca "aparece vacia".
+    // TRUNCATE consolida y achica el -wal a cero.
+    let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+    // Checkpoint automatico agresivo: no dejar crecer el -wal sin consolidar.
+    conn.execute_batch("PRAGMA wal_autocheckpoint=256;")?;
     conn.execute_batch(SCHEMA)?;
     Ok(conn)
 }
@@ -84,14 +91,29 @@ pub fn track_path(conn: &Connection, id: i64) -> Result<String> {
     conn.query_row("SELECT path FROM tracks WHERE id = ?1", [id], |r| r.get(0))
 }
 
-/// Borra tracks de la biblioteca (no toca archivos en disco).
-/// El CASCADE los saca de todas las playlists.
-pub fn delete_tracks(conn: &mut Connection, ids: &[i64]) -> Result<()> {
+/// Borra tracks de la biblioteca. Los archivos que viven bajo la carpeta
+/// gestionada `managed` se mandan a la papelera del OS; los de afuera (legacy)
+/// no se tocan. El CASCADE los saca de todas las playlists.
+pub fn delete_tracks(conn: &mut Connection, managed: &std::path::Path, ids: &[i64]) -> Result<()> {
+    // Junta los paths antes de borrar de la DB.
+    let mut paths = Vec::new();
+    for id in ids {
+        if let Ok(p) = track_path(conn, *id) {
+            paths.push(p);
+        }
+    }
     let tx = conn.transaction()?;
     for id in ids {
         tx.execute("DELETE FROM tracks WHERE id = ?1", [id])?;
     }
-    tx.commit()
+    tx.commit()?;
+    for p in paths {
+        let path = std::path::Path::new(&p);
+        if path.starts_with(managed) && path.exists() {
+            let _ = trash::delete(path); // best-effort: no romper si falla
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

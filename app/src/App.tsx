@@ -501,6 +501,22 @@ export default function App() {
     return items;
   }
 
+  // Wrappers referencialmente estables para la tabla: su identidad no cambia
+  // entre renders, asi React.memo evita re-renderizar las ~1149 filas cuando
+  // solo cambia el estado del player (posicion, pausa, volumen).
+  const tableApi = useRef({ onPlay, onTrackMouseDown, rowMenuItems });
+  tableApi.current = { onPlay, onTrackMouseDown, rowMenuItems };
+  const stableOnPlay = useCallback((id: number) => tableApi.current.onPlay(id), []);
+  const stableOnTrackMouseDown = useCallback(
+    (e: React.MouseEvent, ids: number[]) => tableApi.current.onTrackMouseDown(e, ids),
+    [],
+  );
+  const stableRowMenuItems = useCallback(
+    (ids: number[]) => tableApi.current.rowMenuItems(ids),
+    [],
+  );
+  const stableWasDrag = useCallback(() => didDrag, []);
+
   const selectedNode =
     selection.type === 'playlist' ? nodes.find((n) => n.id === selection.id) : null;
 
@@ -565,16 +581,15 @@ export default function App() {
             <TrackTable
               tracks={visibleTracks}
               currentId={currentId}
-              paused={paused}
               selected={selected}
               onSelectedChange={setSelected}
-              onPlay={onPlay}
+              onPlay={stableOnPlay}
               onInspect={setInfoId}
               canReorder={canReorder}
-              onTrackMouseDown={onTrackMouseDown}
+              onTrackMouseDown={stableOnTrackMouseDown}
               dropInsertIndex={dropInsertIndex}
-              wasDrag={() => didDrag}
-              rowMenuItems={rowMenuItems}
+              wasDrag={stableWasDrag}
+              rowMenuItems={stableRowMenuItems}
             />
           ) : (
             <p className="empty">

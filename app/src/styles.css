@@ -226,14 +226,22 @@ table.tracks th.num, table.tracks td.num {
 body.col-resizing { cursor: col-resize; }
 body.col-resizing * { cursor: col-resize !important; }
 
-table.tracks tbody tr { cursor: default; }
+table.tracks tbody tr {
+  cursor: default;
+  /* Solo pinta las filas visibles: con 1000+ tracks evita el costo de layout
+     en cada re-render (adelantar, cambiar de track, etc.). */
+  content-visibility: auto;
+  contain-intrinsic-size: 0 48px;
+}
 table.tracks tbody tr:hover { background: var(--panel); }
 table.tracks tbody tr.selected { background: var(--accent-soft); }
 table.tracks tbody tr.selected td { border-bottom-color: transparent; }
 table.tracks tbody tr.playing .t-title { color: var(--accent); }
 
-table.tracks tbody tr.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
-table.tracks tbody tr.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+/* Linea de insercion del drag: box-shadow inset sobre las celdas (la barra
+   sobre <tr> no se renderiza confiablemente). */
+table.tracks tbody tr.drop-before > td { box-shadow: inset 0 2px 0 0 var(--accent); }
+table.tracks tbody tr.drop-after > td { box-shadow: inset 0 -2px 0 0 var(--accent); }
 .drop-tail { height: 56px; }
 .drop-tail.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
 

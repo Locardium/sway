@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { Play } from 'lucide-react';
 import { Track } from '../api';
 import ContextMenu, { MenuItem } from './ContextMenu';
@@ -59,7 +59,6 @@ function cellValue(t: Track, key: ColKey): string {
 interface Props {
   tracks: Track[];
   currentId: number | null;
-  paused: boolean;
   selected: Set<number>;
   onSelectedChange: (sel: Set<number>) => void;
   onPlay: (id: number) => void;
@@ -74,10 +73,9 @@ interface Props {
   rowMenuItems: (ids: number[]) => MenuItem[];
 }
 
-export default function TrackTable({
+function TrackTable({
   tracks,
   currentId,
-  paused,
   selected,
   onSelectedChange,
   onPlay,
@@ -166,8 +164,11 @@ export default function TrackTable({
 
   function onKeyDown(e: React.KeyboardEvent) {
     if (e.key === 'Delete' && selected.size > 0) {
-      const del = rowMenuItems([...selected]).find((i) => i.danger && !i.disabled);
-      del?.onClick?.();
+      const dangers = rowMenuItems([...selected]).filter((i) => i.danger && !i.disabled);
+      // Shift+Supr = eliminar de la biblioteca (ultimo danger); Supr = accion
+      // por defecto del contexto (primero: quitar de playlist, o eliminar).
+      const item = e.shiftKey ? dangers[dangers.length - 1] : dangers[0];
+      item?.onClick?.();
     }
     if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
       e.preventDefault();
@@ -230,7 +231,7 @@ export default function TrackTable({
               <td className="col-cover">
                 <div className="row-cover">
                   <Cover trackId={t.id} />
-                  {t.id === currentId && !paused ? (
+                  {t.id === currentId ? (
                     <span className="eq" aria-label="Sonando">
                       <i /><i /><i />
                     </span>
@@ -294,3 +295,5 @@ export default function TrackTable({
     </div>
   );
 }
+
+export default memo(TrackTable);

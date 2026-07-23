@@ -22,6 +22,7 @@ walkdir = "2"
 anyhow = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp"] }
 base64 = "0.22"
+trash = "5.2.6"
 
 # Reproduccion desktop (symphonia decodifica FLAC/MP3/WAV/AAC/etc).
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

@@ -6,6 +6,7 @@ mod player;
 use player::Player;
 use rusqlite::Connection;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{Manager, State};
 
@@ -13,12 +14,14 @@ pub struct AppState {
     db: Mutex<Connection>,
     player: Player,
     covers: Mutex<HashMap<i64, Option<String>>>,
+    /// Carpeta gestionada (<Música>/Sway): todo lo importado se copia acá.
+    music_dir: PathBuf,
 }
 
 #[tauri::command]
 fn import_folder(state: State<AppState>, folder: String) -> Result<usize, String> {
     let conn = state.db.lock().unwrap();
-    import::import_folder(&conn, &folder).map_err(|e| e.to_string())
+    import::import_folder(&conn, &state.music_dir, &folder).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -30,13 +33,14 @@ fn list_tracks(state: State<AppState>) -> Result<Vec<db::Track>, String> {
 #[tauri::command]
 fn import_files(state: State<AppState>, paths: Vec<String>) -> Result<Vec<i64>, String> {
     let conn = state.db.lock().unwrap();
-    import::import_paths(&conn, &paths).map_err(|e| e.to_string())
+    import::import_paths(&conn, &state.music_dir, &paths).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn delete_tracks(state: State<AppState>, ids: Vec<i64>) -> Result<(), String> {
+    let music = state.music_dir.clone();
     let mut conn = state.db.lock().unwrap();
-    db::delete_tracks(&mut conn, &ids).map_err(|e| e.to_string())
+    db::delete_tracks(&mut conn, &music, &ids).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -211,10 +215,19 @@ pub fn run() {
                 .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
                 .unwrap_or(-1);
             eprintln!("[db] tracks al iniciar: {n}");
+            // Carpeta gestionada: <Música del usuario>/Sway (fallback: appdata).
+            let music_dir = app
+                .path()
+                .audio_dir()
+                .unwrap_or_else(|_| dir.clone())
+                .join("Sway");
+            std::fs::create_dir_all(&music_dir).ok();
+            eprintln!("[lib] carpeta gestionada: {}", music_dir.display());
             app.manage(AppState {
                 db: Mutex::new(conn),
                 player: Player::new(),
                 covers: Mutex::new(HashMap::new()),
+                music_dir,
             });
             Ok(())
         })
