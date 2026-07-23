@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Spike FLAC Android (Media3)</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; padding: 20px; background: #111; color: #eee; }
+      h1 { font-size: 17px; }
+      button { font-size: 17px; padding: 12px 16px; margin: 5px 0; width: 100%; border: 0; border-radius: 10px; background: #2b6; color: #000; font-weight: 700; }
+      button.sec { background: #37c; color: #fff; }
+      #pos { font-family: monospace; font-size: 15px; margin: 10px 0; color: #8bf; }
+      #log { background: #000; border: 1px solid #333; border-radius: 8px; padding: 10px; font-family: monospace; font-size: 12px; white-space: pre-wrap; min-height: 200px; margin-top: 10px; }
+      .ok { color: #4d6; } .err { color: #f66; } .info { color: #8bf; }
+    </style>
+  </head>
+  <body>
+    <h1>Spike FLAC Android — Media3 nativo</h1>
+    <button id="init">1) Initialize + cargar FLAC</button>
+    <button id="play">2) ▶ Play</button>
+    <button id="seek" class="sec">3) ⏩ Seek a 1:30 (90s)</button>
+    <button id="pause" class="sec">4) ⏸ Pause</button>
+    <div id="pos">pos: --:-- / --:--</div>
+    <div id="log"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

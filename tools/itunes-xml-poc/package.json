@@ -1,0 +1,16 @@
+{
+  "name": "itunes-xml-poc",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Fase 0 PoC: genera un iTunes Music Library.xml desde una carpeta de audio, para validar import en Rekordbox/Serato.",
+  "bin": {
+    "itunes-xml-poc": "generate.mjs"
+  },
+  "scripts": {
+    "start": "node generate.mjs"
+  },
+  "dependencies": {
+    "music-metadata": "^10.0.0"
+  }
+}

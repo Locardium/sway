@@ -1,0 +1,26 @@
+{
+  "name": "spike-android-audio",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "description": "Fase 0.5 spike: probar reproduccion de FLAC en Android via Tauri (webview <audio>).",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "tauri-plugin-native-audio-api": "^1.0.5"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "vite": "^6"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

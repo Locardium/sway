@@ -1,0 +1,51 @@
+# === Dependencias ===
+**/node_modules/
+
+# === Builds frontend ===
+**/dist/
+**/dist-ssr/
+**/.vite/
+
+# === Rust ===
+**/target/
+
+# === Tauri generado (regenerable con `tauri android init`) ===
+**/gen/
+
+# === Android / Gradle ===
+**/.gradle/
+**/build/
+*.apk
+*.aab
+*.keystore
+*.jks
+local.properties
+
+# === Media de muestra (musica con copyright — NO commitear) ===
+spike-android-audio/public/*.flac
+spike-android-audio/public/*.mp3
+spike-android-audio/public/*.wav
+
+# === Bases de datos locales / datos de usuario ===
+*.sqlite
+*.sqlite3
+*.db
+
+# === Salidas generadas del PoC (contienen la libreria del usuario) ===
+tools/itunes-xml-poc/*.xml
+
+# === Secretos / entorno ===
+.env
+.env.*
+!.env.example
+
+# === Logs / temporales ===
+*.log
+*.tmp
+
+# === OS / editor ===
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
