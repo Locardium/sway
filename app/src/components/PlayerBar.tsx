@@ -119,7 +119,6 @@ export default function PlayerBar({
         <button className="ctl side stop" onClick={onStop} title="Stop">
           <Square size={13} fill="currentColor" />
         </button>
-        {/* Volumen: icono siempre visible; el slider se despliega al hover. */}
         <div className="vol">
           <button
             className="ctl side"
@@ -128,17 +127,16 @@ export default function PlayerBar({
           >
             <VolIcon v={volume} />
           </button>
-          <div className="vol-slider-wrap">
-            <input
-              type="range"
-              min={0}
-              max={100}
-              value={Math.round(volume * 100)}
-              onChange={(e) => onVolume(Number(e.target.value) / 100)}
-              style={{ ['--vol' as string]: `${Math.round(volume * 100)}%` }}
-              aria-label="Volume"
-            />
-          </div>
+          <input
+            className="range vol-range"
+            type="range"
+            min={0}
+            max={100}
+            value={Math.round(volume * 100)}
+            onChange={(e) => onVolume(Number(e.target.value) / 100)}
+            style={{ ['--fill' as string]: `${Math.round(volume * 100)}%` }}
+            aria-label="Volume"
+          />
         </div>
       </div>
     </footer>

@@ -5,9 +5,10 @@ interface ModalProps {
   title: string;
   onClose: () => void;
   children: ReactNode;
+  wide?: boolean;
 }
 
-export function Modal({ title, onClose, children }: ModalProps) {
+export function Modal({ title, onClose, children, wide }: ModalProps) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -18,7 +19,7 @@ export function Modal({ title, onClose, children }: ModalProps) {
 
   return (
     <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal" role="dialog" aria-label={title}>
+      <div className={'modal' + (wide ? ' wide' : '')} role="dialog" aria-label={title}>
         <div className="modal-head">
           <h3>{title}</h3>
           <button className="mini" onClick={onClose} aria-label="Close"><X size={15} /></button>

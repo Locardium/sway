@@ -40,7 +40,7 @@ export default function Settings({ trackCount, volume, onClose }: Props) {
   ];
 
   return (
-    <Modal title="Settings" onClose={onClose}>
+    <Modal title="Settings" onClose={onClose} wide>
       <div className="settings">
         <section>
           <h4>Library</h4>
@@ -78,7 +78,8 @@ export default function Settings({ trackCount, volume, onClose }: Props) {
               max={12}
               value={crossfade}
               onChange={(e) => setCrossfade(Number(e.target.value))}
-              className="set-slider"
+              className="range set-slider"
+              style={{ ['--fill' as string]: `${(crossfade / 12) * 100}%` }}
             />
           </div>
           <div className="set-row">
