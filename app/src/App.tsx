@@ -142,7 +142,7 @@ export default function App() {
     if (!('__TAURI_INTERNALS__' in window)) return;
     const un = listen<[number, number]>('import-progress', (e) => {
       const [done, total] = e.payload;
-      setImportProgress(done >= total ? null : { done, total });
+      setImportProgress({ done, total });
     });
     return () => {
       un.then((f) => f());
@@ -330,7 +330,8 @@ export default function App() {
     } catch (e) {
       setStatus('Error import: ' + e);
     } finally {
-      setImportProgress(null);
+      // Mantiene el 100% visible un momento antes de ocultar el toast.
+      setTimeout(() => setImportProgress(null), 1000);
     }
   };
 

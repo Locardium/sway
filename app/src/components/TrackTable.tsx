@@ -178,11 +178,12 @@ function TrackTable({
 
   return (
     <div className="table-wrap" tabIndex={0} onKeyDown={onKeyDown}>
-      <table className="tracks" style={{ width: COVER_COL_W + visibleCols.reduce((a, c) => a + c.width, 0) }}>
+      <table className="tracks">
         <colgroup>
           <col style={{ width: COVER_COL_W }} />
-          {visibleCols.map((c) => (
-            <col key={c.key} style={{ width: c.width }} />
+          {visibleCols.map((c, i) => (
+            // Última columna sin ancho fijo: absorbe el espacio y evita overflow.
+            <col key={c.key} style={i === visibleCols.length - 1 ? undefined : { width: c.width }} />
           ))}
         </colgroup>
         <thead>
@@ -249,14 +250,18 @@ function TrackTable({
                   )}
                 </div>
               </td>
-              {visibleCols.map((c) => (
-                <td
-                  key={c.key}
-                  className={[c.numeric ? 'num' : '', c.key === 'title' ? 't-title' : ''].join(' ')}
-                >
-                  {cellValue(t, c.key)}
-                </td>
-              ))}
+              {visibleCols.map((c) => {
+                const val = cellValue(t, c.key);
+                return (
+                  <td
+                    key={c.key}
+                    className={[c.numeric ? 'num' : '', c.key === 'title' ? 't-title' : ''].join(' ')}
+                    title={val || undefined}
+                  >
+                    {val}
+                  </td>
+                );
+              })}
             </tr>
           ))}
         </tbody>
