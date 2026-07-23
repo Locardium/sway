@@ -238,6 +238,14 @@ pub fn move_playlist(
 // Tracks dentro de una playlist
 // ---------------------------------------------------------------------------
 
+/// Ids de las playlists que contienen el track.
+pub fn track_playlists(conn: &Connection, track_id: i64) -> Result<Vec<i64>> {
+    let mut stmt =
+        conn.prepare("SELECT playlist_id FROM playlist_tracks WHERE track_id = ?1")?;
+    let rows = stmt.query_map([track_id], |r| r.get(0))?;
+    rows.collect()
+}
+
 pub fn playlist_tracks(conn: &Connection, playlist_id: i64) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
         "SELECT t.id, t.path, t.title, t.artist, t.album, t.genre, t.duration_ms, t.bpm

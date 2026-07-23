@@ -111,6 +111,11 @@ fn run_audio(rx: Receiver<Cmd>, pos_ms: Arc<AtomicU64>) {
             }
             Ok(Cmd::Seek(secs)) => {
                 let _ = sink.try_seek(Duration::from_secs(secs));
+                // Refleja la posicion nueva de inmediato y salta el store de
+                // abajo (get_pos puede tardar en reflejar el seek => barra
+                // saltando al valor viejo).
+                pos_ms.store(secs * 1000, Ordering::Relaxed);
+                continue;
             }
             Ok(Cmd::Volume(v)) => {
                 vol = v;

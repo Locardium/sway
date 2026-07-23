@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Settings } from 'lucide-react';
+import { Menu, Settings } from 'lucide-react';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
+import { listen } from '@tauri-apps/api/event';
 import {
   Track,
   PlaylistNode,
@@ -8,6 +9,7 @@ import {
   importFiles,
   listTracks,
   deleteTracks,
+  trackPlaylists,
   listPlaylists,
   createPlaylist,
   renamePlaylist,
@@ -39,6 +41,7 @@ type ModalState =
   | { type: 'confirm-node'; node: PlaylistNode }
   | { type: 'confirm-tracks'; ids: number[] }
   | { type: 'pick-playlist'; ids: number[] }
+  | { type: 'track-playlists'; id: number; playlistIds: number[] }
   | { type: 'settings' }
   | null;
 
@@ -63,6 +66,8 @@ export default function App() {
   const [modal, setModal] = useState<ModalState>(null);
   const [infoOpen, setInfoOpen] = useState(false);
   const [infoId, setInfoId] = useState<number | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false); // drawer en mobile
+  const [importProgress, setImportProgress] = useState<{ done: number; total: number } | null>(null);
 
   // Hints de drop (drag interno + drag de archivos del OS).
   const [nodeDropHint, setNodeDropHint] = useState<NodeDropHint>(null);
@@ -80,10 +85,12 @@ export default function App() {
     const v = Number(localStorage.getItem(VOL_STORAGE));
     return isNaN(v) || v < 0 || v > 1 ? 1 : v;
   });
-  const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('');
   const queueRef = useRef<number[]>([]);
   const volPending = useRef<number | null>(null);
+  // Tras un seek, ignora el poll de posicion un rato (evita que la barra
+  // salte al valor viejo antes de que el backend refleje la nueva posicion).
+  const seekGuard = useRef(0);
 
   const refreshLibrary = useCallback(async () => {
     setLibrary(await listTracks());
@@ -121,7 +128,7 @@ export default function App() {
   // Poll de posicion.
   useEffect(() => {
     const t = setInterval(async () => {
-      if (currentId != null && !paused) {
+      if (currentId != null && !paused && Date.now() >= seekGuard.current) {
         try {
           setPosMs((await playbackPosition()) * 1000);
         } catch {}
@@ -130,7 +137,22 @@ export default function App() {
     return () => clearInterval(t);
   }, [currentId, paused]);
 
-  const baseTracks = selection.type === 'library' ? library : plTracks;
+  // Progreso de importacion (copia a la carpeta gestionada).
+  useEffect(() => {
+    if (!('__TAURI_INTERNALS__' in window)) return;
+    const un = listen<[number, number]>('import-progress', (e) => {
+      const [done, total] = e.payload;
+      setImportProgress(done >= total ? null : { done, total });
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
+
+  const searching = search.trim().length > 0;
+  // Con búsqueda activa se busca SIEMPRE en toda la biblioteca, sin importar
+  // la playlist seleccionada.
+  const baseTracks = searching ? library : selection.type === 'library' ? library : plTracks;
   const visibleTracks = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return baseTracks;
@@ -248,8 +270,9 @@ export default function App() {
   }
 
   async function onSeek(secs: number) {
-    await seekTo(secs);
+    seekGuard.current = Date.now() + 800;
     setPosMs(secs * 1000);
+    await seekTo(secs);
   }
 
   // Volumen: UI responde al instante, el backend se actualiza con throttle.
@@ -276,7 +299,6 @@ export default function App() {
     const el = document.elementFromPoint(x, y)?.closest<HTMLElement>('[data-dnd="node"]');
     const nodeId = el ? Number(el.dataset.nodeId) : null;
     const nodeKind = el?.dataset.nodeKind ?? null;
-    setBusy(true);
     setStatus('Importando…');
     try {
       const ids = await importFiles(paths);
@@ -308,7 +330,7 @@ export default function App() {
     } catch (e) {
       setStatus('Error import: ' + e);
     } finally {
-      setBusy(false);
+      setImportProgress(null);
     }
   };
 
@@ -476,9 +498,18 @@ export default function App() {
 
   function rowMenuItems(ids: number[]): MenuItem[] {
     const n = ids.length;
+    const viewIsPlaylist = selection.type === 'playlist' && !searching;
     const items: MenuItem[] = [
       { label: 'Reproducir', disabled: n !== 1, onClick: () => onPlay(ids[0]) },
       { label: 'Agregar a playlist…', onClick: () => setModal({ type: 'pick-playlist', ids }) },
+      {
+        label: 'Ver en qué playlists está',
+        disabled: n !== 1,
+        onClick: async () => {
+          const playlistIds = await trackPlaylists(ids[0]);
+          setModal({ type: 'track-playlists', id: ids[0], playlistIds });
+        },
+      },
       {
         label: 'Ver en el Explorador',
         disabled: n !== 1,
@@ -486,7 +517,7 @@ export default function App() {
       },
       { separator: true, label: '' },
     ];
-    if (selection.type === 'playlist') {
+    if (viewIsPlaylist) {
       items.push({
         label: n === 1 ? 'Quitar de la playlist' : `Quitar ${n} de la playlist`,
         danger: true,
@@ -531,11 +562,20 @@ export default function App() {
   return (
     <div className="app">
       <header>
-        <h1>Sway</h1>
+        <div className="header-left">
+          <button
+            className="mini burger"
+            title="Menú"
+            onClick={() => setSidebarOpen((o) => !o)}
+          >
+            <Menu size={18} />
+          </button>
+          <h1>Sway</h1>
+        </div>
         <div className="search">
           <input
             type="search"
-            placeholder="Buscar título, artista, álbum…"
+            placeholder="Buscar en la biblioteca…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -551,13 +591,17 @@ export default function App() {
         </div>
       </header>
 
-      <div className="body">
+      <div className={'body' + (sidebarOpen ? ' sidebar-open' : '')}>
+        {sidebarOpen && <div className="sidebar-scrim" onClick={() => setSidebarOpen(false)} />}
         <Sidebar
           nodes={nodes}
           selection={selection}
           dropHint={nodeDropHint}
           rootHover={rootHover}
-          onSelect={setSelection}
+          onSelect={(sel) => {
+            setSelection(sel);
+            setSidebarOpen(false);
+          }}
           onCreate={(kind, parentId) => setModal({ type: 'name', kind, parentId })}
           onRename={onRename}
           onDelete={(id) => {
@@ -570,12 +614,19 @@ export default function App() {
 
         <main>
           <div className="view-head">
-            <h2>{selection.type === 'library' ? 'Biblioteca' : selectedNode?.name ?? 'Playlist'}</h2>
+            <h2>
+              {searching
+                ? 'Biblioteca'
+                : selection.type === 'library'
+                  ? 'Biblioteca'
+                  : selectedNode?.name ?? 'Playlist'}
+            </h2>
             <span className="view-meta">
               {visibleTracks.length} tracks
+              {searching && ' · resultados en la biblioteca'}
               {canReorder && ' · arrastrá para ordenar'}
             </span>
-            <span className="status">{busy ? 'Importando…' : status}</span>
+            <span className="status">{status}</span>
           </div>
           {visibleTracks.length > 0 ? (
             <TrackTable
@@ -685,6 +736,31 @@ export default function App() {
           )}
         </Modal>
       )}
+      {modal?.type === 'track-playlists' && (
+        <Modal title="En qué playlists está" onClose={() => setModal(null)}>
+          {modal.playlistIds.length > 0 ? (
+            <div className="pick-list">
+              {modal.playlistIds.map((pid) => {
+                const label = playlistOptions.find((p) => p.id === pid)?.label ?? `#${pid}`;
+                return (
+                  <button
+                    key={pid}
+                    onClick={() => {
+                      setSelection({ type: 'playlist', id: pid });
+                      setSearch('');
+                      setModal(null);
+                    }}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="modal-msg">No está en ninguna playlist.</p>
+          )}
+        </Modal>
+      )}
       {modal?.type === 'settings' && (
         <Modal title="Configuración" onClose={() => setModal(null)}>
           <dl className="settings-list">
@@ -692,6 +768,8 @@ export default function App() {
             <dd>Sway 0.1.0</dd>
             <dt>Biblioteca</dt>
             <dd>{library.length} tracks</dd>
+            <dt>Carpeta gestionada</dt>
+            <dd>&lt;Música&gt;/Sway</dd>
             <dt>Volumen</dt>
             <dd>{Math.round(volume * 100)}%</dd>
           </dl>
@@ -699,6 +777,23 @@ export default function App() {
             Export a Rekordbox/Serato y más opciones llegan en la próxima fase.
           </p>
         </Modal>
+      )}
+
+      {importProgress && (
+        <div className="import-toast" role="status">
+          <div className="import-toast-head">
+            <span>Copiando a la biblioteca…</span>
+            <span className="import-toast-count">
+              {importProgress.done} / {importProgress.total}
+            </span>
+          </div>
+          <div className="import-bar">
+            <div
+              className="import-bar-fill"
+              style={{ width: `${(importProgress.done / Math.max(1, importProgress.total)) * 100}%` }}
+            />
+          </div>
+        </div>
       )}
     </div>
   );

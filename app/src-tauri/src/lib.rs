@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::{Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 pub struct AppState {
     db: Mutex<Connection>,
@@ -19,9 +19,12 @@ pub struct AppState {
 }
 
 #[tauri::command]
-fn import_folder(state: State<AppState>, folder: String) -> Result<usize, String> {
+fn import_folder(app: AppHandle, state: State<AppState>, folder: String) -> Result<usize, String> {
     let conn = state.db.lock().unwrap();
-    import::import_folder(&conn, &state.music_dir, &folder).map_err(|e| e.to_string())
+    import::import_folder(&conn, &state.music_dir, &folder, |done, total| {
+        let _ = app.emit("import-progress", (done, total));
+    })
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -31,9 +34,22 @@ fn list_tracks(state: State<AppState>) -> Result<Vec<db::Track>, String> {
 }
 
 #[tauri::command]
-fn import_files(state: State<AppState>, paths: Vec<String>) -> Result<Vec<i64>, String> {
+fn import_files(
+    app: AppHandle,
+    state: State<AppState>,
+    paths: Vec<String>,
+) -> Result<Vec<i64>, String> {
     let conn = state.db.lock().unwrap();
-    import::import_paths(&conn, &state.music_dir, &paths).map_err(|e| e.to_string())
+    import::import_paths(&conn, &state.music_dir, &paths, |done, total| {
+        let _ = app.emit("import-progress", (done, total));
+    })
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn track_playlists(state: State<AppState>, id: i64) -> Result<Vec<i64>, String> {
+    let conn = state.db.lock().unwrap();
+    db::track_playlists(&conn, id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -234,6 +250,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             import_folder,
             import_files,
+            track_playlists,
             list_tracks,
             delete_tracks,
             set_volume,

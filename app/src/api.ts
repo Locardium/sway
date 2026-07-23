@@ -49,6 +49,8 @@ export const importFiles = (paths: string[]) => invoke<number[]>('import_files',
 export const listTracks = () => invoke<Track[]>('list_tracks');
 // Borra de la biblioteca (no toca archivos en disco).
 export const deleteTracks = (ids: number[]) => invoke<void>('delete_tracks', { ids });
+// Ids de las playlists que contienen el track.
+export const trackPlaylists = (id: number) => invoke<number[]>('track_playlists', { id });
 
 // Playback (rodio/symphonia en Rust).
 export const playTrack = (id: number) => invoke<void>('play_track', { id });

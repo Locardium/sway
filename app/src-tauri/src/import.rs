@@ -127,34 +127,57 @@ fn import_one(conn: &Connection, managed: &Path, src: &Path) -> Result<i64> {
     Ok(id)
 }
 
-/// Escanea `folder` recursivo, copia a la carpeta gestionada e inserta los
-/// nuevos. Devuelve cuantos se insertaron.
-pub fn import_folder(conn: &Connection, managed: &Path, folder: &str) -> Result<usize> {
-    let before: i64 = conn.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))?;
-    for entry in WalkDir::new(folder).into_iter().filter_map(|e| e.ok()) {
-        if entry.file_type().is_file() && is_audio(entry.path()) {
-            import_one(conn, managed, entry.path())?;
+/// Junta todos los archivos de audio bajo `roots` (expande directorios).
+fn collect_audio(roots: &[&Path]) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for root in roots {
+        if root.is_dir() {
+            for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+                if entry.file_type().is_file() && is_audio(entry.path()) {
+                    files.push(entry.path().to_path_buf());
+                }
+            }
+        } else if root.is_file() && is_audio(root) {
+            files.push(root.to_path_buf());
         }
+    }
+    files
+}
+
+/// Escanea `folder` recursivo, copia a la carpeta gestionada e inserta los
+/// nuevos. `progress(done, total)` se llama por cada archivo procesado.
+pub fn import_folder(
+    conn: &Connection,
+    managed: &Path,
+    folder: &str,
+    progress: impl Fn(usize, usize),
+) -> Result<usize> {
+    let before: i64 = conn.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))?;
+    let files = collect_audio(&[Path::new(folder)]);
+    let total = files.len();
+    for (i, f) in files.iter().enumerate() {
+        import_one(conn, managed, f)?;
+        progress(i + 1, total);
     }
     let after: i64 = conn.query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))?;
     Ok((after - before) as usize)
 }
 
 /// Importa una mezcla de archivos y carpetas (drop desde el OS). Devuelve los
-/// ids de todos los tracks de audio involucrados (nuevos o ya existentes).
-pub fn import_paths(conn: &Connection, managed: &Path, paths: &[String]) -> Result<Vec<i64>> {
-    let mut ids = Vec::new();
-    for p in paths {
-        let path = Path::new(p);
-        if path.is_dir() {
-            for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
-                if entry.file_type().is_file() && is_audio(entry.path()) {
-                    ids.push(import_one(conn, managed, entry.path())?);
-                }
-            }
-        } else if path.is_file() && is_audio(path) {
-            ids.push(import_one(conn, managed, path)?);
-        }
+/// ids de todos los tracks involucrados. `progress(done, total)` por archivo.
+pub fn import_paths(
+    conn: &Connection,
+    managed: &Path,
+    paths: &[String],
+    progress: impl Fn(usize, usize),
+) -> Result<Vec<i64>> {
+    let roots: Vec<&Path> = paths.iter().map(Path::new).collect();
+    let files = collect_audio(&roots);
+    let total = files.len();
+    let mut ids = Vec::with_capacity(total);
+    for (i, f) in files.iter().enumerate() {
+        ids.push(import_one(conn, managed, f)?);
+        progress(i + 1, total);
     }
     Ok(ids)
 }
