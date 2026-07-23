@@ -58,3 +58,8 @@ export const stopPlayback = () => invoke<void>('stop_playback');
 export const seekTo = (secs: number) => invoke<void>('seek_to', { secs });
 export const playbackPosition = () => invoke<number>('playback_position');
 export const setVolume = (volume: number) => invoke<void>('set_volume', { volume });
+
+// Caratula embebida como data-URL (null si el archivo no tiene).
+export const coverThumb = (id: number) => invoke<string | null>('cover_thumb', { id });
+// Abre el explorador del OS mostrando el archivo.
+export const revealTrack = (id: number) => invoke<void>('reveal_track', { id });

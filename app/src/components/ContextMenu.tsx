@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Check } from 'lucide-react';
 
 export interface MenuItem {
   label: string;
@@ -68,7 +69,7 @@ export default function ContextMenu({ x, y, items, onClose, keepOpen }: Props) {
             }}
           >
             {it.checked !== undefined && (
-              <span className="ctx-check">{it.checked ? '✓' : ''}</span>
+              <span className="ctx-check">{it.checked ? <Check size={13} /> : null}</span>
             )}
             {it.label}
           </button>

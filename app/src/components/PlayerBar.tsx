@@ -1,11 +1,29 @@
 import { useRef } from 'react';
+import {
+  Info,
+  Pause,
+  Play,
+  Repeat,
+  Repeat1,
+  Shuffle,
+  SkipBack,
+  SkipForward,
+  Square,
+  Volume2,
+  VolumeX,
+} from 'lucide-react';
 import { Track } from '../api';
+import Cover from './Cover';
+
+export type RepeatMode = 'off' | 'all' | 'one';
 
 interface Props {
   track: Track;
   paused: boolean;
   posMs: number;
   volume: number;
+  shuffle: boolean;
+  repeat: RepeatMode;
   infoOpen: boolean;
   onToggle: () => void;
   onStop: () => void;
@@ -13,6 +31,8 @@ interface Props {
   onNext: () => void;
   onSeek: (secs: number) => void;
   onVolume: (v: number) => void;
+  onToggleShuffle: () => void;
+  onCycleRepeat: () => void;
   onToggleInfo: () => void;
 }
 
@@ -27,6 +47,8 @@ export default function PlayerBar({
   paused,
   posMs,
   volume,
+  shuffle,
+  repeat,
   infoOpen,
   onToggle,
   onStop,
@@ -34,6 +56,8 @@ export default function PlayerBar({
   onNext,
   onSeek,
   onVolume,
+  onToggleShuffle,
+  onCycleRepeat,
   onToggleInfo,
 }: Props) {
   const barRef = useRef<HTMLDivElement>(null);
@@ -48,7 +72,7 @@ export default function PlayerBar({
   return (
     <footer className="player">
       <div className="np">
-        <div className="np-art" aria-hidden="true">♪</div>
+        <Cover trackId={track.id} className="np-art" eager />
         <div className="np-text">
           <strong>{track.title}</strong>
           <span className="np-artist">{track.artist}</span>
@@ -56,12 +80,29 @@ export default function PlayerBar({
       </div>
       <div className="player-center">
         <div className="controls">
-          <button className="ctl" onClick={onPrev} title="Anterior">⏮</button>
-          <button className="ctl main" onClick={onToggle} title={paused ? 'Reproducir' : 'Pausa'}>
-            {paused ? '▶' : '⏸'}
+          <button
+            className={'ctl side' + (shuffle ? ' on' : '')}
+            onClick={onToggleShuffle}
+            title={shuffle ? 'Shuffle activado' : 'Shuffle'}
+          >
+            <Shuffle size={15} />
           </button>
-          <button className="ctl" onClick={onNext} title="Siguiente">⏭</button>
-          <button className="ctl" onClick={onStop} title="Detener">⏹</button>
+          <button className="ctl" onClick={onPrev} title="Anterior">
+            <SkipBack size={17} fill="currentColor" />
+          </button>
+          <button className="ctl main" onClick={onToggle} title={paused ? 'Reproducir' : 'Pausa'}>
+            {paused ? <Play size={17} fill="currentColor" /> : <Pause size={17} fill="currentColor" />}
+          </button>
+          <button className="ctl" onClick={onNext} title="Siguiente">
+            <SkipForward size={17} fill="currentColor" />
+          </button>
+          <button
+            className={'ctl side' + (repeat !== 'off' ? ' on' : '')}
+            onClick={onCycleRepeat}
+            title={repeat === 'off' ? 'Repetir' : repeat === 'all' ? 'Repetir todo' : 'Repetir uno'}
+          >
+            {repeat === 'one' ? <Repeat1 size={15} /> : <Repeat size={15} />}
+          </button>
         </div>
         <div className="seek">
           <span className="time">{fmt(posMs)}</span>
@@ -73,24 +114,33 @@ export default function PlayerBar({
         </div>
       </div>
       <div className="player-right">
-        {track.bpm != null && <span className="bpm-chip">{track.bpm} BPM</span>}
+        <button className="ctl stop" onClick={onStop} title="Detener">
+          <Square size={13} fill="currentColor" />
+        </button>
         <div className="vol" title={`Volumen ${Math.round(volume * 100)}%`}>
-          <span className="vol-icon" aria-hidden="true">{volume === 0 ? '🔇' : '🔊'}</span>
+          <button
+            className="ctl side"
+            onClick={() => onVolume(volume === 0 ? 1 : 0)}
+            title={volume === 0 ? 'Activar sonido' : 'Silenciar'}
+          >
+            {volume === 0 ? <VolumeX size={15} /> : <Volume2 size={15} />}
+          </button>
           <input
             type="range"
             min={0}
             max={100}
             value={Math.round(volume * 100)}
             onChange={(e) => onVolume(Number(e.target.value) / 100)}
+            style={{ ['--vol' as string]: `${Math.round(volume * 100)}%` }}
             aria-label="Volumen"
           />
         </div>
         <button
-          className={'ctl info' + (infoOpen ? ' on' : '')}
+          className={'ctl side' + (infoOpen ? ' on' : '')}
           onClick={onToggleInfo}
           title="Info del track"
         >
-          ⓘ
+          <Info size={15} />
         </button>
       </div>
     </footer>

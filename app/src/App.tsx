@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { open } from '@tauri-apps/plugin-dialog';
+import { Settings } from 'lucide-react';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import {
   Track,
   PlaylistNode,
   NodeKind,
-  importFolder,
   importFiles,
   listTracks,
   deleteTracks,
@@ -25,10 +24,12 @@ import {
   playbackPosition,
   seekTo,
   setVolume as setVolumeBackend,
+  revealTrack,
 } from './api';
-import Sidebar, { Selection } from './components/Sidebar';
+import { beginDrag, didDrag, DragPayload, RawTarget } from './dnd';
+import Sidebar, { Selection, NodeDropHint } from './components/Sidebar';
 import TrackTable from './components/TrackTable';
-import PlayerBar from './components/PlayerBar';
+import PlayerBar, { RepeatMode } from './components/PlayerBar';
 import RightPanel from './components/RightPanel';
 import { Modal, NamePrompt, Confirm } from './components/Modal';
 import { MenuItem } from './components/ContextMenu';
@@ -43,6 +44,15 @@ type ModalState =
 
 const VOL_STORAGE = 'sway.volume';
 
+function shuffled<T>(arr: T[]): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
 export default function App() {
   const [library, setLibrary] = useState<Track[]>([]);
   const [nodes, setNodes] = useState<PlaylistNode[]>([]);
@@ -52,19 +62,28 @@ export default function App() {
   const [search, setSearch] = useState('');
   const [modal, setModal] = useState<ModalState>(null);
   const [infoOpen, setInfoOpen] = useState(false);
-  const [osDropNodeId, setOsDropNodeId] = useState<number | null>(null);
+  const [infoId, setInfoId] = useState<number | null>(null);
+
+  // Hints de drop (drag interno + drag de archivos del OS).
+  const [nodeDropHint, setNodeDropHint] = useState<NodeDropHint>(null);
+  const [rootHover, setRootHover] = useState(false);
+  const [dropInsertIndex, setDropInsertIndex] = useState<number | null>(null);
 
   const [currentId, setCurrentId] = useState<number | null>(null);
   const [paused, setPaused] = useState(false);
   const [posMs, setPosMs] = useState(0);
+  const [shuffle, setShuffle] = useState(() => localStorage.getItem('sway.shuffle') === '1');
+  const [repeat, setRepeat] = useState<RepeatMode>(
+    () => (localStorage.getItem('sway.repeat') as RepeatMode) || 'off',
+  );
   const [volume, setVol] = useState(() => {
     const v = Number(localStorage.getItem(VOL_STORAGE));
-    return isNaN(v) || v <= 0 || v > 1 ? 1 : v;
+    return isNaN(v) || v < 0 || v > 1 ? 1 : v;
   });
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('');
-  // Cola de reproduccion: orden visible al momento de dar play.
   const queueRef = useRef<number[]>([]);
+  const volPending = useRef<number | null>(null);
 
   const refreshLibrary = useCallback(async () => {
     setLibrary(await listTracks());
@@ -82,7 +101,7 @@ export default function App() {
     const attempt = async () => {
       try {
         await Promise.all([refreshLibrary(), refreshPlaylists()]);
-        if (volume !== 1) await setVolumeBackend(volume);
+        await setVolumeBackend(volume);
       } catch {
         if (tries++ < 5) setTimeout(attempt, 300);
       }
@@ -91,7 +110,6 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Al cambiar seleccion, carga tracks de la playlist y limpia seleccion de filas.
   useEffect(() => {
     setSelected(new Set());
     setSearch('');
@@ -121,29 +139,54 @@ export default function App() {
     );
   }, [baseTracks, search]);
 
-  const current = useMemo(
-    () => library.find((t) => t.id === currentId) ?? plTracks.find((t) => t.id === currentId) ?? null,
-    [library, plTracks, currentId],
+  const findTrack = useCallback(
+    (id: number | null) =>
+      id == null
+        ? null
+        : library.find((t) => t.id === id) ?? plTracks.find((t) => t.id === id) ?? null,
+    [library, plTracks],
+  );
+  const current = useMemo(() => findTrack(currentId), [findTrack, currentId]);
+  const infoTrack = useMemo(
+    () => findTrack(infoId) ?? current,
+    [findTrack, infoId, current],
   );
 
   // --- Playback ------------------------------------------------------------
 
+  function buildQueue(ids: number[], firstId: number, useShuffle: boolean): number[] {
+    if (!useShuffle) return ids;
+    return [firstId, ...shuffled(ids.filter((i) => i !== firstId))];
+  }
+
   const onPlay = useCallback(
     async (id: number) => {
-      queueRef.current = visibleTracks.map((t) => t.id);
-      await playTrack(id);
-      setCurrentId(id);
-      setPaused(false);
-      setPosMs(0);
+      try {
+        queueRef.current = buildQueue(visibleTracks.map((t) => t.id), id, shuffle);
+        await playTrack(id);
+        setCurrentId(id);
+        setPaused(false);
+        setPosMs(0);
+      } catch (e) {
+        setStatus('Error al reproducir: ' + e);
+      }
     },
-    [visibleTracks],
+    [visibleTracks, shuffle],
   );
 
   const playOffset = useCallback(
-    async (delta: number) => {
+    async (delta: number, auto = false) => {
       const q = queueRef.current;
       if (currentId == null || q.length === 0) return;
-      const next = q[q.indexOf(currentId) + delta];
+      if (auto && repeat === 'one') {
+        await playTrack(currentId);
+        setPosMs(0);
+        return;
+      }
+      let next = q[q.indexOf(currentId) + delta];
+      if (next == null && repeat === 'all') {
+        next = delta > 0 ? q[0] : q[q.length - 1];
+      }
       if (next == null) {
         await stopPlayback();
         setCurrentId(null);
@@ -155,15 +198,37 @@ export default function App() {
       setPaused(false);
       setPosMs(0);
     },
-    [currentId],
+    [currentId, repeat],
   );
 
   // Auto-advance al terminar el track.
   useEffect(() => {
     if (current && !paused && current.durationMs > 0 && posMs >= current.durationMs - 600) {
-      playOffset(1);
+      playOffset(1, true);
     }
   }, [posMs, current, paused, playOffset]);
+
+  function onToggleShuffle() {
+    setShuffle((s) => {
+      const next = !s;
+      localStorage.setItem('sway.shuffle', next ? '1' : '0');
+      // Rearma la cola manteniendo el track actual primero.
+      if (currentId != null) {
+        queueRef.current = next
+          ? buildQueue(visibleTracks.map((t) => t.id), currentId, true)
+          : visibleTracks.map((t) => t.id);
+      }
+      return next;
+    });
+  }
+
+  function onCycleRepeat() {
+    setRepeat((r) => {
+      const next: RepeatMode = r === 'off' ? 'all' : r === 'all' ? 'one' : 'off';
+      localStorage.setItem('sway.repeat', next);
+      return next;
+    });
+  }
 
   async function onToggle() {
     if (paused) {
@@ -187,27 +252,20 @@ export default function App() {
     setPosMs(secs * 1000);
   }
 
-  async function onVolume(v: number) {
+  // Volumen: UI responde al instante, el backend se actualiza con throttle.
+  function onVolume(v: number) {
     setVol(v);
-    localStorage.setItem(VOL_STORAGE, String(v));
-    await setVolumeBackend(v);
-  }
-
-  // --- Import --------------------------------------------------------------
-
-  async function onImport() {
-    const folder = await open({ directory: true, multiple: false, title: 'Elegí tu carpeta de música' });
-    if (!folder || typeof folder !== 'string') return;
-    setBusy(true);
-    setStatus('Importando…');
-    try {
-      const n = await importFolder(folder);
-      setStatus(`Importados ${n} tracks.`);
-      await refreshLibrary();
-    } catch (e) {
-      setStatus('Error import: ' + e);
-    } finally {
-      setBusy(false);
+    const first = volPending.current == null;
+    volPending.current = v;
+    if (first) {
+      setTimeout(() => {
+        const val = volPending.current;
+        volPending.current = null;
+        if (val != null) {
+          localStorage.setItem(VOL_STORAGE, String(val));
+          setVolumeBackend(val).catch(() => {});
+        }
+      }, 60);
     }
   }
 
@@ -215,8 +273,8 @@ export default function App() {
 
   const osDropRef = useRef<(paths: string[], x: number, y: number) => void>(() => {});
   osDropRef.current = async (paths, x, y) => {
-    const el = document.elementFromPoint(x, y)?.closest<HTMLElement>('[data-drop-node]');
-    const nodeId = el ? Number(el.dataset.dropNode) : null;
+    const el = document.elementFromPoint(x, y)?.closest<HTMLElement>('[data-dnd="node"]');
+    const nodeId = el ? Number(el.dataset.nodeId) : null;
     const nodeKind = el?.dataset.nodeKind ?? null;
     setBusy(true);
     setStatus('Importando…');
@@ -230,7 +288,6 @@ export default function App() {
         const n = await addTracksToPlaylist(nodeId, ids);
         setStatus(`${ids.length} importados, ${n} agregados a la playlist.`);
       } else if (nodeId != null && nodeKind === 'folder') {
-        // Un directorio solo sobre una carpeta: crea playlist con su nombre.
         const isSingleDir = paths.length === 1;
         const base = paths[0].replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? 'Importados';
         if (isSingleDir) {
@@ -260,24 +317,107 @@ export default function App() {
     if (!('__TAURI_INTERNALS__' in window)) return;
     const unlisten = getCurrentWebview().onDragDropEvent((event) => {
       const p = event.payload;
+      const scale = window.devicePixelRatio || 1;
       if (p.type === 'over' || p.type === 'enter') {
-        const scale = window.devicePixelRatio || 1;
         const el = document
           .elementFromPoint(p.position.x / scale, p.position.y / scale)
-          ?.closest<HTMLElement>('[data-drop-node]');
-        setOsDropNodeId(el ? Number(el.dataset.dropNode) : null);
+          ?.closest<HTMLElement>('[data-dnd="node"][data-node-kind]');
+        setNodeDropHint(
+          el ? { nodeId: Number(el.dataset.nodeId), zone: 'into' } : null,
+        );
       } else if (p.type === 'drop') {
-        setOsDropNodeId(null);
-        const scale = window.devicePixelRatio || 1;
+        setNodeDropHint(null);
         osDropRef.current(p.paths, p.position.x / scale, p.position.y / scale);
       } else {
-        setOsDropNodeId(null);
+        setNodeDropHint(null);
       }
     });
     return () => {
       unlisten.then((f) => f());
     };
   }, []);
+
+  // --- Drag interno (tracks y nodos) ---------------------------------------
+
+  function clearDropHints() {
+    setNodeDropHint(null);
+    setRootHover(false);
+    setDropInsertIndex(null);
+  }
+
+  const canReorder = selection.type === 'playlist' && !search.trim();
+
+  function onDragHover(payload: DragPayload, target: RawTarget) {
+    if (payload.kind === 'tracks') {
+      if (target?.type === 'node' && target.nodeKind === 'playlist') {
+        setNodeDropHint({ nodeId: target.id, zone: 'into' });
+        setDropInsertIndex(null);
+      } else if (target?.type === 'insert' && canReorder) {
+        setDropInsertIndex(target.index);
+        setNodeDropHint(null);
+      } else {
+        clearDropHints();
+      }
+      return;
+    }
+    // payload nodo
+    if (target?.type === 'node' && target.id !== payload.id) {
+      setNodeDropHint({ nodeId: target.id, zone: target.zone });
+      setRootHover(false);
+    } else if (target?.type === 'root') {
+      setRootHover(true);
+      setNodeDropHint(null);
+    } else {
+      clearDropHints();
+    }
+  }
+
+  async function onDragDrop(payload: DragPayload, target: RawTarget) {
+    clearDropHints();
+    if (payload.kind === 'tracks') {
+      if (target?.type === 'node' && target.nodeKind === 'playlist') {
+        await onDropTracks(target.id, payload.ids);
+      } else if (target?.type === 'insert' && canReorder) {
+        await onReorder(payload.ids, target.index);
+      }
+      return;
+    }
+    const childCount = (pid: number | null) => nodes.filter((n) => n.parentId === pid).length;
+    if (target?.type === 'node' && target.id !== payload.id) {
+      const tNode = nodes.find((n) => n.id === target.id);
+      if (!tNode) return;
+      if (target.zone === 'into') {
+        await onMoveNode(payload.id, target.id, childCount(target.id));
+      } else {
+        const siblings = nodes
+          .filter((n) => n.parentId === tNode.parentId)
+          .sort((a, b) => a.position - b.position);
+        let idx = siblings.findIndex((s) => s.id === target.id);
+        if (target.zone === 'after') idx += 1;
+        await onMoveNode(payload.id, tNode.parentId, idx);
+      }
+    } else if (target?.type === 'root') {
+      await onMoveNode(payload.id, null, childCount(null));
+    }
+  }
+
+  function onTrackMouseDown(e: React.MouseEvent, ids: number[]) {
+    const label = ids.length === 1 ? findTrack(ids[0])?.title ?? '1 track' : `${ids.length} tracks`;
+    beginDrag(e, { kind: 'tracks', ids, label }, {
+      onHover: onDragHover,
+      onDrop: onDragDrop,
+      onEnd: clearDropHints,
+    });
+  }
+
+  function onNodeMouseDown(e: React.MouseEvent, id: number) {
+    const label = nodes.find((n) => n.id === id)?.name ?? '';
+    beginDrag(e, { kind: 'node', id, label }, {
+      onHover: onDragHover,
+      onDrop: onDragDrop,
+      onEnd: clearDropHints,
+    });
+  }
 
   // --- Organizacion --------------------------------------------------------
 
@@ -334,12 +474,16 @@ export default function App() {
     await Promise.all([refreshLibrary(), refreshPlaylists(), refreshPlaylistTracks()]);
   }
 
-  // Menu contextual de filas: lo arma App porque depende de la vista.
   function rowMenuItems(ids: number[]): MenuItem[] {
     const n = ids.length;
     const items: MenuItem[] = [
       { label: 'Reproducir', disabled: n !== 1, onClick: () => onPlay(ids[0]) },
       { label: 'Agregar a playlist…', onClick: () => setModal({ type: 'pick-playlist', ids }) },
+      {
+        label: 'Ver en el Explorador',
+        disabled: n !== 1,
+        onClick: () => revealTrack(ids[0]).catch((e) => setStatus(String(e))),
+      },
       { separator: true, label: '' },
     ];
     if (selection.type === 'playlist') {
@@ -360,7 +504,6 @@ export default function App() {
   const selectedNode =
     selection.type === 'playlist' ? nodes.find((n) => n.id === selection.id) : null;
 
-  // Lista plana de playlists (con ruta de carpetas) para el picker.
   const playlistOptions = useMemo(() => {
     const path = (n: PlaylistNode): string => {
       const parent = nodes.find((x) => x.id === n.parentId);
@@ -381,31 +524,32 @@ export default function App() {
             onChange={(e) => setSearch(e.target.value)}
           />
         </div>
-        <button
-          className="mini gear"
-          title="Configuración"
-          onClick={() => setModal({ type: 'settings' })}
-        >
-          ⚙
-        </button>
+        <div className="header-right">
+          <button
+            className="mini gear"
+            title="Configuración"
+            onClick={() => setModal({ type: 'settings' })}
+          >
+            <Settings size={17} />
+          </button>
+        </div>
       </header>
 
       <div className="body">
         <Sidebar
           nodes={nodes}
           selection={selection}
-          osDropNodeId={osDropNodeId}
-          busy={busy}
+          dropHint={nodeDropHint}
+          rootHover={rootHover}
           onSelect={setSelection}
-          onImport={onImport}
           onCreate={(kind, parentId) => setModal({ type: 'name', kind, parentId })}
           onRename={onRename}
           onDelete={(id) => {
             const node = nodes.find((n) => n.id === id);
             if (node) setModal({ type: 'confirm-node', node });
           }}
-          onMoveNode={onMoveNode}
-          onDropTracks={onDropTracks}
+          onNodeMouseDown={onNodeMouseDown}
+          wasDrag={() => didDrag}
         />
 
         <main>
@@ -413,19 +557,23 @@ export default function App() {
             <h2>{selection.type === 'library' ? 'Biblioteca' : selectedNode?.name ?? 'Playlist'}</h2>
             <span className="view-meta">
               {visibleTracks.length} tracks
-              {selection.type === 'playlist' && !search && ' · arrastrá para ordenar'}
+              {canReorder && ' · arrastrá para ordenar'}
             </span>
-            <span className="status">{status}</span>
+            <span className="status">{busy ? 'Importando…' : status}</span>
           </div>
           {visibleTracks.length > 0 ? (
             <TrackTable
               tracks={visibleTracks}
               currentId={currentId}
+              paused={paused}
               selected={selected}
               onSelectedChange={setSelected}
               onPlay={onPlay}
-              canReorder={selection.type === 'playlist' && !search.trim()}
-              onReorder={onReorder}
+              onInspect={setInfoId}
+              canReorder={canReorder}
+              onTrackMouseDown={onTrackMouseDown}
+              dropInsertIndex={dropInsertIndex}
+              wasDrag={() => didDrag}
               rowMenuItems={rowMenuItems}
             />
           ) : (
@@ -433,13 +581,18 @@ export default function App() {
               {search
                 ? 'Nada coincide con la búsqueda.'
                 : selection.type === 'library'
-                  ? 'Importá una carpeta, o arrastrá música desde tu PC.'
+                  ? 'Arrastrá música o carpetas desde tu PC para empezar.'
                   : 'Arrastrá tracks desde la Biblioteca o desde tu PC hasta acá.'}
             </p>
           )}
         </main>
 
-        <RightPanel open={infoOpen} track={current} onClose={() => setInfoOpen(false)} />
+        <RightPanel
+          open={infoOpen}
+          track={infoTrack}
+          isPlaying={infoTrack != null && infoTrack.id === currentId}
+          onClose={() => setInfoOpen(false)}
+        />
       </div>
 
       {current && (
@@ -448,6 +601,8 @@ export default function App() {
           paused={paused}
           posMs={posMs}
           volume={volume}
+          shuffle={shuffle}
+          repeat={repeat}
           infoOpen={infoOpen}
           onToggle={onToggle}
           onStop={onStop}
@@ -455,6 +610,8 @@ export default function App() {
           onNext={() => playOffset(1)}
           onSeek={onSeek}
           onVolume={onVolume}
+          onToggleShuffle={onToggleShuffle}
+          onCycleRepeat={onCycleRepeat}
           onToggleInfo={() => setInfoOpen((o) => !o)}
         />
       )}
@@ -504,7 +661,7 @@ export default function App() {
                     setModal(null);
                   }}
                 >
-                  ♪ {p.label}
+                  {p.label}
                 </button>
               ))}
             </div>

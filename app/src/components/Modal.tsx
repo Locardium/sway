@@ -1,4 +1,5 @@
 import { ReactNode, useEffect, useRef } from 'react';
+import { X } from 'lucide-react';
 
 interface ModalProps {
   title: string;
@@ -20,7 +21,7 @@ export function Modal({ title, onClose, children }: ModalProps) {
       <div className="modal" role="dialog" aria-label={title}>
         <div className="modal-head">
           <h3>{title}</h3>
-          <button className="mini" onClick={onClose} aria-label="Cerrar">✕</button>
+          <button className="mini" onClick={onClose} aria-label="Cerrar"><X size={15} /></button>
         </div>
         {children}
       </div>

@@ -1,15 +1,18 @@
+mod cover;
 mod db;
 mod import;
 mod player;
 
 use player::Player;
 use rusqlite::Connection;
+use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::{Manager, State};
 
 pub struct AppState {
     db: Mutex<Connection>,
     player: Player,
+    covers: Mutex<HashMap<i64, Option<String>>>,
 }
 
 #[tauri::command]
@@ -39,6 +42,47 @@ fn delete_tracks(state: State<AppState>, ids: Vec<i64>) -> Result<(), String> {
 #[tauri::command]
 fn set_volume(state: State<AppState>, volume: f32) {
     state.player.set_volume(volume);
+}
+
+#[tauri::command]
+fn cover_thumb(state: State<AppState>, id: i64) -> Result<Option<String>, String> {
+    if let Some(c) = state.covers.lock().unwrap().get(&id) {
+        return Ok(c.clone());
+    }
+    let path = {
+        let conn = state.db.lock().unwrap();
+        db::track_path(&conn, id).map_err(|e| e.to_string())?
+    };
+    let thumb = cover::thumb_data_url(std::path::Path::new(&path));
+    state.covers.lock().unwrap().insert(id, thumb.clone());
+    Ok(thumb)
+}
+
+#[tauri::command]
+fn reveal_track(state: State<AppState>, id: i64) -> Result<(), String> {
+    let path = {
+        let conn = state.db.lock().unwrap();
+        db::track_path(&conn, id).map_err(|e| e.to_string())?
+    };
+    #[cfg(target_os = "windows")]
+    std::process::Command::new("explorer")
+        .arg(format!("/select,{path}"))
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "macos")]
+    std::process::Command::new("open")
+        .args(["-R", &path])
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let dir = std::path::Path::new(&path).parent().unwrap_or(std::path::Path::new("/"));
+        std::process::Command::new("xdg-open")
+            .arg(dir)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -170,6 +214,7 @@ pub fn run() {
             app.manage(AppState {
                 db: Mutex::new(conn),
                 player: Player::new(),
+                covers: Mutex::new(HashMap::new()),
             });
             Ok(())
         })
@@ -179,6 +224,8 @@ pub fn run() {
             list_tracks,
             delete_tracks,
             set_volume,
+            cover_thumb,
+            reveal_track,
             list_playlists,
             create_playlist,
             rename_playlist,

@@ -1,8 +1,11 @@
+import { X } from 'lucide-react';
 import { Track } from '../api';
+import Cover from './Cover';
 
 interface Props {
   open: boolean;
   track: Track | null;
+  isPlaying: boolean;
   onClose: () => void;
 }
 
@@ -12,17 +15,19 @@ function fmt(ms: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
-export default function RightPanel({ open, track, onClose }: Props) {
+export default function RightPanel({ open, track, isPlaying, onClose }: Props) {
   return (
     <aside className={'right-panel' + (open ? ' open' : '')} aria-hidden={!open}>
       <div className="rp-inner">
         <div className="rp-head">
-          <span>Ahora suena</span>
-          <button className="mini" onClick={onClose} aria-label="Cerrar panel">✕</button>
+          <span>{isPlaying ? 'Ahora suena' : 'Detalle'}</span>
+          <button className="mini" onClick={onClose} aria-label="Cerrar panel">
+            <X size={14} />
+          </button>
         </div>
         {track ? (
           <>
-            <div className="rp-art" aria-hidden="true">♪</div>
+            <Cover trackId={track.id} className="rp-art" eager />
             <h3 className="rp-title">{track.title}</h3>
             <p className="rp-artist">{track.artist || '—'}</p>
             <dl className="rp-meta">
@@ -39,7 +44,7 @@ export default function RightPanel({ open, track, onClose }: Props) {
             </dl>
           </>
         ) : (
-          <p className="rp-empty">Nada sonando. Doble click en un track para reproducir.</p>
+          <p className="rp-empty">Hacé click en un track para ver su info.</p>
         )}
       </div>
     </aside>

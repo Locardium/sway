@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
+import { Play } from 'lucide-react';
 import { Track } from '../api';
 import ContextMenu, { MenuItem } from './ContextMenu';
+import Cover from './Cover';
 
 export type ColKey = 'title' | 'artist' | 'album' | 'genre' | 'bpm' | 'duration';
 
@@ -13,7 +15,7 @@ interface ColDef {
 }
 
 const DEFAULT_COLS: ColDef[] = [
-  { key: 'title', label: 'Título', width: 280, visible: true },
+  { key: 'title', label: 'Título', width: 300, visible: true },
   { key: 'artist', label: 'Artista', width: 200, visible: true },
   { key: 'album', label: 'Álbum', width: 200, visible: true },
   { key: 'genre', label: 'Género', width: 140, visible: true },
@@ -23,7 +25,7 @@ const DEFAULT_COLS: ColDef[] = [
 
 const COLS_STORAGE = 'sway.columns.v1';
 const MIN_W = 60;
-const TRACKS_MIME = 'application/x-sway-tracks';
+const COVER_COL_W = 56;
 
 function loadCols(): ColDef[] {
   try {
@@ -57,28 +59,37 @@ function cellValue(t: Track, key: ColKey): string {
 interface Props {
   tracks: Track[];
   currentId: number | null;
+  paused: boolean;
   selected: Set<number>;
   onSelectedChange: (sel: Set<number>) => void;
   onPlay: (id: number) => void;
+  /** Click simple en una fila (ademas de seleccionar): muestra info. */
+  onInspect: (id: number) => void;
   canReorder: boolean;
-  onReorder: (trackIds: number[], index: number) => void;
-  /** Items extra del menu contextual de fila (los define App). */
+  /** mousedown que puede iniciar un drag (lo maneja App via dnd.ts). */
+  onTrackMouseDown: (e: React.MouseEvent, ids: number[]) => void;
+  /** Indice de insercion resaltado durante un drag (null = ninguno). */
+  dropInsertIndex: number | null;
+  wasDrag: () => boolean;
   rowMenuItems: (ids: number[]) => MenuItem[];
 }
 
 export default function TrackTable({
   tracks,
   currentId,
+  paused,
   selected,
   onSelectedChange,
   onPlay,
+  onInspect,
   canReorder,
-  onReorder,
+  onTrackMouseDown,
+  dropInsertIndex,
+  wasDrag,
   rowMenuItems,
 }: Props) {
   const [cols, setCols] = useState<ColDef[]>(loadCols);
   const [anchor, setAnchor] = useState<number | null>(null);
-  const [dropIdx, setDropIdx] = useState<number | null>(null);
   const [rowMenu, setRowMenu] = useState<{ x: number; y: number; ids: number[] } | null>(null);
   const [headMenu, setHeadMenu] = useState<{ x: number; y: number } | null>(null);
   const resizing = useRef<{ key: ColKey; startX: number; startW: number } | null>(null);
@@ -116,6 +127,7 @@ export default function TrackTable({
   const visibleCols = cols.filter((c) => c.visible);
 
   function onRowClick(e: React.MouseEvent, t: Track, idx: number) {
+    if (wasDrag()) return;
     if (e.shiftKey && anchor != null) {
       const a = tracks.findIndex((x) => x.id === anchor);
       if (a >= 0) {
@@ -130,13 +142,13 @@ export default function TrackTable({
       onSelectedChange(next);
     } else {
       onSelectedChange(new Set([t.id]));
+      onInspect(t.id);
     }
     setAnchor(t.id);
   }
 
   function onRowContextMenu(e: React.MouseEvent, t: Track) {
     e.preventDefault();
-    // Click derecho sobre fila no seleccionada: la selecciona (comportamiento estándar).
     let ids: number[];
     if (selected.has(t.id)) {
       ids = [...selected];
@@ -152,11 +164,6 @@ export default function TrackTable({
     return selected.has(t.id) ? [...selected] : [t.id];
   }
 
-  function rowDropIndex(e: React.DragEvent, idx: number): number {
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    return e.clientY - r.top < r.height / 2 ? idx : idx + 1;
-  }
-
   function onKeyDown(e: React.KeyboardEvent) {
     if (e.key === 'Delete' && selected.size > 0) {
       const del = rowMenuItems([...selected]).find((i) => i.danger && !i.disabled);
@@ -169,10 +176,10 @@ export default function TrackTable({
   }
 
   return (
-    <div className="table-wrap" tabIndex={0} onKeyDown={onKeyDown} data-drop="library">
-      <table className="tracks" style={{ width: 34 + visibleCols.reduce((a, c) => a + c.width, 0) }}>
+    <div className="table-wrap" tabIndex={0} onKeyDown={onKeyDown}>
+      <table className="tracks" style={{ width: COVER_COL_W + visibleCols.reduce((a, c) => a + c.width, 0) }}>
         <colgroup>
-          <col style={{ width: 34 }} />
+          <col style={{ width: COVER_COL_W }} />
           {visibleCols.map((c) => (
             <col key={c.key} style={{ width: c.width }} />
           ))}
@@ -184,7 +191,7 @@ export default function TrackTable({
               setHeadMenu({ x: e.clientX, y: e.clientY });
             }}
           >
-            <th className="col-play"></th>
+            <th className="col-cover"></th>
             {visibleCols.map((c) => (
               <th key={c.key} className={c.numeric ? 'num' : ''}>
                 {c.label}
@@ -200,46 +207,46 @@ export default function TrackTable({
             ))}
           </tr>
         </thead>
-        <tbody
-          onDragLeave={(e) => {
-            if (e.target === e.currentTarget) setDropIdx(null);
-          }}
-        >
+        <tbody>
           {tracks.map((t, idx) => (
             <tr
               key={t.id}
+              data-dnd="row"
+              data-idx={idx}
               className={[
                 t.id === currentId ? 'playing' : '',
                 selected.has(t.id) ? 'selected' : '',
-                dropIdx === idx ? 'drop-before' : '',
-                dropIdx === idx + 1 && idx === tracks.length - 1 ? 'drop-after' : '',
+                dropInsertIndex === idx ? 'drop-before' : '',
+                dropInsertIndex === idx + 1 && idx === tracks.length - 1 ? 'drop-after' : '',
               ].join(' ')}
-              draggable
-              onDragStart={(e) => {
-                e.dataTransfer.setData(TRACKS_MIME, JSON.stringify(dragIds(t)));
-                e.dataTransfer.effectAllowed = 'copyMove';
-              }}
-              onDragOver={(e) => {
-                if (canReorder && e.dataTransfer.types.includes(TRACKS_MIME)) {
-                  e.preventDefault();
-                  setDropIdx(rowDropIndex(e, idx));
-                }
-              }}
-              onDrop={(e) => {
-                if (!canReorder) return;
-                e.preventDefault();
-                const data = e.dataTransfer.getData(TRACKS_MIME);
-                setDropIdx(null);
-                if (data) onReorder(JSON.parse(data), rowDropIndex(e, idx));
+              onMouseDown={(e) => {
+                if ((e.target as HTMLElement).closest('button')) return;
+                onTrackMouseDown(e, dragIds(t));
               }}
               onClick={(e) => onRowClick(e, t, idx)}
               onDoubleClick={() => onPlay(t.id)}
               onContextMenu={(e) => onRowContextMenu(e, t)}
             >
-              <td className="col-play">
-                <button className="mini" onClick={(e) => { e.stopPropagation(); onPlay(t.id); }}>
-                  {t.id === currentId ? '♫' : '▶'}
-                </button>
+              <td className="col-cover">
+                <div className="row-cover">
+                  <Cover trackId={t.id} />
+                  {t.id === currentId && !paused ? (
+                    <span className="eq" aria-label="Sonando">
+                      <i /><i /><i />
+                    </span>
+                  ) : (
+                    <button
+                      className="play-ov"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onPlay(t.id);
+                      }}
+                      aria-label="Reproducir"
+                    >
+                      <Play size={16} fill="currentColor" />
+                    </button>
+                  )}
+                </div>
               </td>
               {visibleCols.map((c) => (
                 <td
@@ -253,23 +260,11 @@ export default function TrackTable({
           ))}
         </tbody>
       </table>
-      {/* Zona de drop debajo de la última fila: inserta al final. */}
       {canReorder && tracks.length > 0 && (
         <div
-          className={'drop-tail' + (dropIdx === tracks.length ? ' drop-before' : '')}
-          onDragOver={(e) => {
-            if (e.dataTransfer.types.includes(TRACKS_MIME)) {
-              e.preventDefault();
-              setDropIdx(tracks.length);
-            }
-          }}
-          onDragLeave={() => setDropIdx((d) => (d === tracks.length ? null : d))}
-          onDrop={(e) => {
-            e.preventDefault();
-            const data = e.dataTransfer.getData(TRACKS_MIME);
-            setDropIdx(null);
-            if (data) onReorder(JSON.parse(data), tracks.length);
-          }}
+          className={'drop-tail' + (dropInsertIndex === tracks.length ? ' drop-before' : '')}
+          data-dnd="tail"
+          data-idx={tracks.length}
         />
       )}
 
@@ -289,7 +284,6 @@ export default function TrackTable({
           items={cols.map((c) => ({
             label: c.label,
             checked: c.visible,
-            // La última columna visible no se puede ocultar.
             disabled: c.visible && visibleCols.length === 1,
             onClick: () =>
               setCols((cs) => cs.map((x) => (x.key === c.key ? { ...x, visible: !x.visible } : x))),
