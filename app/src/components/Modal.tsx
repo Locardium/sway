@@ -21,7 +21,7 @@ export function Modal({ title, onClose, children }: ModalProps) {
       <div className="modal" role="dialog" aria-label={title}>
         <div className="modal-head">
           <h3>{title}</h3>
-          <button className="mini" onClick={onClose} aria-label="Cerrar"><X size={15} /></button>
+          <button className="mini" onClick={onClose} aria-label="Close"><X size={15} /></button>
         </div>
         {children}
       </div>
@@ -60,7 +60,7 @@ export function NamePrompt({ title, placeholder, initial, submitLabel, onSubmit,
         onKeyDown={(e) => e.key === 'Enter' && submit()}
       />
       <div className="modal-actions">
-        <button onClick={onClose}>Cancelar</button>
+        <button onClick={onClose}>Cancel</button>
         <button className="primary" onClick={submit}>{submitLabel}</button>
       </div>
     </Modal>
@@ -80,7 +80,7 @@ export function Confirm({ title, message, confirmLabel, onConfirm, onClose }: Co
     <Modal title={title} onClose={onClose}>
       <p className="modal-msg">{message}</p>
       <div className="modal-actions">
-        <button onClick={onClose}>Cancelar</button>
+        <button onClick={onClose}>Cancel</button>
         <button
           className="danger-btn"
           autoFocus

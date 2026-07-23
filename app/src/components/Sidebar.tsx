@@ -137,16 +137,16 @@ export default function Sidebar({
         onClick={() => onSelect({ type: 'library' })}
       >
         <span className="tree-icon"><Library size={14} /></span>
-        <span className="tree-name">Biblioteca</span>
+        <span className="tree-name">Library</span>
       </div>
 
       <div className="tree-head">
         <span>Playlists</span>
         <div className="tree-actions">
-          <button title="Nueva playlist" onClick={() => onCreate('playlist', null)}>
+          <button title="New playlist" onClick={() => onCreate('playlist', null)}>
             <Plus size={14} />
           </button>
-          <button title="Nueva carpeta" onClick={() => onCreate('folder', null)}>
+          <button title="New folder" onClick={() => onCreate('folder', null)}>
             <FolderPlus size={14} />
           </button>
         </div>
@@ -162,7 +162,7 @@ export default function Sidebar({
       >
         {childrenOf(null).map((n) => renderNode(n, 0))}
         {nodes.length === 0 && (
-          <p className="tree-empty">Sin playlists todavía. Creá una con +.</p>
+          <p className="tree-empty">No playlists yet. Create one with +.</p>
         )}
       </div>
 
@@ -172,20 +172,20 @@ export default function Sidebar({
             <>
               {menu.node.kind === 'folder' && (
                 <>
-                  <button onClick={() => onCreate('playlist', menu.node!.id)}>Nueva playlist acá</button>
-                  <button onClick={() => onCreate('folder', menu.node!.id)}>Nueva carpeta acá</button>
+                  <button onClick={() => onCreate('playlist', menu.node!.id)}>New playlist here</button>
+                  <button onClick={() => onCreate('folder', menu.node!.id)}>New folder here</button>
                   <hr />
                 </>
               )}
-              <button onClick={() => setEditingId(menu.node!.id)}>Renombrar</button>
+              <button onClick={() => setEditingId(menu.node!.id)}>Rename</button>
               <button className="danger" onClick={() => onDelete(menu.node!.id)}>
-                Eliminar
+                Delete
               </button>
             </>
           ) : (
             <>
-              <button onClick={() => onCreate('playlist', null)}>Nueva playlist</button>
-              <button onClick={() => onCreate('folder', null)}>Nueva carpeta</button>
+              <button onClick={() => onCreate('playlist', null)}>New playlist</button>
+              <button onClick={() => onCreate('folder', null)}>New folder</button>
             </>
           )}
         </div>

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Menu, Settings } from 'lucide-react';
+import { Info, Menu, Settings as SettingsIcon } from 'lucide-react';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { listen } from '@tauri-apps/api/event';
 import {
@@ -33,6 +33,7 @@ import Sidebar, { Selection, NodeDropHint } from './components/Sidebar';
 import TrackTable from './components/TrackTable';
 import PlayerBar, { RepeatMode } from './components/PlayerBar';
 import RightPanel from './components/RightPanel';
+import Settings from './components/Settings';
 import { Modal, NamePrompt, Confirm } from './components/Modal';
 import { MenuItem } from './components/ContextMenu';
 
@@ -149,6 +150,27 @@ export default function App() {
     };
   }, []);
 
+  // El status se auto-oculta (toast breve, no texto persistente).
+  useEffect(() => {
+    if (!status) return;
+    const t = setTimeout(() => setStatus(''), 2600);
+    return () => clearTimeout(t);
+  }, [status]);
+
+  // Barra espaciadora = play/pausa (salvo escribiendo o con un modal abierto).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code !== 'Space' || currentId == null || modal) return;
+      const el = e.target as HTMLElement;
+      if (el.closest('input, textarea, [contenteditable="true"], [role="dialog"]')) return;
+      e.preventDefault();
+      onToggle();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentId, paused, modal]);
+
   const searching = search.trim().length > 0;
   // Con búsqueda activa se busca SIEMPRE en toda la biblioteca, sin importar
   // la playlist seleccionada.
@@ -190,7 +212,7 @@ export default function App() {
         setPaused(false);
         setPosMs(0);
       } catch (e) {
-        setStatus('Error al reproducir: ' + e);
+        setStatus('Playback error: ' + e);
       }
     },
     [visibleTracks, shuffle],
@@ -299,36 +321,36 @@ export default function App() {
     const el = document.elementFromPoint(x, y)?.closest<HTMLElement>('[data-dnd="node"]');
     const nodeId = el ? Number(el.dataset.nodeId) : null;
     const nodeKind = el?.dataset.nodeKind ?? null;
-    setStatus('Importando…');
+    setStatus('Importing…');
     try {
       const ids = await importFiles(paths);
       if (ids.length === 0) {
-        setStatus('Nada de audio en lo que soltaste.');
+        setStatus('No audio files in what you dropped.');
         return;
       }
       if (nodeId != null && nodeKind === 'playlist') {
         const n = await addTracksToPlaylist(nodeId, ids);
-        setStatus(`${ids.length} importados, ${n} agregados a la playlist.`);
+        setStatus(`Imported ${ids.length}, added ${n} to the playlist.`);
       } else if (nodeId != null && nodeKind === 'folder') {
         const isSingleDir = paths.length === 1;
         const base = paths[0].replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? 'Importados';
         if (isSingleDir) {
           const pid = await createPlaylist(base, 'playlist', nodeId);
           await addTracksToPlaylist(pid, ids);
-          setStatus(`Playlist «${base}» creada con ${ids.length} tracks.`);
+          setStatus(`Playlist "${base}" created with ${ids.length} tracks.`);
           setSelection({ type: 'playlist', id: pid });
         } else {
-          setStatus(`${ids.length} tracks importados a la Biblioteca.`);
+          setStatus(`Imported ${ids.length} tracks to the Library.`);
         }
       } else if (selection.type === 'playlist') {
         const n = await addTracksToPlaylist(selection.id, ids);
-        setStatus(`${ids.length} importados, ${n} agregados a la playlist.`);
+        setStatus(`Imported ${ids.length}, added ${n} to the playlist.`);
       } else {
-        setStatus(`${ids.length} tracks importados a la Biblioteca.`);
+        setStatus(`Imported ${ids.length} tracks to the Library.`);
       }
       await Promise.all([refreshLibrary(), refreshPlaylists(), refreshPlaylistTracks()]);
     } catch (e) {
-      setStatus('Error import: ' + e);
+      setStatus('Import error: ' + e);
     } finally {
       // Mantiene el 100% visible un momento antes de ocultar el toast.
       setTimeout(() => setImportProgress(null), 1000);
@@ -472,7 +494,7 @@ export default function App() {
 
   async function onDropTracks(playlistId: number, trackIds: number[]) {
     const n = await addTracksToPlaylist(playlistId, trackIds);
-    setStatus(n > 0 ? `${n} agregados.` : 'Ya estaban en la playlist.');
+    setStatus(n > 0 ? `Added ${n}.` : 'Already in the playlist.');
     await Promise.all([refreshPlaylists(), refreshPlaylistTracks()]);
   }
 
@@ -493,7 +515,7 @@ export default function App() {
     await deleteTracks(ids);
     if (currentId != null && ids.includes(currentId)) await onStop();
     setSelected(new Set());
-    setStatus(`${ids.length} eliminados de la biblioteca.`);
+    setStatus(`Removed ${ids.length} from the library.`);
     await Promise.all([refreshLibrary(), refreshPlaylists(), refreshPlaylistTracks()]);
   }
 
@@ -501,10 +523,10 @@ export default function App() {
     const n = ids.length;
     const viewIsPlaylist = selection.type === 'playlist' && !searching;
     const items: MenuItem[] = [
-      { label: 'Reproducir', disabled: n !== 1, onClick: () => onPlay(ids[0]) },
-      { label: 'Agregar a playlist…', onClick: () => setModal({ type: 'pick-playlist', ids }) },
+      { label: 'Play', disabled: n !== 1, onClick: () => onPlay(ids[0]) },
+      { label: 'Add to playlist…', onClick: () => setModal({ type: 'pick-playlist', ids }) },
       {
-        label: 'Ver en qué playlists está',
+        label: 'Show playlists',
         disabled: n !== 1,
         onClick: async () => {
           const playlistIds = await trackPlaylists(ids[0]);
@@ -512,7 +534,7 @@ export default function App() {
         },
       },
       {
-        label: 'Ver en el Explorador',
+        label: 'Reveal in Explorer',
         disabled: n !== 1,
         onClick: () => revealTrack(ids[0]).catch((e) => setStatus(String(e))),
       },
@@ -520,13 +542,13 @@ export default function App() {
     ];
     if (viewIsPlaylist) {
       items.push({
-        label: n === 1 ? 'Quitar de la playlist' : `Quitar ${n} de la playlist`,
+        label: n === 1 ? 'Remove from playlist' : `Remove ${n} from playlist`,
         danger: true,
         onClick: () => doRemoveFromPlaylist(ids),
       });
     }
     items.push({
-      label: n === 1 ? 'Eliminar de la biblioteca…' : `Eliminar ${n} de la biblioteca…`,
+      label: n === 1 ? 'Delete from library…' : `Delete ${n} from library…`,
       danger: true,
       onClick: () => setModal({ type: 'confirm-tracks', ids }),
     });
@@ -566,7 +588,7 @@ export default function App() {
         <div className="header-left">
           <button
             className="mini burger"
-            title="Menú"
+            title="Menu"
             onClick={() => setSidebarOpen((o) => !o)}
           >
             <Menu size={18} />
@@ -576,18 +598,25 @@ export default function App() {
         <div className="search">
           <input
             type="search"
-            placeholder="Buscar en la biblioteca…"
+            placeholder="Search your library…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
         </div>
         <div className="header-right">
           <button
+            className={'mini' + (infoOpen ? ' on' : '')}
+            title="Track info"
+            onClick={() => setInfoOpen((o) => !o)}
+          >
+            <Info size={17} />
+          </button>
+          <button
             className="mini gear"
-            title="Configuración"
+            title="Settings"
             onClick={() => setModal({ type: 'settings' })}
           >
-            <Settings size={17} />
+            <SettingsIcon size={17} />
           </button>
         </div>
       </header>
@@ -616,18 +645,15 @@ export default function App() {
         <main>
           <div className="view-head">
             <h2>
-              {searching
-                ? 'Biblioteca'
-                : selection.type === 'library'
-                  ? 'Biblioteca'
-                  : selectedNode?.name ?? 'Playlist'}
+              {searching || selection.type === 'library'
+                ? 'Library'
+                : selectedNode?.name ?? 'Playlist'}
             </h2>
             <span className="view-meta">
               {visibleTracks.length} tracks
-              {searching && ' · resultados en la biblioteca'}
-              {canReorder && ' · arrastrá para ordenar'}
+              {searching && ' · searching the whole library'}
+              {canReorder && ' · drag to reorder'}
             </span>
-            <span className="status">{status}</span>
           </div>
           {visibleTracks.length > 0 ? (
             <TrackTable
@@ -646,10 +672,10 @@ export default function App() {
           ) : (
             <p className="empty">
               {search
-                ? 'Nada coincide con la búsqueda.'
+                ? 'Nothing matches your search.'
                 : selection.type === 'library'
-                  ? 'Arrastrá música o carpetas desde tu PC para empezar.'
-                  : 'Arrastrá tracks desde la Biblioteca o desde tu PC hasta acá.'}
+                  ? 'Drag music or folders from your computer to get started.'
+                  : 'Drag tracks from the Library or from your computer here.'}
             </p>
           )}
         </main>
@@ -670,7 +696,6 @@ export default function App() {
           volume={volume}
           shuffle={shuffle}
           repeat={repeat}
-          infoOpen={infoOpen}
           onToggle={onToggle}
           onStop={onStop}
           onPrev={() => playOffset(-1)}
@@ -679,43 +704,42 @@ export default function App() {
           onVolume={onVolume}
           onToggleShuffle={onToggleShuffle}
           onCycleRepeat={onCycleRepeat}
-          onToggleInfo={() => setInfoOpen((o) => !o)}
         />
       )}
 
       {modal?.type === 'name' && (
         <NamePrompt
-          title={modal.kind === 'folder' ? 'Nueva carpeta' : 'Nueva playlist'}
-          placeholder={modal.kind === 'folder' ? 'Nombre de la carpeta' : 'Nombre de la playlist'}
-          submitLabel="Crear"
+          title={modal.kind === 'folder' ? 'New folder' : 'New playlist'}
+          placeholder={modal.kind === 'folder' ? 'Folder name' : 'Playlist name'}
+          submitLabel="Create"
           onSubmit={(name) => doCreate(name, modal.kind, modal.parentId)}
           onClose={() => setModal(null)}
         />
       )}
       {modal?.type === 'confirm-node' && (
         <Confirm
-          title={modal.node.kind === 'folder' ? 'Eliminar carpeta' : 'Eliminar playlist'}
+          title={modal.node.kind === 'folder' ? 'Delete folder' : 'Delete playlist'}
           message={
             modal.node.kind === 'folder'
-              ? `«${modal.node.name}» y todo su contenido se eliminan. Los tracks siguen en la Biblioteca.`
-              : `«${modal.node.name}» se elimina. Los tracks siguen en la Biblioteca.`
+              ? `"${modal.node.name}" and everything inside it are deleted. The tracks stay in your Library.`
+              : `"${modal.node.name}" is deleted. The tracks stay in your Library.`
           }
-          confirmLabel="Eliminar"
+          confirmLabel="Delete"
           onConfirm={() => doDeleteNode(modal.node.id)}
           onClose={() => setModal(null)}
         />
       )}
       {modal?.type === 'confirm-tracks' && (
         <Confirm
-          title="Eliminar de la biblioteca"
-          message={`${modal.ids.length} track(s) se eliminan de la biblioteca y de todas las playlists. Los archivos en disco no se tocan.`}
-          confirmLabel="Eliminar"
+          title="Delete from library"
+          message={`${modal.ids.length} track(s) are removed from the library and all playlists. Files managed by Sway go to the OS trash; others are left on disk.`}
+          confirmLabel="Delete"
           onConfirm={() => doDeleteTracks(modal.ids)}
           onClose={() => setModal(null)}
         />
       )}
       {modal?.type === 'pick-playlist' && (
-        <Modal title="Agregar a playlist" onClose={() => setModal(null)}>
+        <Modal title="Add to playlist" onClose={() => setModal(null)}>
           {playlistOptions.length > 0 ? (
             <div className="pick-list">
               {playlistOptions.map((p) => (
@@ -723,7 +747,7 @@ export default function App() {
                   key={p.id}
                   onClick={async () => {
                     const n = await addTracksToPlaylist(p.id, modal.ids);
-                    setStatus(n > 0 ? `${n} agregados.` : 'Ya estaban en la playlist.');
+                    setStatus(n > 0 ? `Added ${n}.` : 'Already in the playlist.');
                     await Promise.all([refreshPlaylists(), refreshPlaylistTracks()]);
                     setModal(null);
                   }}
@@ -733,12 +757,12 @@ export default function App() {
               ))}
             </div>
           ) : (
-            <p className="modal-msg">No hay playlists todavía. Creá una desde la barra lateral.</p>
+            <p className="modal-msg">No playlists yet. Create one from the sidebar.</p>
           )}
         </Modal>
       )}
       {modal?.type === 'track-playlists' && (
-        <Modal title="En qué playlists está" onClose={() => setModal(null)}>
+        <Modal title="In playlists" onClose={() => setModal(null)}>
           {modal.playlistIds.length > 0 ? (
             <div className="pick-list">
               {modal.playlistIds.map((pid) => {
@@ -758,32 +782,24 @@ export default function App() {
               })}
             </div>
           ) : (
-            <p className="modal-msg">No está en ninguna playlist.</p>
+            <p className="modal-msg">Not in any playlist.</p>
           )}
         </Modal>
       )}
       {modal?.type === 'settings' && (
-        <Modal title="Configuración" onClose={() => setModal(null)}>
-          <dl className="settings-list">
-            <dt>Versión</dt>
-            <dd>Sway 0.1.0</dd>
-            <dt>Biblioteca</dt>
-            <dd>{library.length} tracks</dd>
-            <dt>Carpeta gestionada</dt>
-            <dd>&lt;Música&gt;/Sway</dd>
-            <dt>Volumen</dt>
-            <dd>{Math.round(volume * 100)}%</dd>
-          </dl>
-          <p className="modal-msg muted">
-            Export a Rekordbox/Serato y más opciones llegan en la próxima fase.
-          </p>
-        </Modal>
+        <Settings trackCount={library.length} volume={volume} onClose={() => setModal(null)} />
+      )}
+
+      {status && (
+        <div className="status-toast" role="status">
+          {status}
+        </div>
       )}
 
       {importProgress && (
         <div className="import-toast" role="status">
           <div className="import-toast-head">
-            <span>Copiando a la biblioteca…</span>
+            <span>Copying to your library…</span>
             <span className="import-toast-count">
               {importProgress.done} / {importProgress.total}
             </span>

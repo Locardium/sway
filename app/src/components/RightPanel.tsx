@@ -20,8 +20,8 @@ export default function RightPanel({ open, track, isPlaying, onClose }: Props) {
     <aside className={'right-panel' + (open ? ' open' : '')} aria-hidden={!open}>
       <div className="rp-inner">
         <div className="rp-head">
-          <span>{isPlaying ? 'Ahora suena' : 'Detalle'}</span>
-          <button className="mini" onClick={onClose} aria-label="Cerrar panel">
+          <span>{isPlaying ? 'Now playing' : 'Details'}</span>
+          <button className="mini" onClick={onClose} aria-label="Close panel">
             <X size={14} />
           </button>
         </div>
@@ -31,20 +31,20 @@ export default function RightPanel({ open, track, isPlaying, onClose }: Props) {
             <h3 className="rp-title">{track.title}</h3>
             <p className="rp-artist">{track.artist || '—'}</p>
             <dl className="rp-meta">
-              <dt>Álbum</dt>
+              <dt>Album</dt>
               <dd>{track.album || '—'}</dd>
-              <dt>Género</dt>
+              <dt>Genre</dt>
               <dd>{track.genre || '—'}</dd>
               <dt>BPM</dt>
               <dd>{track.bpm ?? '—'}</dd>
-              <dt>Duración</dt>
+              <dt>Duration</dt>
               <dd>{fmt(track.durationMs)}</dd>
-              <dt>Archivo</dt>
+              <dt>File</dt>
               <dd className="rp-path" title={track.path}>{track.path}</dd>
             </dl>
           </>
         ) : (
-          <p className="rp-empty">Hacé click en un track para ver su info.</p>
+          <p className="rp-empty">Click a track to see its details.</p>
         )}
       </div>
     </aside>
