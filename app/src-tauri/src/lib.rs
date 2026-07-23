@@ -25,6 +25,83 @@ fn list_tracks(state: State<AppState>) -> Result<Vec<db::Track>, String> {
 }
 
 #[tauri::command]
+fn list_playlists(state: State<AppState>) -> Result<Vec<db::PlaylistNode>, String> {
+    let conn = state.db.lock().unwrap();
+    db::list_playlists(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_playlist(
+    state: State<AppState>,
+    name: String,
+    kind: String,
+    parent_id: Option<i64>,
+) -> Result<i64, String> {
+    let conn = state.db.lock().unwrap();
+    db::create_playlist(&conn, &name, &kind, parent_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn rename_playlist(state: State<AppState>, id: i64, name: String) -> Result<(), String> {
+    let conn = state.db.lock().unwrap();
+    db::rename_playlist(&conn, id, &name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_playlist(state: State<AppState>, id: i64) -> Result<(), String> {
+    let conn = state.db.lock().unwrap();
+    db::delete_playlist(&conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn move_playlist(
+    state: State<AppState>,
+    id: i64,
+    parent_id: Option<i64>,
+    index: i64,
+) -> Result<(), String> {
+    let mut conn = state.db.lock().unwrap();
+    db::move_playlist(&mut conn, id, parent_id, index)
+}
+
+#[tauri::command]
+fn playlist_tracks(state: State<AppState>, playlist_id: i64) -> Result<Vec<db::Track>, String> {
+    let conn = state.db.lock().unwrap();
+    db::playlist_tracks(&conn, playlist_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn add_tracks_to_playlist(
+    state: State<AppState>,
+    playlist_id: i64,
+    track_ids: Vec<i64>,
+) -> Result<usize, String> {
+    let mut conn = state.db.lock().unwrap();
+    db::add_tracks_to_playlist(&mut conn, playlist_id, &track_ids).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn remove_tracks_from_playlist(
+    state: State<AppState>,
+    playlist_id: i64,
+    track_ids: Vec<i64>,
+) -> Result<(), String> {
+    let mut conn = state.db.lock().unwrap();
+    db::remove_tracks_from_playlist(&mut conn, playlist_id, &track_ids).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn reorder_playlist_tracks(
+    state: State<AppState>,
+    playlist_id: i64,
+    track_ids: Vec<i64>,
+    index: i64,
+) -> Result<(), String> {
+    let mut conn = state.db.lock().unwrap();
+    db::reorder_playlist_tracks(&mut conn, playlist_id, &track_ids, index).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn play_track(state: State<AppState>, id: i64) -> Result<(), String> {
     let path = {
         let conn = state.db.lock().unwrap();
@@ -82,6 +159,15 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             import_folder,
             list_tracks,
+            list_playlists,
+            create_playlist,
+            rename_playlist,
+            delete_playlist,
+            move_playlist,
+            playlist_tracks,
+            add_tracks_to_playlist,
+            remove_tracks_from_playlist,
+            reorder_playlist_tracks,
             play_track,
             pause_playback,
             resume_playback,
