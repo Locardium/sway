@@ -591,11 +591,10 @@ table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
 
 /* ---------- Settings ---------- */
 .settings {
-  display: grid; grid-template-columns: 1fr 1fr; gap: 4px 32px;
+  display: flex; flex-direction: column; gap: 18px;
   max-height: 74vh; overflow-y: auto; margin: 2px -4px 0; padding: 0 4px;
 }
-.settings section { display: flex; flex-direction: column; gap: 2px; margin-bottom: 14px; }
-.settings section:nth-last-child(-n+1) { grid-column: 1 / -1; }
+.settings section { display: flex; flex-direction: column; gap: 2px; }
 .settings h4 {
   margin: 0 0 8px; font-size: 11px; font-weight: 700; letter-spacing: 1px;
   text-transform: uppercase; color: var(--accent);
