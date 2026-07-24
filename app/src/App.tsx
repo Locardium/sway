@@ -150,6 +150,19 @@ export default function App() {
     };
   }, []);
 
+  // Watch de carpeta: el backend importa archivos nuevos y avisa.
+  useEffect(() => {
+    if (!('__TAURI_INTERNALS__' in window)) return;
+    const un = listen('library-changed', () => {
+      refreshLibrary();
+      refreshPlaylists();
+      setStatus('Library updated');
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, [refreshLibrary, refreshPlaylists]);
+
   // El status se auto-oculta (toast breve, no texto persistente).
   useEffect(() => {
     if (!status) return;

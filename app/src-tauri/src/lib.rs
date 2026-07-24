@@ -217,6 +217,59 @@ fn playback_position(state: State<AppState>) -> u64 {
     state.player.position_secs()
 }
 
+/// Observa la carpeta gestionada y auto-importa archivos de audio nuevos.
+/// Corre en su propio thread; emite `library-changed` cuando cambia el conteo.
+fn spawn_folder_watch(handle: AppHandle, dir: PathBuf) {
+    use notify_debouncer_mini::new_debouncer;
+    use notify_debouncer_mini::notify::RecursiveMode;
+    use std::time::Duration;
+
+    std::thread::spawn(move || {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut debouncer = match new_debouncer(Duration::from_millis(900), tx) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("[watch] no se pudo iniciar: {e}");
+                return;
+            }
+        };
+        if let Err(e) = debouncer.watcher().watch(&dir, RecursiveMode::Recursive) {
+            eprintln!("[watch] watch fallo: {e}");
+            return;
+        }
+        eprintln!("[watch] observando {}", dir.display());
+        for res in rx {
+            let events = match res {
+                Ok(ev) => ev,
+                Err(_) => continue,
+            };
+            let paths: Vec<String> = events
+                .into_iter()
+                .map(|e| e.path.to_string_lossy().into_owned())
+                .collect();
+            if paths.is_empty() {
+                continue;
+            }
+            let state = handle.state::<AppState>();
+            let changed = {
+                let conn = state.db.lock().unwrap();
+                let before: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
+                    .unwrap_or(0);
+                let _ = import::import_paths(&conn, &state.music_dir, &paths, |_, _| {});
+                let after: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
+                    .unwrap_or(before);
+                after != before
+            };
+            if changed {
+                eprintln!("[watch] importados nuevos ({} rutas), avisando UI", paths.len());
+                let _ = handle.emit("library-changed", ());
+            }
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -243,8 +296,12 @@ pub fn run() {
                 db: Mutex::new(conn),
                 player: Player::new(),
                 covers: Mutex::new(HashMap::new()),
-                music_dir,
+                music_dir: music_dir.clone(),
             });
+
+            // Watch de la carpeta gestionada: archivos nuevos (copiados por el
+            // usuario fuera de la app, o por otro medio) se importan solos.
+            spawn_folder_watch(app.handle().clone(), music_dir);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
