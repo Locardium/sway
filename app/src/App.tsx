@@ -196,6 +196,19 @@ export default function App() {
     [findTrack, infoId, current],
   );
 
+  // Mantiene el player montado durante su animacion de salida (al parar).
+  const lastTrackRef = useRef<Track | null>(null);
+  if (current) lastTrackRef.current = current;
+  const [playerClosing, setPlayerClosing] = useState(false);
+  useEffect(() => {
+    if (current == null && lastTrackRef.current != null) {
+      setPlayerClosing(true);
+      const t = setTimeout(() => setPlayerClosing(false), 240);
+      return () => clearTimeout(t);
+    }
+  }, [current]);
+  const playerTrack = current ?? (playerClosing ? lastTrackRef.current : null);
+
   // --- Playback ------------------------------------------------------------
 
   function buildQueue(ids: number[], firstId: number, useShuffle: boolean): number[] {
@@ -688,9 +701,10 @@ export default function App() {
         />
       </div>
 
-      {current && (
+      {playerTrack && (
         <PlayerBar
-          track={current}
+          track={playerTrack}
+          closing={current == null}
           paused={paused}
           posMs={posMs}
           volume={volume}

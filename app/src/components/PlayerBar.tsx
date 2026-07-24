@@ -19,6 +19,7 @@ export type RepeatMode = 'off' | 'all' | 'one';
 
 interface Props {
   track: Track;
+  closing?: boolean;
   paused: boolean;
   posMs: number;
   volume: number;
@@ -48,6 +49,7 @@ function VolIcon({ v }: { v: number }) {
 
 export default function PlayerBar({
   track,
+  closing,
   paused,
   posMs,
   volume,
@@ -72,7 +74,7 @@ export default function PlayerBar({
   }
 
   return (
-    <footer className="player">
+    <footer className={'player' + (closing ? ' closing' : '')}>
       <div className="np">
         <Cover trackId={track.id} className="np-art" eager />
         <div className="np-text">

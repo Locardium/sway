@@ -1,5 +1,7 @@
-import { ReactNode, useEffect, useRef } from 'react';
+import { ReactNode, useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
+
+const EXIT_MS = 180;
 
 interface ModalProps {
   title: string;
@@ -9,20 +11,37 @@ interface ModalProps {
 }
 
 export function Modal({ title, onClose, children, wide }: ModalProps) {
+  const [closing, setClosing] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout>>();
+
+  // Reproduce la animacion de salida y recien despues desmonta (via onClose).
+  function close() {
+    if (closing) return;
+    setClosing(true);
+    timer.current = setTimeout(onClose, EXIT_MS);
+  }
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') close();
     };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      clearTimeout(timer.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
-    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className={'modal' + (wide ? ' wide' : '')} role="dialog" aria-label={title}>
+    <div
+      className={'modal-backdrop' + (closing ? ' closing' : '')}
+      onMouseDown={(e) => e.target === e.currentTarget && close()}
+    >
+      <div className={'modal' + (wide ? ' wide' : '') + (closing ? ' closing' : '')} role="dialog" aria-label={title}>
         <div className="modal-head">
           <h3>{title}</h3>
-          <button className="mini" onClick={onClose} aria-label="Close"><X size={15} /></button>
+          <button className="mini" onClick={close} aria-label="Close"><X size={15} /></button>
         </div>
         {children}
       </div>
