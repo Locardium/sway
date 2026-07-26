@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Result};
+use rusqlite::{Connection, OptionalExtension, Result};
 use serde::Serialize;
 use std::path::Path;
 
@@ -50,6 +50,12 @@ CREATE TABLE IF NOT EXISTS cues (
     position_ms INTEGER NOT NULL,
     color    TEXT,
     label    TEXT
+);
+
+-- Config persistida clave/valor (ej. toggle de auto-sync XML).
+CREATE TABLE IF NOT EXISTS app_settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 ";
 
@@ -113,6 +119,34 @@ pub fn delete_tracks(conn: &mut Connection, managed: &std::path::Path, ids: &[i6
             let _ = trash::delete(path); // best-effort: no romper si falla
         }
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Config persistida (app_settings)
+// ---------------------------------------------------------------------------
+
+const SETTING_AUTO_SYNC_XML: &str = "auto_sync_xml";
+
+/// Default true: el punto central de Fase 2 es que el XML se mantenga
+/// sincronizado solo, sin que el user tenga que prenderlo a mano.
+pub fn get_auto_sync_xml(conn: &Connection) -> Result<bool> {
+    let v: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            [SETTING_AUTO_SYNC_XML],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(v.map(|s| s == "1").unwrap_or(true))
+}
+
+pub fn set_auto_sync_xml(conn: &Connection, enabled: bool) -> Result<()> {
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![SETTING_AUTO_SYNC_XML, if enabled { "1" } else { "0" }],
+    )?;
     Ok(())
 }
 
@@ -452,6 +486,16 @@ mod tests {
             rows.collect::<Result<_>>().unwrap()
         };
         assert_eq!(positions, vec![0, 1]);
+    }
+
+    #[test]
+    fn auto_sync_xml_defaults_true_and_persists() {
+        let conn = mem();
+        assert!(get_auto_sync_xml(&conn).unwrap());
+        set_auto_sync_xml(&conn, false).unwrap();
+        assert!(!get_auto_sync_xml(&conn).unwrap());
+        set_auto_sync_xml(&conn, true).unwrap();
+        assert!(get_auto_sync_xml(&conn).unwrap());
     }
 
     #[test]

@@ -27,6 +27,7 @@ import {
   seekTo,
   setVolume as setVolumeBackend,
   revealTrack,
+  syncXmlAfterChange,
 } from './api';
 import { beginDrag, didDrag, DragPayload, RawTarget } from './dnd';
 import Sidebar, { Selection, NodeDropHint } from './components/Sidebar';
@@ -375,6 +376,7 @@ export default function App() {
         setStatus(`Imported ${ids.length} tracks to the Library.`);
       }
       await Promise.all([refreshLibrary(), refreshPlaylists(), refreshPlaylistTracks()]);
+      syncXmlAfterChange().catch(() => {});
     } catch (e) {
       setStatus('Import error: ' + e);
     } finally {
@@ -496,22 +498,26 @@ export default function App() {
     const id = await createPlaylist(name, kind, parentId);
     await refreshPlaylists();
     if (kind === 'playlist') setSelection({ type: 'playlist', id });
+    syncXmlAfterChange().catch(() => {});
   }
 
   async function onRename(id: number, name: string) {
     await renamePlaylist(id, name);
     await refreshPlaylists();
+    syncXmlAfterChange().catch(() => {});
   }
 
   async function doDeleteNode(id: number) {
     await deletePlaylist(id);
     if (selection.type === 'playlist' && selection.id === id) setSelection({ type: 'library' });
     await refreshPlaylists();
+    syncXmlAfterChange().catch(() => {});
   }
 
   async function onMoveNode(id: number, parentId: number | null, index: number) {
     try {
       await movePlaylist(id, parentId, index);
+      syncXmlAfterChange().catch(() => {});
     } catch (e) {
       setStatus(String(e));
     }
@@ -522,12 +528,14 @@ export default function App() {
     const n = await addTracksToPlaylist(playlistId, trackIds);
     setStatus(n > 0 ? `Added ${n}.` : 'Already in the playlist.');
     await Promise.all([refreshPlaylists(), refreshPlaylistTracks()]);
+    syncXmlAfterChange().catch(() => {});
   }
 
   async function onReorder(trackIds: number[], index: number) {
     if (selection.type !== 'playlist') return;
     await reorderPlaylistTracks(selection.id, trackIds, index);
     await refreshPlaylistTracks();
+    syncXmlAfterChange().catch(() => {});
   }
 
   async function doRemoveFromPlaylist(trackIds: number[]) {
@@ -535,6 +543,7 @@ export default function App() {
     await removeTracksFromPlaylist(selection.id, trackIds);
     setSelected(new Set());
     await Promise.all([refreshPlaylists(), refreshPlaylistTracks()]);
+    syncXmlAfterChange().catch(() => {});
   }
 
   async function doDeleteTracks(ids: number[]) {
@@ -543,6 +552,7 @@ export default function App() {
     setSelected(new Set());
     setStatus(`Removed ${ids.length} from the library.`);
     await Promise.all([refreshLibrary(), refreshPlaylists(), refreshPlaylistTracks()]);
+    syncXmlAfterChange().catch(() => {});
   }
 
   function rowMenuItems(ids: number[]): MenuItem[] {
@@ -776,6 +786,7 @@ export default function App() {
                     const n = await addTracksToPlaylist(p.id, modal.ids);
                     setStatus(n > 0 ? `Added ${n}.` : 'Already in the playlist.');
                     await Promise.all([refreshPlaylists(), refreshPlaylistTracks()]);
+                    syncXmlAfterChange().catch(() => {});
                     setModal(null);
                   }}
                 >
@@ -814,7 +825,12 @@ export default function App() {
         </Modal>
       )}
       {modal?.type === 'settings' && (
-        <Settings trackCount={library.length} volume={volume} onClose={() => setModal(null)} />
+        <Settings
+          trackCount={library.length}
+          volume={volume}
+          onClose={() => setModal(null)}
+          onStatus={setStatus}
+        />
       )}
 
       {status && (

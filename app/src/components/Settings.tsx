@@ -1,10 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Modal } from './Modal';
+import { exportLibraryXmlNow, getAutoSyncXml, setAutoSyncXml } from '../api';
 
 interface Props {
   trackCount: number;
   volume: number;
   onClose: () => void;
+  onStatus: (msg: string) => void;
 }
 
 function Switch({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
@@ -22,7 +24,7 @@ function Switch({ checked, onChange }: { checked: boolean; onChange: (v: boolean
 
 // Ajustes en su mayoria prototipo (no funcionales todavia): la UI existe para
 // definir el modelo, la logica llega en fases siguientes.
-export default function Settings({ trackCount, volume, onClose }: Props) {
+export default function Settings({ trackCount, volume, onClose, onStatus }: Props) {
   const [gapless, setGapless] = useState(true);
   const [autoplay, setAutoplay] = useState(true);
   const [crossfade, setCrossfade] = useState(0);
@@ -30,6 +32,35 @@ export default function Settings({ trackCount, volume, onClose }: Props) {
   const [normalize, setNormalize] = useState(false);
   const [theme, setTheme] = useState('dark');
   const [accent, setAccent] = useState('sky');
+  const [autoSyncXml, setAutoSyncXmlState] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+
+  useEffect(() => {
+    getAutoSyncXml()
+      .then(setAutoSyncXmlState)
+      .catch(() => {});
+  }, []);
+
+  async function toggleAutoSync(v: boolean) {
+    setAutoSyncXmlState(v);
+    try {
+      await setAutoSyncXml(v);
+    } catch (e) {
+      onStatus(String(e));
+    }
+  }
+
+  async function syncNow() {
+    setSyncing(true);
+    try {
+      await exportLibraryXmlNow();
+      onStatus('iTunes library synced.');
+    } catch (e) {
+      onStatus('Sync error: ' + e);
+    } finally {
+      setSyncing(false);
+    }
+  }
 
   const accents: { id: string; color: string }[] = [
     { id: 'sky', color: 'oklch(80% 0.11 220)' },
@@ -139,15 +170,27 @@ export default function Settings({ trackCount, volume, onClose }: Props) {
           <h4>Export</h4>
           <div className="set-row">
             <div className="set-label">
-              <span>Rekordbox / iTunes XML</span>
-              <small>Coming in the next phase</small>
+              <span>Auto-sync to iTunes library</span>
+              <small>
+                Keeps <code className="set-path">Music\iTunes\iTunes Music Library.xml</code> updated
+                automatically (Rekordbox/Serato read it from there)
+              </small>
             </div>
-            <button disabled>Export…</button>
+            <Switch checked={autoSyncXml} onChange={toggleAutoSync} />
+          </div>
+          <div className="set-row">
+            <div className="set-label">
+              <span>Rekordbox / iTunes XML</span>
+              <small>Writes the library now, regardless of auto-sync</small>
+            </div>
+            <button onClick={syncNow} disabled={syncing}>
+              {syncing ? 'Syncing…' : 'Sync now'}
+            </button>
           </div>
           <div className="set-row">
             <div className="set-label">
               <span>Serato crates</span>
-              <small>Coming in the next phase</small>
+              <small>Coming in a later phase</small>
             </div>
             <button disabled>Export…</button>
           </div>

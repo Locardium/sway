@@ -65,3 +65,10 @@ export const setVolume = (volume: number) => invoke<void>('set_volume', { volume
 export const coverThumb = (id: number) => invoke<string | null>('cover_thumb', { id });
 // Abre el explorador del OS mostrando el archivo.
 export const revealTrack = (id: number) => invoke<void>('reveal_track', { id });
+
+// Auto-sync del iTunes Music Library.xml (Fase 2). "Sync now" siempre
+// escribe; syncXmlAfterChange es fire-and-forget y respeta el toggle.
+export const exportLibraryXmlNow = () => invoke<void>('export_library_xml_now');
+export const syncXmlAfterChange = () => invoke<void>('sync_xml_after_change');
+export const getAutoSyncXml = () => invoke<boolean>('get_auto_sync_xml');
+export const setAutoSyncXml = (enabled: boolean) => invoke<void>('set_auto_sync_xml', { enabled });

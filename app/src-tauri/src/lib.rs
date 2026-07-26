@@ -1,7 +1,9 @@
 mod cover;
 mod db;
+mod export_xml;
 mod import;
 mod player;
+mod xml_sync;
 
 use player::Player;
 use rusqlite::Connection;
@@ -217,6 +219,34 @@ fn playback_position(state: State<AppState>) -> u64 {
     state.player.position_secs()
 }
 
+/// "Sync now" manual: escribe el XML sin importar el estado del toggle.
+#[tauri::command]
+fn export_library_xml_now(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    let conn = state.db.lock().unwrap();
+    xml_sync::write_now(&app, &conn, &state.music_dir).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_auto_sync_xml(state: State<AppState>) -> Result<bool, String> {
+    let conn = state.db.lock().unwrap();
+    db::get_auto_sync_xml(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_auto_sync_xml(state: State<AppState>, enabled: bool) -> Result<(), String> {
+    let conn = state.db.lock().unwrap();
+    db::set_auto_sync_xml(&conn, enabled).map_err(|e| e.to_string())
+}
+
+/// Lo llama el frontend despues de cada mutacion (import, playlists, tracks).
+/// El backend decide si hace algo: si el toggle esta apagado, no-op.
+#[tauri::command]
+fn sync_xml_after_change(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    let conn = state.db.lock().unwrap();
+    xml_sync::write_if_enabled(&app, &conn, &state.music_dir);
+    Ok(())
+}
+
 /// Observa la carpeta gestionada y auto-importa archivos de audio nuevos.
 /// Corre en su propio thread; emite `library-changed` cuando cambia el conteo.
 fn spawn_folder_watch(handle: AppHandle, dir: PathBuf) {
@@ -260,6 +290,9 @@ fn spawn_folder_watch(handle: AppHandle, dir: PathBuf) {
                 let after: i64 = conn
                     .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
                     .unwrap_or(before);
+                if after != before {
+                    xml_sync::write_if_enabled(&handle, &conn, &state.music_dir);
+                }
                 after != before
             };
             if changed {
@@ -327,7 +360,11 @@ pub fn run() {
             resume_playback,
             stop_playback,
             seek_to,
-            playback_position
+            playback_position,
+            export_library_xml_now,
+            get_auto_sync_xml,
+            set_auto_sync_xml,
+            sync_xml_after_change
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
