@@ -66,10 +66,15 @@ fn import_files(
 fn import_from_uri(app: AppHandle, state: State<AppState>, uri: String, name: String) -> Result<i64, String> {
     use std::str::FromStr;
     use tauri_plugin_fs::{FilePath, FsExt};
+    // app.path().file_name() resuelve el nombre real via la API nativa de
+    // Android para content:// (Tauri lo documenta explicitamente para esto).
+    // Mucho mas confiable que adivinar por texto del URI del lado del
+    // frontend — `name` (lo que mando el picker) queda solo de fallback.
+    let resolved_name = app.path().file_name(&uri).unwrap_or(name);
     let file_path = FilePath::from_str(&uri).map_err(|e| e.to_string())?;
     let bytes = app.fs().read(file_path).map_err(|e| e.to_string())?;
     let conn = state.db.lock().unwrap();
-    import::import_bytes(&conn, &state.music_dir, &name, &bytes).map_err(|e| e.to_string())
+    import::import_bytes(&conn, &state.music_dir, &resolved_name, &bytes).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

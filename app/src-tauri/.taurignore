@@ -1,0 +1,5 @@
+# El watcher de `tauri dev`/`android dev` reconstruye cuando ve cambios acá
+# adentro — sin esto, los propios outputs de cada build (gen/android/**/build,
+# .gradle) se ven como "cambios" y dispara un loop infinito de rebuild+install.
+**/build/
+**/.gradle/
