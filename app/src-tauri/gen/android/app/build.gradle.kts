@@ -20,7 +20,10 @@ android {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = "com.sway.app"
         minSdk = 26
-        targetSdk = 36
+        // 34, no 36: desde API 35 Android IMPONE edge-to-edge por sistema
+        // (la app no puede optar afuera solo con codigo, ver MainActivity.kt).
+        // <35 evita esa imposicion y listo, sin pelear con window insets.
+        targetSdk = 34
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
     }
