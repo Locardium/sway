@@ -47,7 +47,7 @@ header {
   grid-template-columns: 1fr minmax(200px, 440px) 1fr;
   align-items: center;
   gap: 16px;
-  padding: 10px 16px;
+  padding: calc(10px + env(safe-area-inset-top)) 16px 10px;
   border-bottom: 1px solid var(--line);
   background: var(--bg);
 }
@@ -349,7 +349,8 @@ body.dragging * { cursor: grabbing !important; }
 /* ---------- Player flotante translucido ---------- */
 footer.player {
   position: fixed;
-  left: 12px; right: 12px; bottom: 12px;
+  left: 12px; right: 12px;
+  bottom: calc(12px + env(safe-area-inset-bottom));
   z-index: var(--z-player);
   border: 1px solid oklch(100% 0 0 / 0.07);
   border-radius: 18px;

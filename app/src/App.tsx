@@ -715,9 +715,11 @@ export default function App() {
             <p className="empty">
               {search
                 ? 'Nothing matches your search.'
-                : selection.type === 'library'
-                  ? 'Drag music or folders from your computer to get started.'
-                  : 'Drag tracks from the Library or from your computer here.'}
+                : isAndroid()
+                  ? 'No tracks yet. Import from desktop for now — Android import is coming in a later phase.'
+                  : selection.type === 'library'
+                    ? 'Drag music or folders from your computer to get started.'
+                    : 'Drag tracks from the Library or from your computer here.'}
             </p>
           )}
         </main>
