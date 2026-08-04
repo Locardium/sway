@@ -30,6 +30,7 @@ import {
   syncXmlAfterChange,
 } from './api';
 import { beginDrag, didDrag, DragPayload, RawTarget } from './dnd';
+import { isAndroid } from './platform';
 import Sidebar, { Selection, NodeDropHint } from './components/Sidebar';
 import TrackTable from './components/TrackTable';
 import PlayerBar, { RepeatMode } from './components/PlayerBar';
@@ -569,11 +570,15 @@ export default function App() {
           setModal({ type: 'track-playlists', id: ids[0], playlistIds });
         },
       },
-      {
-        label: 'Reveal in Explorer',
-        disabled: n !== 1,
-        onClick: () => revealTrack(ids[0]).catch((e) => setStatus(String(e))),
-      },
+      ...(isAndroid()
+        ? []
+        : [
+            {
+              label: 'Reveal in Explorer',
+              disabled: n !== 1,
+              onClick: () => revealTrack(ids[0]).catch((e: unknown) => setStatus(String(e))),
+            } satisfies MenuItem,
+          ]),
       { separator: true, label: '' },
     ];
     if (viewIsPlaylist) {
@@ -704,6 +709,7 @@ export default function App() {
               dropInsertIndex={dropInsertIndex}
               wasDrag={stableWasDrag}
               rowMenuItems={stableRowMenuItems}
+              tapToPlay={isAndroid()}
             />
           ) : (
             <p className="empty">
@@ -741,6 +747,7 @@ export default function App() {
           onVolume={onVolume}
           onToggleShuffle={onToggleShuffle}
           onCycleRepeat={onCycleRepeat}
+          showVolume={!isAndroid()}
         />
       )}
 

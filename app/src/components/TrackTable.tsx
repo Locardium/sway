@@ -76,6 +76,7 @@ interface Props {
   dropInsertIndex: number | null;
   wasDrag: () => boolean;
   rowMenuItems: (ids: number[]) => MenuItem[];
+  tapToPlay?: boolean;
 }
 
 function TrackTable({
@@ -90,6 +91,7 @@ function TrackTable({
   dropInsertIndex,
   wasDrag,
   rowMenuItems,
+  tapToPlay = false,
 }: Props) {
   const [cols, setCols] = useState<ColDef[]>(loadCols);
   const [anchor, setAnchor] = useState<number | null>(null);
@@ -197,6 +199,9 @@ function TrackTable({
     } else {
       onSelectedChange(new Set([t.id]));
       onInspect(t.id);
+      // En Android no hay double-tap ni right-click para "Play" - un tap
+      // simple ya reproduce (ver App.tsx, prop tapToPlay).
+      if (tapToPlay) onPlay(t.id);
     }
     setAnchor(t.id);
   }

@@ -1,4 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
+import { isAndroid } from './platform';
+import * as nativeAudio from './nativeAudio';
 
 export interface Track {
   id: number;
@@ -52,14 +54,27 @@ export const deleteTracks = (ids: number[]) => invoke<void>('delete_tracks', { i
 // Ids de las playlists que contienen el track.
 export const trackPlaylists = (id: number) => invoke<number[]>('track_playlists', { id });
 
-// Playback (rodio/symphonia en Rust).
-export const playTrack = (id: number) => invoke<void>('play_track', { id });
-export const pausePlayback = () => invoke<void>('pause_playback');
-export const resumePlayback = () => invoke<void>('resume_playback');
-export const stopPlayback = () => invoke<void>('stop_playback');
-export const seekTo = (secs: number) => invoke<void>('seek_to', { secs });
-export const playbackPosition = () => invoke<number>('playback_position');
-export const setVolume = (volume: number) => invoke<void>('set_volume', { volume });
+// Playback: desktop mueve un Player de Rust (rodio/symphonia) via invoke;
+// Android/iOS no tienen ese Player — el plugin nativo (Media3/ExoPlayer) se
+// controla directo desde JS (ver nativeAudio.ts). Mismo contrato, dos
+// implementaciones, elegidas una sola vez por plataforma.
+const android = isAndroid();
+
+const desktopPlayTrack = (id: number) => invoke<void>('play_track', { id });
+const desktopPausePlayback = () => invoke<void>('pause_playback');
+const desktopResumePlayback = () => invoke<void>('resume_playback');
+const desktopStopPlayback = () => invoke<void>('stop_playback');
+const desktopSeekTo = (secs: number) => invoke<void>('seek_to', { secs });
+const desktopPlaybackPosition = () => invoke<number>('playback_position');
+const desktopSetVolume = (volume: number) => invoke<void>('set_volume', { volume });
+
+export const playTrack = android ? nativeAudio.playTrack : desktopPlayTrack;
+export const pausePlayback = android ? nativeAudio.pausePlayback : desktopPausePlayback;
+export const resumePlayback = android ? nativeAudio.resumePlayback : desktopResumePlayback;
+export const stopPlayback = android ? nativeAudio.stopPlayback : desktopStopPlayback;
+export const seekTo = android ? nativeAudio.seekTo : desktopSeekTo;
+export const playbackPosition = android ? nativeAudio.playbackPosition : desktopPlaybackPosition;
+export const setVolume = android ? nativeAudio.setVolume : desktopSetVolume;
 
 // Caratula embebida como data-URL (null si el archivo no tiene).
 export const coverThumb = (id: number) => invoke<string | null>('cover_thumb', { id });

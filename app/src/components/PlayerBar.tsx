@@ -33,6 +33,7 @@ interface Props {
   onVolume: (v: number) => void;
   onToggleShuffle: () => void;
   onCycleRepeat: () => void;
+  showVolume?: boolean;
 }
 
 function fmt(ms: number): string {
@@ -63,6 +64,7 @@ export default function PlayerBar({
   onVolume,
   onToggleShuffle,
   onCycleRepeat,
+  showVolume = true,
 }: Props) {
   const barRef = useRef<HTMLDivElement>(null);
   const pct = track.durationMs > 0 ? Math.min(100, (posMs / track.durationMs) * 100) : 0;
@@ -121,25 +123,27 @@ export default function PlayerBar({
         <button className="ctl side stop" onClick={onStop} title="Stop">
           <Square size={13} fill="currentColor" />
         </button>
-        <div className="vol">
-          <button
-            className="ctl side"
-            onClick={() => onVolume(volume === 0 ? 1 : 0)}
-            title={volume === 0 ? 'Unmute' : 'Mute'}
-          >
-            <VolIcon v={volume} />
-          </button>
-          <input
-            className="range vol-range"
-            type="range"
-            min={0}
-            max={100}
-            value={Math.round(volume * 100)}
-            onChange={(e) => onVolume(Number(e.target.value) / 100)}
-            style={{ ['--fill' as string]: `${Math.round(volume * 100)}%` }}
-            aria-label="Volume"
-          />
-        </div>
+        {showVolume && (
+          <div className="vol">
+            <button
+              className="ctl side"
+              onClick={() => onVolume(volume === 0 ? 1 : 0)}
+              title={volume === 0 ? 'Unmute' : 'Mute'}
+            >
+              <VolIcon v={volume} />
+            </button>
+            <input
+              className="range vol-range"
+              type="range"
+              min={0}
+              max={100}
+              value={Math.round(volume * 100)}
+              onChange={(e) => onVolume(Number(e.target.value) / 100)}
+              style={{ ['--fill' as string]: `${Math.round(volume * 100)}%` }}
+              aria-label="Volume"
+            />
+          </div>
+        )}
       </div>
     </footer>
   );

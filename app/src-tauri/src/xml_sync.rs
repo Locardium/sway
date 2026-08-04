@@ -4,11 +4,15 @@
 
 use crate::db;
 use crate::export_xml;
-use anyhow::{Context, Result};
+use anyhow::Result;
+#[cfg(target_os = "windows")]
+use anyhow::Context;
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
+#[cfg(target_os = "windows")]
+use tauri::Manager;
 
 /// Key que `export_xml::generate_xml` mete en todo archivo que escribe Sway.
 /// Sirve para distinguir "esto lo escribimos nosotros" (no hace falta

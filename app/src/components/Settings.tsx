@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Modal } from './Modal';
 import { exportLibraryXmlNow, getAutoSyncXml, setAutoSyncXml } from '../api';
+import { isAndroid } from '../platform';
 
 interface Props {
   trackCount: number;
@@ -35,11 +36,14 @@ export default function Settings({ trackCount, volume, onClose, onStatus }: Prop
   const [autoSyncXml, setAutoSyncXmlState] = useState(true);
   const [syncing, setSyncing] = useState(false);
 
+  const showExport = !isAndroid();
+
   useEffect(() => {
+    if (!showExport) return;
     getAutoSyncXml()
       .then(setAutoSyncXmlState)
       .catch(() => {});
-  }, []);
+  }, [showExport]);
 
   async function toggleAutoSync(v: boolean) {
     setAutoSyncXmlState(v);
@@ -166,35 +170,37 @@ export default function Settings({ trackCount, volume, onClose, onStatus }: Prop
           </div>
         </section>
 
-        <section>
-          <h4>Export</h4>
-          <div className="set-row">
-            <div className="set-label">
-              <span>Auto-sync to iTunes library</span>
-              <small>
-                Keeps <code className="set-path">Music\iTunes\iTunes Music Library.xml</code> updated
-                automatically (Rekordbox/Serato read it from there)
-              </small>
+        {showExport && (
+          <section>
+            <h4>Export</h4>
+            <div className="set-row">
+              <div className="set-label">
+                <span>Auto-sync to iTunes library</span>
+                <small>
+                  Keeps <code className="set-path">Music\iTunes\iTunes Music Library.xml</code> updated
+                  automatically (Rekordbox/Serato read it from there)
+                </small>
+              </div>
+              <Switch checked={autoSyncXml} onChange={toggleAutoSync} />
             </div>
-            <Switch checked={autoSyncXml} onChange={toggleAutoSync} />
-          </div>
-          <div className="set-row">
-            <div className="set-label">
-              <span>Rekordbox / iTunes XML</span>
-              <small>Writes the library now, regardless of auto-sync</small>
+            <div className="set-row">
+              <div className="set-label">
+                <span>Rekordbox / iTunes XML</span>
+                <small>Writes the library now, regardless of auto-sync</small>
+              </div>
+              <button onClick={syncNow} disabled={syncing}>
+                {syncing ? 'Syncing…' : 'Sync now'}
+              </button>
             </div>
-            <button onClick={syncNow} disabled={syncing}>
-              {syncing ? 'Syncing…' : 'Sync now'}
-            </button>
-          </div>
-          <div className="set-row">
-            <div className="set-label">
-              <span>Serato crates</span>
-              <small>Coming in a later phase</small>
+            <div className="set-row">
+              <div className="set-label">
+                <span>Serato crates</span>
+                <small>Coming in a later phase</small>
+              </div>
+              <button disabled>Export…</button>
             </div>
-            <button disabled>Export…</button>
-          </div>
-        </section>
+          </section>
+        )}
 
         <section>
           <h4>About</h4>

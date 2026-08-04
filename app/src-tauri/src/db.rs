@@ -116,7 +116,16 @@ pub fn delete_tracks(conn: &mut Connection, managed: &std::path::Path, ids: &[i6
     for p in paths {
         let path = std::path::Path::new(&p);
         if path.starts_with(managed) && path.exists() {
-            let _ = trash::delete(path); // best-effort: no romper si falla
+            // El crate `trash` no soporta Android (sin papelera de OS ahi).
+            // best-effort: no romper si falla.
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            {
+                let _ = trash::delete(path);
+            }
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            {
+                let _ = std::fs::remove_file(path);
+            }
         }
     }
     Ok(())

@@ -2,8 +2,17 @@ mod cover;
 mod db;
 mod export_xml;
 mod import;
-mod player;
 mod xml_sync;
+
+// Desktop: Player real (rodio/symphonia, thread propio). Android/iOS: stub
+// con la misma API — la reproduccion ahi va por el plugin nativo desde JS
+// (ver player_stub.rs y app/src/nativeAudio.ts), este modulo solo existe
+// para que AppState y los comandos de playback compilen igual.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod player;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[path = "player_stub.rs"]
+mod player;
 
 use player::Player;
 use rusqlite::Connection;
@@ -78,6 +87,15 @@ fn cover_thumb(state: State<AppState>, id: i64) -> Result<Option<String>, String
     let thumb = cover::thumb_data_url(std::path::Path::new(&path));
     state.covers.lock().unwrap().insert(id, thumb.clone());
     Ok(thumb)
+}
+
+/// Resuelve id -> path del archivo. En desktop `play_track` ya lo hace
+/// internamente en Rust; en Android el JS necesita el path para pasarselo al
+/// plugin nativo (`setSource`), asi que hace falta exponerlo como comando.
+#[tauri::command]
+fn get_track_path(state: State<AppState>, id: i64) -> Result<String, String> {
+    let conn = state.db.lock().unwrap();
+    db::track_path(&conn, id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -305,8 +323,15 @@ fn spawn_folder_watch(handle: AppHandle, dir: PathBuf) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    #[allow(unused_mut)] // mut solo hace falta en el cfg de abajo (android/ios)
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_os::init());
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        builder = builder.plugin(tauri_plugin_native_audio::init());
+    }
+    builder
         .setup(|app| {
             let dir = app.path().app_data_dir().expect("app data dir");
             std::fs::create_dir_all(&dir).ok();
@@ -346,6 +371,7 @@ pub fn run() {
             set_volume,
             cover_thumb,
             reveal_track,
+            get_track_path,
             list_playlists,
             create_playlist,
             rename_playlist,
