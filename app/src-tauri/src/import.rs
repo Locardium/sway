@@ -32,25 +32,30 @@ fn read_meta(path: &Path) -> Meta {
         duration_ms: 0,
         bpm: None,
     };
-    if let Ok(tagged) = lofty::read_from_path(path) {
-        m.duration_ms = tagged.properties().duration().as_millis() as i64;
-        if let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) {
-            if let Some(t) = tag.title() {
-                if !t.is_empty() {
-                    m.title = t.to_string();
+    match lofty::read_from_path(path) {
+        Err(e) => {
+            log::warn!("lofty read_from_path fallo para {}: {e}", path.display());
+        }
+        Ok(tagged) => {
+            m.duration_ms = tagged.properties().duration().as_millis() as i64;
+            if let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) {
+                if let Some(t) = tag.title() {
+                    if !t.is_empty() {
+                        m.title = t.to_string();
+                    }
                 }
-            }
-            if let Some(a) = tag.artist() {
-                m.artist = a.to_string();
-            }
-            if let Some(al) = tag.album() {
-                m.album = al.to_string();
-            }
-            if let Some(g) = tag.genre() {
-                m.genre = g.to_string();
-            }
-            if let Some(b) = tag.get_string(&ItemKey::IntegerBpm) {
-                m.bpm = b.parse().ok();
+                if let Some(a) = tag.artist() {
+                    m.artist = a.to_string();
+                }
+                if let Some(al) = tag.album() {
+                    m.album = al.to_string();
+                }
+                if let Some(g) = tag.genre() {
+                    m.genre = g.to_string();
+                }
+                if let Some(b) = tag.get_string(ItemKey::IntegerBpm) {
+                    m.bpm = b.parse().ok();
+                }
             }
         }
     }

@@ -19,12 +19,19 @@ tauri-plugin-os = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
-lofty = "0.21"
+lofty = "0.24"
 walkdir = "2"
 anyhow = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp"] }
 base64 = "0.22"
 notify-debouncer-mini = "0.7.0"
+log = "0.4"
+
+# En Android eprintln! no llega a logcat; sin esto no hay forma de ver
+# errores en runtime (nos quemamos con esto: lofty fallaba en silencio en
+# import_bytes/thumb_data_url y no habia como verlo).
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.14"
 
 # Desktop-only: symphonia/rodio decodifican audio; trash no soporta Android
 # (sin papelera de OS ahi, ver db.rs::delete_tracks).

@@ -7,7 +7,13 @@ use std::path::Path;
 const THUMB_SIZE: u32 = 256;
 
 pub fn thumb_data_url(path: &Path) -> Option<String> {
-    let tagged = lofty::read_from_path(path).ok()?;
+    let tagged = match lofty::read_from_path(path) {
+        Ok(t) => t,
+        Err(e) => {
+            log::warn!("cover: lofty read_from_path fallo para {}: {e}", path.display());
+            return None;
+        }
+    };
     let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
     let pic = tag.pictures().first()?;
     let img = image::load_from_memory(pic.data()).ok()?;

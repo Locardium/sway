@@ -343,6 +343,13 @@ fn spawn_folder_watch(handle: AppHandle, dir: PathBuf) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "android")]
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Debug)
+            .with_tag("sway"),
+    );
+
     #[allow(unused_mut)] // mut solo hace falta en el cfg de abajo (android/ios)
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
