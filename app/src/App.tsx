@@ -716,7 +716,7 @@ export default function App() {
               {search
                 ? 'Nothing matches your search.'
                 : isAndroid()
-                  ? 'No tracks yet. Import from desktop for now — Android import is coming in a later phase.'
+                  ? 'No tracks yet. Import tracks from Settings → Library.'
                   : selection.type === 'library'
                     ? 'Drag music or folders from your computer to get started.'
                     : 'Drag tracks from the Library or from your computer here.'}
@@ -839,6 +839,9 @@ export default function App() {
           volume={volume}
           onClose={() => setModal(null)}
           onStatus={setStatus}
+          onImported={async () => {
+            await Promise.all([refreshLibrary(), refreshPlaylists()]);
+          }}
         />
       )}
 

@@ -48,6 +48,9 @@ export const reorderPlaylistTracks = (playlistId: number, trackIds: number[], in
 export const importFolder = (folder: string) => invoke<number>('import_folder', { folder });
 // Import de archivos/carpetas sueltos (drop del OS). Devuelve ids de tracks.
 export const importFiles = (paths: string[]) => invoke<number[]>('import_files', { paths });
+// Import desde un picker (Android/iOS): uri puede ser content:// o file://.
+export const importFromUri = (uri: string, name: string) =>
+  invoke<number>('import_from_uri', { uri, name });
 export const listTracks = () => invoke<Track[]>('list_tracks');
 // Borra de la biblioteca (no toca archivos en disco).
 export const deleteTracks = (ids: number[]) => invoke<void>('delete_tracks', { ids });

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
+import { open } from '@tauri-apps/plugin-dialog';
 import { Modal } from './Modal';
-import { exportLibraryXmlNow, getAutoSyncXml, setAutoSyncXml } from '../api';
+import { exportLibraryXmlNow, getAutoSyncXml, importFromUri, setAutoSyncXml } from '../api';
 import { isAndroid } from '../platform';
 
 interface Props {
@@ -8,6 +9,35 @@ interface Props {
   volume: number;
   onClose: () => void;
   onStatus: (msg: string) => void;
+  onImported: () => void | Promise<void>;
+}
+
+const AUDIO_MIME = [
+  'audio/flac',
+  'audio/mpeg',
+  'audio/wav',
+  'audio/x-wav',
+  'audio/mp4',
+  'audio/aac',
+  'audio/ogg',
+  'audio/opus',
+  'audio/*',
+];
+
+// El picker de Android da un content:// URI, no un path con nombre de
+// archivo legible. Best-effort: el ultimo segmento suele traer el nombre
+// original codeado (funciona con el document picker estandar de Android;
+// otros proveedores pueden dar algo generico — lofty igual detecta el
+// formato real por contenido, no por esta extension).
+function guessFileName(uri: string): string {
+  try {
+    const decoded = decodeURIComponent(uri);
+    const last = decoded.split(/[/:]/).pop()?.trim();
+    if (last && last.includes('.')) return last;
+  } catch {
+    // ignore, cae al fallback
+  }
+  return `track-${Date.now()}.mp3`;
 }
 
 function Switch({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
@@ -25,7 +55,7 @@ function Switch({ checked, onChange }: { checked: boolean; onChange: (v: boolean
 
 // Ajustes en su mayoria prototipo (no funcionales todavia): la UI existe para
 // definir el modelo, la logica llega en fases siguientes.
-export default function Settings({ trackCount, volume, onClose, onStatus }: Props) {
+export default function Settings({ trackCount, volume, onClose, onStatus, onImported }: Props) {
   const [gapless, setGapless] = useState(true);
   const [autoplay, setAutoplay] = useState(true);
   const [crossfade, setCrossfade] = useState(0);
@@ -35,8 +65,10 @@ export default function Settings({ trackCount, volume, onClose, onStatus }: Prop
   const [accent, setAccent] = useState('sky');
   const [autoSyncXml, setAutoSyncXmlState] = useState(true);
   const [syncing, setSyncing] = useState(false);
+  const [importing, setImporting] = useState(false);
 
-  const showExport = !isAndroid();
+  const android = isAndroid();
+  const showExport = !android;
 
   useEffect(() => {
     if (!showExport) return;
@@ -52,6 +84,36 @@ export default function Settings({ trackCount, volume, onClose, onStatus }: Prop
     } catch (e) {
       onStatus(String(e));
     }
+  }
+
+  async function pickAndImport() {
+    let picked: string | string[] | null;
+    try {
+      picked = await open({
+        multiple: true,
+        filters: [{ name: 'Audio', extensions: AUDIO_MIME }],
+      });
+    } catch (e) {
+      onStatus('Picker error: ' + e);
+      return;
+    }
+    if (!picked) return;
+    const uris = Array.isArray(picked) ? picked : [picked];
+    setImporting(true);
+    let ok = 0;
+    let failed = 0;
+    for (const uri of uris) {
+      try {
+        await importFromUri(uri, guessFileName(uri));
+        ok++;
+      } catch (e) {
+        failed++;
+        console.error('import_from_uri failed for', uri, e);
+      }
+    }
+    setImporting(false);
+    await onImported();
+    onStatus(failed === 0 ? `Imported ${ok} track(s).` : `Imported ${ok}, ${failed} failed.`);
   }
 
   async function syncNow() {
@@ -89,6 +151,17 @@ export default function Settings({ trackCount, volume, onClose, onStatus }: Prop
               <button disabled>Change…</button>
             </div>
           </div>
+          {android && (
+            <div className="set-row">
+              <div className="set-label">
+                <span>Import tracks</span>
+                <small>Pick audio files from this device</small>
+              </div>
+              <button onClick={pickAndImport} disabled={importing}>
+                {importing ? 'Importing…' : 'Import…'}
+              </button>
+            </div>
+          )}
           <div className="set-row">
             <div className="set-label">
               <span>Tracks in library</span>

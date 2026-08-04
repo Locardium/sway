@@ -93,19 +93,11 @@ fn managed_dest(managed: &Path, src: &Path) -> PathBuf {
     dest
 }
 
-/// Copia el archivo a la carpeta gestionada (si hace falta), lee tags e
-/// inserta. Devuelve el id. Los tracks quedan siempre bajo `managed`.
-fn import_one(conn: &Connection, managed: &Path, src: &Path) -> Result<i64> {
-    let already_managed = src.starts_with(managed);
-    let dest = if already_managed {
-        src.to_path_buf()
-    } else {
-        managed_dest(managed, src)
-    };
-    if dest != src && !dest.exists() {
-        std::fs::copy(src, &dest)?;
-    }
-    let m = read_meta(&dest);
+/// Inserta (o reusa via INSERT OR IGNORE) el track ya ubicado en `dest`
+/// dentro de la carpeta gestionada. Compartido por `import_one` (src en
+/// disco) e `import_bytes` (src en memoria, ver mas abajo).
+fn insert_track(conn: &Connection, dest: &Path) -> Result<i64> {
+    let m = read_meta(dest);
     conn.execute(
         "INSERT OR IGNORE INTO tracks (path, title, artist, album, genre, duration_ms, bpm)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -119,12 +111,68 @@ fn import_one(conn: &Connection, managed: &Path, src: &Path) -> Result<i64> {
             m.bpm
         ],
     )?;
-    let id = conn.query_row(
+    conn.query_row(
         "SELECT id FROM tracks WHERE path = ?1",
         [dest.to_string_lossy()],
         |r| r.get(0),
-    )?;
-    Ok(id)
+    )
+    .map_err(Into::into)
+}
+
+/// Copia el archivo a la carpeta gestionada (si hace falta), lee tags e
+/// inserta. Devuelve el id. Los tracks quedan siempre bajo `managed`.
+fn import_one(conn: &Connection, managed: &Path, src: &Path) -> Result<i64> {
+    let already_managed = src.starts_with(managed);
+    let dest = if already_managed {
+        src.to_path_buf()
+    } else {
+        managed_dest(managed, src)
+    };
+    if dest != src && !dest.exists() {
+        std::fs::copy(src, &dest)?;
+    }
+    insert_track(conn, &dest)
+}
+
+/// Igual que `managed_dest` pero sin un archivo fuente en disco para
+/// stat-ear (los bytes ya estan en memoria — ver `import_bytes`).
+fn managed_dest_for(managed: &Path, name: &str, size: u64) -> PathBuf {
+    let dest = managed.join(name);
+    if dest.exists() {
+        let dsize = std::fs::metadata(&dest).ok().map(|m| m.len());
+        if dsize == Some(size) {
+            return dest; // mismo archivo, reusar
+        }
+        let stem = Path::new(name).file_stem().and_then(|s| s.to_str()).unwrap_or("track");
+        let ext = Path::new(name).extension().and_then(|s| s.to_str()).unwrap_or("");
+        let mut i = 2;
+        loop {
+            let cand = if ext.is_empty() {
+                managed.join(format!("{stem} ({i})"))
+            } else {
+                managed.join(format!("{stem} ({i}).{ext}"))
+            };
+            if !cand.exists() {
+                return cand;
+            }
+            i += 1;
+        }
+    }
+    dest
+}
+
+/// Importa bytes ya leidos en memoria (Android: el picker da URIs
+/// `content://` que Rust no abre con `std::fs`; el comando `import_from_uri`
+/// en lib.rs las resuelve via `tauri_plugin_fs` y manda bytes + nombre
+/// original acá). No valida contra `AUDIO_EXTS`: el picker ya filtro por
+/// MIME type del lado del SO, y lofty detecta el formato real por contenido
+/// aunque el nombre venga con una extension generica.
+pub fn import_bytes(conn: &Connection, managed: &Path, name: &str, bytes: &[u8]) -> Result<i64> {
+    let dest = managed_dest_for(managed, name, bytes.len() as u64);
+    if !dest.exists() {
+        std::fs::write(&dest, bytes)?;
+    }
+    insert_track(conn, &dest)
 }
 
 /// Junta todos los archivos de audio bajo `roots` (expande directorios).

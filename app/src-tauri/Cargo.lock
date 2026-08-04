@@ -3489,6 +3489,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
+ "tauri-plugin-fs",
  "tauri-plugin-native-audio",
  "tauri-plugin-os",
  "trash",

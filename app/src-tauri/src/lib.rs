@@ -57,6 +57,21 @@ fn import_files(
     .map_err(|e| e.to_string())
 }
 
+/// Import desde un picker de archivos (Android/iOS): el picker da un
+/// `content://` (o `file://`) URI, no un path de filesystem crudo que
+/// `std::fs` pueda abrir directo. `tauri_plugin_fs`'s `Fs::read` sabe
+/// resolver esos URIs (soporte explicito para Android en el crate),
+/// asi que la lectura pasa por ahi en vez de por std::fs.
+#[tauri::command]
+fn import_from_uri(app: AppHandle, state: State<AppState>, uri: String, name: String) -> Result<i64, String> {
+    use std::str::FromStr;
+    use tauri_plugin_fs::{FilePath, FsExt};
+    let file_path = FilePath::from_str(&uri).map_err(|e| e.to_string())?;
+    let bytes = app.fs().read(file_path).map_err(|e| e.to_string())?;
+    let conn = state.db.lock().unwrap();
+    import::import_bytes(&conn, &state.music_dir, &name, &bytes).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn track_playlists(state: State<AppState>, id: i64) -> Result<Vec<i64>, String> {
     let conn = state.db.lock().unwrap();
@@ -326,6 +341,7 @@ pub fn run() {
     #[allow(unused_mut)] // mut solo hace falta en el cfg de abajo (android/ios)
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_os::init());
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
@@ -365,6 +381,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             import_folder,
             import_files,
+            import_from_uri,
             track_playlists,
             list_tracks,
             delete_tracks,
