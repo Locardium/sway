@@ -11,6 +11,14 @@
 
 # === Tauri generado (regenerable con `tauri android init`) ===
 **/gen/
+# excepcion: app/src-tauri/gen/android tiene customizacion nativa a mano que
+# NO es regenerable sin perderse (minSdk, MainActivity sin edge-to-edge) —
+# se commitea para que sobreviva un clone/otra PC. schemas/ sigue afuera
+# (metadata de tooling pura, sin nada hecho a mano).
+!app/src-tauri/gen/
+!app/src-tauri/gen/android/
+!app/src-tauri/gen/android/**
+app/src-tauri/gen/schemas/
 
 # === Android / Gradle ===
 **/.gradle/
