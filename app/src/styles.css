@@ -29,7 +29,12 @@
   --ease: cubic-bezier(0.22, 1, 0.36, 1); /* ease-out-quint */
 }
 
-* { box-sizing: border-box; }
+* {
+  box-sizing: border-box;
+  /* Android pinta un recuadro azul sobre cualquier cosa tocable. El feedback
+     de toque lo damos nosotros (:active), no el sistema. */
+  -webkit-tap-highlight-color: transparent;
+}
 body {
   margin: 0;
   background: var(--bg);
@@ -80,6 +85,7 @@ button {
   transition: border-color 150ms var(--ease), background 150ms var(--ease),
     color 150ms var(--ease), transform 150ms var(--ease);
 }
+button { touch-action: manipulation; }
 button:hover { border-color: var(--accent-dim); }
 button:focus-visible { outline: 2px solid var(--accent-dim); outline-offset: 1px; }
 button:disabled { opacity: 0.45; cursor: default; }
@@ -398,6 +404,15 @@ button.ctl.main {
 }
 button.ctl.main:hover { background: var(--accent); color: var(--accent-ink); transform: scale(1.05); }
 button.ctl.stop { color: var(--muted); }
+/* En touch el :hover se queda pegado despues del tap (parece que el boton
+   quedo activado). Sin mouse, el estado hover no existe. */
+@media (hover: none) {
+  button.ctl:hover, button.ctl.main:hover { transform: none; }
+  button.ctl:hover { color: var(--text); }
+  button.ctl.side:hover { color: var(--muted); }
+  button.ctl.side.on:hover { color: var(--accent); }
+  button.ctl.main:hover { background: var(--text); color: var(--bg); }
+}
 
 .seek { display: flex; align-items: center; gap: 10px; }
 .time {
@@ -409,13 +424,20 @@ button.ctl.stop { color: var(--muted); }
   background: oklch(100% 0 0 / 0.14); border-radius: 999px;
   cursor: pointer;
   transition: height 120ms var(--ease);
+  /* El arrastre lo maneja la barra: sin esto el navegador se queda el gesto
+     para hacer scroll y el dedo nunca mueve el knob. */
+  touch-action: none;
 }
-.seek-bar:hover { height: 6px; }
+/* La barra visible mide 4px; el area que responde al dedo, 28px. */
+.seek-bar::before {
+  content: ''; position: absolute; inset: -12px 0;
+}
+.seek-bar:hover, .seek-bar.dragging { height: 6px; }
 .seek-fill {
   position: absolute; inset: 0 auto 0 0;
   background: var(--text); border-radius: 999px;
 }
-.seek-bar:hover .seek-fill { background: var(--accent); }
+.seek-bar:hover .seek-fill, .seek-bar.dragging .seek-fill { background: var(--accent); }
 .seek-knob {
   position: absolute; top: 50%;
   width: 11px; height: 11px;
@@ -425,7 +447,11 @@ button.ctl.stop { color: var(--muted); }
   pointer-events: none;
   transition: opacity 120ms var(--ease);
 }
-.seek-bar:hover .seek-knob { opacity: 1; }
+.seek-bar:hover .seek-knob, .seek-bar.dragging .seek-knob { opacity: 1; }
+/* Sin mouse no hay hover que revele el knob: mostrarlo siempre. */
+@media (hover: none) {
+  .seek-knob { opacity: 1; }
+}
 
 .player-right { display: flex; justify-content: flex-end; align-items: center; gap: 6px; min-width: 0; }
 .vol { display: flex; align-items: center; gap: 4px; }

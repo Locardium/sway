@@ -1,3 +1,174 @@
 package com.sway.app
 
-class MainActivity : TauriActivity()
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import android.webkit.WebView
+import androidx.media3.common.ForwardingPlayer
+import androidx.media3.common.Player
+import androidx.media3.ui.PlayerNotificationManager
+import app.tauri.nativeaudio.NativeAudioRuntime
+
+/// Sway maneja la cola de reproduccion del lado JS (ver App.tsx), asi que la
+/// app necesita dos cosas del lado nativo que Tauri no da solo.
+class MainActivity : TauriActivity() {
+    private val main = Handler(Looper.getMainLooper())
+
+    /// El `MediaSession` del plugin sobrevive a la Activity (lo sostiene un
+    /// foreground service), y `tauri android dev` la recrea en cada reload.
+    /// Por eso el player envuelto no puede quedarse con una referencia a la
+    /// Activity: apuntaria a una WebView muerta despues del primer reload.
+    /// Resuelve contra la Activity viva en cada toque.
+    companion object {
+        private const val TAG = "Sway"
+
+        @Volatile
+        private var live: MainActivity? = null
+
+        fun dispatchMediaButton(button: String) {
+            Log.i(TAG, "boton multimedia: $button")
+            val activity = live ?: return
+            val view = activity.webView ?: return
+            view.post {
+                view.evaluateJavascript(
+                    "window.__swayMediaButton && window.__swayMediaButton('$button')",
+                    null,
+                )
+            }
+        }
+    }
+
+    private var webView: WebView? = null
+
+    override fun onWebViewCreate(webView: WebView) {
+        this.webView = webView
+        // Sway es una app, no una pagina: el pinch y el doble tap no tienen
+        // que escalar la UI. El meta viewport ya lo pide, esto lo garantiza
+        // aunque el WebView decida ignorarlo.
+        webView.settings.setSupportZoom(false)
+        webView.settings.builtInZoomControls = false
+        webView.settings.displayZoomControls = false
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        live = this
+        main.post(installTransportWrapper)
+
+        val filter = IntentFilter().apply {
+            addAction(PlayerNotificationManager.ACTION_FAST_FORWARD)
+            addAction(PlayerNotificationManager.ACTION_REWIND)
+            addAction(PlayerNotificationManager.ACTION_NEXT)
+            addAction(PlayerNotificationManager.ACTION_PREVIOUS)
+        }
+        // Se registra por toda la vida de la activity, no por onStart/onStop:
+        // la notificacion se usa justamente con la app en background, o sea
+        // despues de onStop.
+        //
+        // Los broadcasts son internos del paquete; desde API 33 hay que
+        // declararlo explicitamente o el sistema tira SecurityException.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(notificationButtons, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(notificationButtons, filter)
+        }
+    }
+
+    override fun onDestroy() {
+        main.removeCallbacks(installTransportWrapper)
+        runCatching { unregisterReceiver(notificationButtons) }
+        if (live === this) live = null
+        super.onDestroy()
+    }
+
+    /// El WebView sigue vivo con la app en background.
+    ///
+    /// `WryActivity.onPause()` llama `mWebView.onPause()`, que congela el JS
+    /// de la pagina. Para una app comun esta perfecto, pero aca la logica de
+    /// reproduccion vive en JS: con el WebView pausado no corre el
+    /// auto-advance al terminar un track, no se actualiza la posicion, y no
+    /// llegan los botones de la notificacion — todo eso pasa justamente
+    /// mientras la app NO esta en pantalla. Volver a resumirlo despues del
+    /// super es la unica forma de evitarlo sin tocar el codigo generado.
+    ///
+    /// El costo es que el WebView sigue consumiendo en background; se asume
+    /// porque cuando eso pasa hay audio sonando de todas formas (el plugin
+    /// mantiene un foreground service).
+    override fun onPause() {
+        super.onPause()
+        webView?.onResume()
+    }
+
+    /// Anterior/siguiente de la notificacion y el lockscreen -> la app.
+    ///
+    /// `tauri-plugin-native-audio` publica un `MediaSession` cuyo player
+    /// redirige a proposito `seekToNext()`/`seekToPrevious()` a
+    /// `seekForward()`/`seekBack()`: saltos de 10s dentro del track, nunca
+    /// cambio de cancion. No expone ningun evento ni forma de reconfigurarlo.
+    ///
+    /// Desde Android 13 los controles de la notificacion multimedia los dibuja
+    /// el sistema a partir del `MediaSession`, no de las acciones de la
+    /// notificacion, asi que ese player es el unico punto por donde pasan
+    /// esos botones. `MediaSession.setPlayer()` es publico y
+    /// `NativeAudioRuntime.mediaSession()` tambien: alcanza con envolver el
+    /// player que ya tiene y quedarse con los comandos de transporte, dejando
+    /// todo el resto (estado, metadata, play/pause, seek) delegado tal cual.
+    /// El plugin queda intacto.
+    ///
+    /// Del lado JS lo recibe `window.__swayMediaButton` (ver App.tsx).
+    private class TransportPlayer(inner: Player) : ForwardingPlayer(inner) {
+        override fun seekToNext() = dispatchMediaButton("next")
+        override fun seekToNextMediaItem() = dispatchMediaButton("next")
+        override fun seekForward() = dispatchMediaButton("next")
+        override fun seekToPrevious() = dispatchMediaButton("prev")
+        override fun seekToPreviousMediaItem() = dispatchMediaButton("prev")
+        override fun seekBack() = dispatchMediaButton("prev")
+    }
+
+    /// Segundo camino para los mismos botones, por las dudas.
+    ///
+    /// Desde Android 13 los controles de la notificacion multimedia salen del
+    /// `MediaSession` (los agarra `TransportPlayer`), pero en versiones
+    /// anteriores — y en las capas de algunos fabricantes — los dibuja el
+    /// propio `PlayerNotificationManager`, que despacha cada boton como un
+    /// broadcast dentro del paquete con acciones que son constantes publicas.
+    /// Escuchar las dos vias cuesta poco; si llegaran a dispararse las dos por
+    /// un mismo toque, el handler de JS descarta el duplicado.
+    private val notificationButtons = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                PlayerNotificationManager.ACTION_FAST_FORWARD,
+                PlayerNotificationManager.ACTION_NEXT -> dispatchMediaButton("next")
+                PlayerNotificationManager.ACTION_REWIND,
+                PlayerNotificationManager.ACTION_PREVIOUS -> dispatchMediaButton("prev")
+            }
+        }
+    }
+
+    /// La sesion la crea el plugin la primera vez que JS lo inicializa, o sea
+    /// despues de que arranca la activity: hay que esperarla.
+    private val installTransportWrapper = object : Runnable {
+        override fun run() {
+            val session = NativeAudioRuntime.mediaSession()
+            val player = session?.player
+            if (session == null || player == null) {
+                main.postDelayed(this, 1000)
+                return
+            }
+            // Si ya esta envuelto (Activity recreada, la sesion sobrevivio) no
+            // hay nada que hacer: `dispatchMediaButton` resuelve solo contra la
+            // Activity viva.
+            if (player !is TransportPlayer) {
+                session.player = TransportPlayer(player)
+                Log.i(TAG, "MediaSession transport wrapper instalado")
+            }
+        }
+    }
+}

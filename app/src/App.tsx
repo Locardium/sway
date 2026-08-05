@@ -24,6 +24,7 @@ import {
   resumePlayback,
   stopPlayback,
   playbackPosition,
+  subscribePlayback,
   seekTo,
   setVolume as setVolumeBackend,
   revealTrack,
@@ -33,7 +34,7 @@ import { beginDrag, didDrag, DragPayload, RawTarget } from './dnd';
 import { isAndroid } from './platform';
 import Sidebar, { Selection, NodeDropHint } from './components/Sidebar';
 import TrackTable from './components/TrackTable';
-import PlayerBar, { RepeatMode } from './components/PlayerBar';
+import PlayerBar, { RepeatMode, REPEAT_LABEL } from './components/PlayerBar';
 import RightPanel from './components/RightPanel';
 import Settings from './components/Settings';
 import { Modal, NamePrompt, Confirm } from './components/Modal';
@@ -49,6 +50,9 @@ type ModalState =
   | null;
 
 const VOL_STORAGE = 'sway.volume';
+/// Antes de este punto del track, "atras" salta al anterior en vez de
+/// reiniciar el actual.
+const RESTART_MS = 3000;
 
 function shuffled<T>(arr: T[]): T[] {
   const a = [...arr];
@@ -81,9 +85,14 @@ export default function App() {
   const [paused, setPaused] = useState(false);
   const [posMs, setPosMs] = useState(0);
   const [shuffle, setShuffle] = useState(() => localStorage.getItem('sway.shuffle') === '1');
-  const [repeat, setRepeat] = useState<RepeatMode>(
-    () => (localStorage.getItem('sway.repeat') as RepeatMode) || 'off',
-  );
+  const [repeat, setRepeat] = useState<RepeatMode>(() => {
+    // 'all'/'one' son los nombres viejos (repeat de cola). El modo ahora es
+    // siempre sobre el track actual, ver RepeatMode en PlayerBar.
+    const saved = localStorage.getItem('sway.repeat');
+    if (saved === 'track' || saved === 'once') return saved;
+    if (saved === 'all' || saved === 'one') return 'track';
+    return 'off';
+  });
   const [volume, setVol] = useState(() => {
     const v = Number(localStorage.getItem(VOL_STORAGE));
     return isNaN(v) || v < 0 || v > 1 ? 1 : v;
@@ -128,8 +137,10 @@ export default function App() {
     }
   }, [selection]);
 
-  // Poll de posicion.
+  // Poll de posicion (desktop). Android no lo usa: el plugin nativo empuja su
+  // estado, ver el efecto de abajo.
   useEffect(() => {
+    if (subscribePlayback) return;
     const t = setInterval(async () => {
       if (currentId != null && !paused && Date.now() >= seekGuard.current) {
         try {
@@ -139,6 +150,60 @@ export default function App() {
     }, 500);
     return () => clearInterval(t);
   }, [currentId, paused]);
+
+  // Android: posicion, fin de track y play/pause llegan empujados por el
+  // plugin en vez de por polling.
+  useEffect(() => {
+    if (!subscribePlayback) return;
+    let stop: (() => void) | null = null;
+    let dead = false;
+    subscribePlayback((e) => {
+      switch (e.type) {
+        case 'position':
+          if (Date.now() >= seekGuard.current) setPosMs(e.ms);
+          break;
+        case 'playing':
+          setPaused(!e.value);
+          break;
+        case 'ended':
+          onTrackEndedRef.current();
+          break;
+      }
+    })
+      .then((un) => {
+        if (dead) un();
+        else stop = un;
+      })
+      .catch(() => {});
+    return () => {
+      dead = true;
+      stop?.();
+    };
+  }, []);
+
+  // Botones de la notificacion (Android). Los manda MainActivity.kt, que
+  // escucha los broadcasts de la notificacion del plugin — ver el comentario
+  // largo ahi.
+  useEffect(() => {
+    const w = window as typeof window & {
+      __swayMediaButton?: (button: string) => void;
+    };
+    // MainActivity escucha por dos vias distintas (MediaSession y broadcast de
+    // la notificacion) porque cual esta activa depende de la version de
+    // Android y de la capa del fabricante. Si un mismo toque llega por las
+    // dos, esto se queda con el primero.
+    let lastAt = 0;
+    w.__swayMediaButton = (button) => {
+      const now = Date.now();
+      if (now - lastAt < 400) return;
+      lastAt = now;
+      if (button === 'next') playOffsetRef.current(1);
+      else if (button === 'prev') onPrev();
+    };
+    return () => {
+      delete w.__swayMediaButton;
+    };
+  }, []);
 
   // Progreso de importacion (copia a la carpeta gestionada).
   useEffect(() => {
@@ -185,6 +250,66 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentId, paused, modal]);
+
+  // Gesto del drawer (solo donde el sidebar ES un drawer, mismo breakpoint que
+  // el CSS): arrastrar hacia la derecha desde cualquier punto de la pantalla
+  // lo abre, arrastrar hacia la izquierda con el abierto lo cierra. Nunca hace
+  // preventDefault, asi que no pisa el scroll de la tabla.
+  useEffect(() => {
+    const TRIGGER_PX = 70; // recorrido horizontal minimo
+    const SLOP_PX = 45; // recorrido vertical que cancela (es un scroll)
+    // Controles que se manejan arrastrando en horizontal: ahi el gesto es
+    // del control, no del drawer.
+    const IGNORE = '.seek-bar, input[type="range"], [role="dialog"]';
+    let startX = 0;
+    let startY = 0;
+    let armed: 'open' | 'close' | null = null;
+
+    const onStart = (e: TouchEvent) => {
+      armed = null;
+      if (e.touches.length !== 1) return;
+      if (!window.matchMedia('(max-width: 680px)').matches) return;
+      if ((e.target as HTMLElement | null)?.closest?.(IGNORE)) return;
+      const t = e.touches[0];
+      startX = t.clientX;
+      startY = t.clientY;
+      armed = sidebarOpen ? 'close' : 'open';
+    };
+    const onMove = (e: TouchEvent) => {
+      if (!armed || e.touches.length !== 1) return;
+      const t = e.touches[0];
+      const dx = t.clientX - startX;
+      const dy = Math.abs(t.clientY - startY);
+      // Con muy poco recorrido la direccion es puro ruido: recien pasada la
+      // zona muerta tiene sentido decidir si es un gesto horizontal o un
+      // scroll (si no, cualquier temblor inicial cancela el gesto).
+      if (Math.hypot(dx, dy) < 12) return;
+      if (dy > SLOP_PX || dy > Math.abs(dx)) {
+        armed = null;
+        return;
+      }
+      if (armed === 'open' && dx > TRIGGER_PX) {
+        setSidebarOpen(true);
+        armed = null;
+      } else if (armed === 'close' && dx < -TRIGGER_PX) {
+        setSidebarOpen(false);
+        armed = null;
+      }
+    };
+    const end = () => {
+      armed = null;
+    };
+    window.addEventListener('touchstart', onStart, { passive: true });
+    window.addEventListener('touchmove', onMove, { passive: true });
+    window.addEventListener('touchend', end, { passive: true });
+    window.addEventListener('touchcancel', end, { passive: true });
+    return () => {
+      window.removeEventListener('touchstart', onStart);
+      window.removeEventListener('touchmove', onMove);
+      window.removeEventListener('touchend', end);
+      window.removeEventListener('touchcancel', end);
+    };
+  }, [sidebarOpen]);
 
   const searching = search.trim().length > 0;
   // Con búsqueda activa se busca SIEMPRE en toda la biblioteca, sin importar
@@ -247,22 +372,21 @@ export default function App() {
   );
 
   const playOffset = useCallback(
-    async (delta: number, auto = false) => {
+    async (delta: number) => {
       const q = queueRef.current;
       if (currentId == null || q.length === 0) return;
-      if (auto && repeat === 'one') {
-        await playTrack(currentId);
-        setPosMs(0);
-        return;
-      }
-      let next = q[q.indexOf(currentId) + delta];
-      if (next == null && repeat === 'all') {
-        next = delta > 0 ? q[0] : q[q.length - 1];
-      }
+      const next = q[q.indexOf(currentId) + delta];
       if (next == null) {
-        await stopPlayback();
-        setCurrentId(null);
-        setPosMs(0);
+        // Borde de la cola. Nunca se suelta el track actual: si se limpiara
+        // `currentId`, la app se quedaria sin nada seleccionado mientras el
+        // player nativo sigue con el audio cargado — y desde ese estado
+        // `playOffset` sale por el early return de arriba, o sea que ya no se
+        // puede avanzar ni retroceder sin volver a elegir un track a mano.
+        if (delta < 0) onSeek(0); // ya era el primero: vuelve a empezar
+        else {
+          await pausePlayback(); // fin de la cola: para, pero se queda ahi
+          setPaused(true);
+        }
         return;
       }
       await playTrack(next);
@@ -270,15 +394,53 @@ export default function App() {
       setPaused(false);
       setPosMs(0);
     },
-    [currentId, repeat],
+    [currentId],
   );
+  const playOffsetRef = useRef(playOffset);
+  playOffsetRef.current = playOffset;
+  const posMsRef = useRef(posMs);
+  posMsRef.current = posMs;
 
-  // Auto-advance al terminar el track.
-  useEffect(() => {
-    if (current && !paused && current.durationMs > 0 && posMs >= current.durationMs - 600) {
-      playOffset(1, true);
+  // Fin del track: el modo repeat manda sobre el track actual, no sobre la
+  // cola. 'once' se apaga solo despues de repetir, asi la proxima vuelta
+  // sigue de largo.
+  //
+  // El candado `advancing` esta porque el fin de track puede llegar mas de una
+  // vez antes de que la posicion se resetee (en desktop se deduce de la
+  // posicion, que sigue pasada de largo unos renders mas). Sin el, 'once'
+  // apaga el repeat, el efecto vuelve a entrar con la posicion vieja y
+  // saltea un track.
+  const advancing = useRef(false);
+  const onTrackEnded = useCallback(async () => {
+    if (currentId == null || advancing.current) return;
+    advancing.current = true;
+    try {
+      if (repeat === 'track' || repeat === 'once') {
+        if (repeat === 'once') {
+          setRepeat('off');
+          localStorage.setItem('sway.repeat', 'off');
+        }
+        await playTrack(currentId);
+        setPaused(false);
+        setPosMs(0);
+      } else {
+        await playOffset(1);
+      }
+    } finally {
+      advancing.current = false;
     }
-  }, [posMs, current, paused, playOffset]);
+  }, [currentId, repeat, playOffset]);
+  const onTrackEndedRef = useRef(onTrackEnded);
+  onTrackEndedRef.current = onTrackEnded;
+
+  // Auto-advance en desktop: no hay evento de fin de track, se deduce de la
+  // posicion. En Android lo dispara el plugin (ver el efecto de suscripcion).
+  useEffect(() => {
+    if (subscribePlayback) return;
+    if (current && !paused && current.durationMs > 0 && posMs >= current.durationMs - 600) {
+      onTrackEnded();
+    }
+  }, [posMs, current, paused, onTrackEnded]);
 
   function onToggleShuffle() {
     setShuffle((s) => {
@@ -296,8 +458,11 @@ export default function App() {
 
   function onCycleRepeat() {
     setRepeat((r) => {
-      const next: RepeatMode = r === 'off' ? 'all' : r === 'all' ? 'one' : 'off';
+      const next: RepeatMode = r === 'off' ? 'track' : r === 'track' ? 'once' : 'off';
       localStorage.setItem('sway.repeat', next);
+      // En mobile no hay tooltip: el toast es la unica forma de saber en que
+      // estado quedo el boton.
+      setStatus(REPEAT_LABEL[next]);
       return next;
     });
   }
@@ -317,6 +482,14 @@ export default function App() {
     setCurrentId(null);
     setPaused(false);
     setPosMs(0);
+  }
+
+  // "Atras" estandar de cualquier reproductor: vuelve al principio del track,
+  // y solo pasa al anterior si ya estabas en el principio. Lo comparten el
+  // boton del player y el de la notificacion.
+  function onPrev() {
+    if (posMsRef.current > RESTART_MS) onSeek(0);
+    else playOffsetRef.current(-1);
   }
 
   async function onSeek(secs: number) {
@@ -743,7 +916,7 @@ export default function App() {
           repeat={repeat}
           onToggle={onToggle}
           onStop={onStop}
-          onPrev={() => playOffset(-1)}
+          onPrev={onPrev}
           onNext={() => playOffset(1)}
           onSeek={onSeek}
           onVolume={onVolume}

@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 import {
   Pause,
   Play,
@@ -15,7 +15,15 @@ import {
 import { Track } from '../api';
 import Cover from './Cover';
 
-export type RepeatMode = 'off' | 'all' | 'one';
+/// `track` = repite la actual hasta que lo apagues. `once` = la repite una
+/// vez mas y se apaga solo, siguiendo despues con la cola.
+export type RepeatMode = 'off' | 'track' | 'once';
+
+export const REPEAT_LABEL: Record<RepeatMode, string> = {
+  off: 'Repeat off',
+  track: 'Repeat this track',
+  once: 'Repeat once, then continue',
+};
 
 interface Props {
   track: Track;
@@ -67,12 +75,35 @@ export default function PlayerBar({
   showVolume = true,
 }: Props) {
   const barRef = useRef<HTMLDivElement>(null);
-  const pct = track.durationMs > 0 ? Math.min(100, (posMs / track.durationMs) * 100) : 0;
+  // Mientras se arrastra, la barra muestra la posicion del dedo/mouse y el
+  // seek real recien se manda al soltar (un seek por cada pixel movido hace
+  // trabajar de mas al backend y se ve peor).
+  const [dragMs, setDragMs] = useState<number | null>(null);
+  const shownMs = dragMs ?? posMs;
+  const pct = track.durationMs > 0 ? Math.min(100, (shownMs / track.durationMs) * 100) : 0;
 
-  function seekFromEvent(e: React.MouseEvent) {
+  function msFromClientX(clientX: number) {
     const r = barRef.current!.getBoundingClientRect();
-    const frac = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
-    onSeek(Math.floor((frac * track.durationMs) / 1000));
+    const frac = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+    return frac * track.durationMs;
+  }
+
+  function onBarPointerDown(e: React.PointerEvent) {
+    if (track.durationMs <= 0) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setDragMs(msFromClientX(e.clientX));
+  }
+
+  function onBarPointerMove(e: React.PointerEvent) {
+    if (dragMs == null) return;
+    setDragMs(msFromClientX(e.clientX));
+  }
+
+  function onBarPointerUp(e: React.PointerEvent) {
+    if (dragMs == null) return;
+    const ms = msFromClientX(e.clientX);
+    setDragMs(null);
+    onSeek(Math.floor(ms / 1000));
   }
 
   return (
@@ -105,14 +136,22 @@ export default function PlayerBar({
           <button
             className={'ctl side' + (repeat !== 'off' ? ' on' : '')}
             onClick={onCycleRepeat}
-            title={repeat === 'off' ? 'Repeat' : repeat === 'all' ? 'Repeat all' : 'Repeat one'}
+            title={REPEAT_LABEL[repeat]}
+            aria-label={REPEAT_LABEL[repeat]}
           >
-            {repeat === 'one' ? <Repeat1 size={15} /> : <Repeat size={15} />}
+            {repeat === 'once' ? <Repeat1 size={15} /> : <Repeat size={15} />}
           </button>
         </div>
         <div className="seek">
-          <span className="time">{fmt(posMs)}</span>
-          <div className="seek-bar" ref={barRef} onClick={seekFromEvent}>
+          <span className="time">{fmt(shownMs)}</span>
+          <div
+            className={'seek-bar' + (dragMs != null ? ' dragging' : '')}
+            ref={barRef}
+            onPointerDown={onBarPointerDown}
+            onPointerMove={onBarPointerMove}
+            onPointerUp={onBarPointerUp}
+            onPointerCancel={() => setDragMs(null)}
+          >
             <div className="seek-fill" style={{ width: `${pct}%` }} />
             <div className="seek-knob" style={{ left: `${pct}%` }} />
           </div>

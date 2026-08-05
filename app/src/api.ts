@@ -71,6 +71,12 @@ const desktopSeekTo = (secs: number) => invoke<void>('seek_to', { secs });
 const desktopPlaybackPosition = () => invoke<number>('playback_position');
 const desktopSetVolume = (volume: number) => invoke<void>('set_volume', { volume });
 
+// Android empuja su estado por evento (posicion, fin de track y los botones
+// de la notificacion — ver nativeAudio.ts). Desktop no tiene equivalente: ahi
+// queda null y la app cae al poll de posicion de siempre.
+export type { PlaybackEvent } from './nativeAudio';
+export const subscribePlayback = android ? nativeAudio.subscribePlayback : null;
+
 export const playTrack = android ? nativeAudio.playTrack : desktopPlayTrack;
 export const pausePlayback = android ? nativeAudio.pausePlayback : desktopPausePlayback;
 export const resumePlayback = android ? nativeAudio.resumePlayback : desktopResumePlayback;
