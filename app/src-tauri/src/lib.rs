@@ -1,6 +1,7 @@
 mod cover;
 mod db;
 mod export_xml;
+mod id3_sanitize;
 mod import;
 mod xml_sync;
 

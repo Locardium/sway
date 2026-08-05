@@ -1,7 +1,11 @@
+use crate::id3_sanitize::sanitize_id3v2_date_frames;
 use anyhow::Result;
+use lofty::config::ParseOptions;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::prelude::{Accessor, ItemKey};
+use lofty::probe::Probe;
 use rusqlite::{params, Connection};
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -33,33 +37,71 @@ fn read_meta(path: &Path) -> Meta {
         bpm: None,
     };
     match lofty::read_from_path(path) {
+        Ok(tagged) => fill_meta_from_tagged(&mut m, &tagged),
         Err(e) => {
-            log::warn!("lofty read_from_path fallo para {}: {e}", path.display());
-        }
-        Ok(tagged) => {
-            m.duration_ms = tagged.properties().duration().as_millis() as i64;
-            if let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) {
-                if let Some(t) = tag.title() {
-                    if !t.is_empty() {
-                        m.title = t.to_string();
-                    }
-                }
-                if let Some(a) = tag.artist() {
-                    m.artist = a.to_string();
-                }
-                if let Some(al) = tag.album() {
-                    m.album = al.to_string();
-                }
-                if let Some(g) = tag.genre() {
-                    m.genre = g.to_string();
-                }
-                if let Some(b) = tag.get_string(ItemKey::IntegerBpm) {
-                    m.bpm = b.parse().ok();
-                }
-            }
+            log::warn!("lofty read_from_path (con tags) fallo para {}: {e}", path.display());
+            apply_meta_from_broken_tag(path, &mut m);
         }
     }
     m
+}
+
+/// Se llama cuando la pasada normal de lofty fallo. Un frame de tag
+/// individualmente corrupto (ej. `TORY`/`TYER` con una fecha invalida —
+/// visto en la practica con el texto de un sitio de descargas pisando el
+/// campo) hace que lofty descarte el tag ENTERO, aunque el resto sea
+/// perfectamente legible. Primero se intenta sanitizar esos frames y
+/// reparsear en memoria (rescata todo: titulo/artista/caratula/duracion);
+/// si eso no aplica o tampoco alcanza, una ultima pasada sin parsear tags
+/// rescata al menos la duracion real (critica para el seek bar) en vez de
+/// dejarla en 0. El titulo ya tiene fallback al nombre de archivo.
+fn apply_meta_from_broken_tag(path: &Path, m: &mut Meta) {
+    if let Ok(bytes) = std::fs::read(path) {
+        if let Some(patched) = sanitize_id3v2_date_frames(&bytes) {
+            let parsed = Probe::new(Cursor::new(patched.as_slice()))
+                .guess_file_type()
+                .ok()
+                .and_then(|p| p.read().ok());
+            if let Some(tagged) = parsed {
+                log::info!("id3_sanitize: {} recupero el tag completo tras sanitizar", path.display());
+                fill_meta_from_tagged(m, &tagged);
+                return;
+            }
+            log::warn!("id3_sanitize: {} sigue sin parsear incluso sanitizado", path.display());
+        }
+    }
+    let props_only = ParseOptions::new().read_tags(false);
+    match Probe::open(path).and_then(|p| p.options(props_only).read()) {
+        Ok(tagged) => {
+            m.duration_ms = tagged.properties().duration().as_millis() as i64;
+        }
+        Err(e2) => {
+            log::warn!("lofty properties-only tambien fallo para {}: {e2}", path.display());
+        }
+    }
+}
+
+fn fill_meta_from_tagged(m: &mut Meta, tagged: &lofty::file::TaggedFile) {
+    m.duration_ms = tagged.properties().duration().as_millis() as i64;
+    if let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) {
+        if let Some(t) = tag.title() {
+            if !t.is_empty() {
+                m.title = t.to_string();
+            }
+        }
+        if let Some(a) = tag.artist() {
+            m.artist = a.to_string();
+        }
+        if let Some(al) = tag.album() {
+            m.album = al.to_string();
+        }
+        if let Some(g) = tag.genre() {
+            m.genre = g.to_string();
+        }
+        if let Some(b) = tag.get_string(ItemKey::IntegerBpm) {
+            m.bpm = b.parse().ok();
+        }
+    }
 }
 
 fn is_audio(path: &Path) -> bool {
