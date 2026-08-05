@@ -700,11 +700,26 @@ table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
   padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px;
   background: var(--panel-2);
 }
+/* Pareado pero fuera de la red: sigue siendo tuyo, solo que no está ahora. */
+.peer.offline { opacity: 0.5; }
 .peer-badge {
   flex: none; font-size: 11px; padding: 3px 8px; border-radius: 999px;
   border: 1px solid var(--line); color: var(--muted);
 }
 .peer-badge.ok { color: var(--accent); border-color: color-mix(in oklch, var(--accent) 55%, transparent); }
+
+/* Codigo de verificacion del pairing */
+.pair-dialog { display: flex; flex-direction: column; gap: 14px; }
+.pair-code {
+  font-family: 'Cascadia Mono', monospace;
+  font-size: 40px; font-weight: 700; letter-spacing: 10px;
+  text-align: center; color: var(--accent);
+  padding: 18px 0 18px 10px; /* compensa el letter-spacing del ultimo digito */
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.pair-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.pair-actions .primary { background: var(--accent); border-color: var(--accent); color: oklch(15% 0 0); }
 
 /* Switch prototipo */
 .switch {

@@ -3,15 +3,22 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
 import { Modal } from './Modal';
 import {
+  confirmPairing,
+  connectPeer,
   deviceIdentity,
   exportLibraryXmlNow,
   getAutoSyncXml,
   importFromUri,
   listPeers,
+  refreshPeers,
   setAutoSyncXml,
   setDeviceName,
   SYNC_PROTO,
+  unpairDevice,
+  type PairingDone,
+  type PairingRequest,
   type Peer,
+  type PeerHello,
 } from '../api';
 import { isAndroid } from '../platform';
 
@@ -80,6 +87,11 @@ export default function Settings({ trackCount, volume, onClose, onStatus, onImpo
   const [deviceName, setDeviceNameState] = useState('');
   const [savedName, setSavedName] = useState('');
   const [peers, setPeers] = useState<Peer[]>([]);
+  const [pairing, setPairing] = useState<PairingRequest | null>(null);
+  const [busyPeer, setBusyPeer] = useState<string | null>(null);
+  // Conteos que mandó cada peer en su Hello — la prueba visible de que el
+  // canal cifrado quedó vivo.
+  const [hellos, setHellos] = useState<Record<string, PeerHello>>({});
 
   const android = isAndroid();
   const showExport = !android;
@@ -91,9 +103,24 @@ export default function Settings({ trackCount, volume, onClose, onStatus, onImpo
       .catch(() => {});
   }, [showExport]);
 
-  const refreshPeers = useCallback(() => {
+  const reloadPeers = useCallback(() => {
     listPeers().then(setPeers).catch(() => {});
   }, []);
+
+  /// El botón: pregunta de nuevo a la red y vuelve a leer. Las respuestas
+  /// llegan por `peers-changed`, así que el spinner es solo para que se note
+  /// que algo pasó.
+  const [scanning, setScanning] = useState(false);
+  async function rescan() {
+    setScanning(true);
+    try {
+      await refreshPeers();
+    } catch (e) {
+      onStatus(String(e));
+    }
+    reloadPeers();
+    setTimeout(() => setScanning(false), 1200);
+  }
 
   useEffect(() => {
     if (!('__TAURI_INTERNALS__' in window)) return;
@@ -103,17 +130,57 @@ export default function Settings({ trackCount, volume, onClose, onStatus, onImpo
         setSavedName(name);
       })
       .catch(() => {});
-    refreshPeers();
-    // El backend avisa cuando alguien aparece o se va. El intervalo es solo
-    // por los que se van sin avisar (bateria, modo avion): esos se detectan
-    // recien cuando su ultima señal queda vieja.
-    const un = listen('peers-changed', refreshPeers);
-    const timer = setInterval(refreshPeers, 15000);
+    reloadPeers();
+    // El backend avisa por `peers-changed` cuando alguien aparece, se va o
+    // deja de responder al sondeo. El intervalo es solo una red de contencion
+    // por si se pierde un evento.
+    const uns = [
+      listen('peers-changed', reloadPeers),
+      listen<PairingRequest>('pairing-request', (e) => setPairing(e.payload)),
+      listen<PairingDone>('pairing-done', (e) => {
+        setPairing(null);
+        setBusyPeer(null);
+        const { name, ok, error } = e.payload;
+        onStatus(ok ? `Paired with ${name}` : `${name}: ${error ?? 'pairing failed'}`);
+        reloadPeers();
+      }),
+      listen<PeerHello>('peer-hello', (e) => {
+        setBusyPeer(null);
+        setHellos((h) => ({ ...h, [e.payload.uid]: e.payload }));
+      }),
+    ];
+    const timer = setInterval(reloadPeers, 15000);
     return () => {
-      un.then((f) => f());
+      uns.forEach((un) => un.then((f) => f()));
       clearInterval(timer);
     };
-  }, [refreshPeers]);
+  }, [reloadPeers, onStatus]);
+
+  async function decide(accept: boolean) {
+    if (!pairing) return;
+    const uid = pairing.uid;
+    setPairing(null);
+    if (!accept) setBusyPeer(null);
+    try {
+      await confirmPairing(uid, accept);
+    } catch (e) {
+      onStatus(String(e));
+    }
+  }
+
+  async function unpair(peer: Peer) {
+    try {
+      await unpairDevice(peer.uid);
+      setHellos((h) => {
+        const next = { ...h };
+        delete next[peer.uid];
+        return next;
+      });
+      onStatus(`Unpaired ${peer.name}`);
+    } catch (e) {
+      onStatus(String(e));
+    }
+  }
 
   async function saveDeviceName() {
     const name = deviceName.trim();
@@ -185,6 +252,28 @@ export default function Settings({ trackCount, volume, onClose, onStatus, onImpo
     { id: 'amber', color: 'oklch(80% 0.13 75)' },
     { id: 'rose', color: 'oklch(72% 0.16 15)' },
   ];
+
+  // El código va sobre Settings: es una decisión de seguridad y no puede
+  // quedar escondida detrás de un scroll.
+  if (pairing) {
+    return (
+      <Modal title={pairing.incoming ? `${pairing.name} wants to pair` : `Pair with ${pairing.name}`} onClose={() => decide(false)}>
+        <div className="pair-dialog">
+          <p className="set-note">
+            Check that this code is showing on <strong>{pairing.name}</strong> too. If the two codes
+            are different, someone else is on the line — reject it.
+          </p>
+          <div className="pair-code">{pairing.code}</div>
+          <div className="pair-actions">
+            <button onClick={() => decide(false)}>Reject</button>
+            <button className="primary" onClick={() => decide(true)}>
+              Codes match
+            </button>
+          </div>
+        </div>
+      </Modal>
+    );
+  }
 
   return (
     <Modal title="Settings" onClose={onClose} wide>
@@ -352,28 +441,55 @@ export default function Settings({ trackCount, volume, onClose, onStatus, onImpo
                   : `${peers.length} found`}
               </small>
             </div>
-            <button onClick={refreshPeers}>Refresh</button>
+            <button onClick={rescan} disabled={scanning}>{scanning ? 'Scanning…' : 'Refresh'}</button>
           </div>
           {peers.length > 0 && (
             <ul className="peer-list">
-              {peers.map((p) => (
-                <li key={p.uid} className="peer">
-                  <div className="set-label">
-                    <span>{p.name}</span>
-                    <small>
-                      {p.platform} · {p.addrs[0] ?? 'no address'}:{p.port}
-                    </small>
-                  </div>
-                  <span className={'peer-badge' + (p.paired ? ' ok' : '')}>
-                    {p.proto !== SYNC_PROTO ? 'Other version' : p.paired ? 'Paired' : 'Not paired'}
-                  </span>
-                </li>
-              ))}
+              {peers.map((p) => {
+                const hello = hellos[p.uid];
+                const incompatible = p.online && p.proto !== SYNC_PROTO;
+                let detail: string;
+                if (!p.online) detail = 'Not on this network';
+                else if (hello) detail = `${hello.tracks} tracks · ${hello.playlists} playlists`;
+                else detail = `${p.platform} · ${p.addrs[0] ?? 'no address'}:${p.port}`;
+                return (
+                  <li key={p.uid} className={'peer' + (p.online ? '' : ' offline')}>
+                    <div className="set-label">
+                      <span>{p.name}</span>
+                      <small>{detail}</small>
+                    </div>
+                    <div className="set-control">
+                      <span className={'peer-badge' + (p.paired && p.online ? ' ok' : '')}>
+                        {!p.online
+                          ? 'Offline'
+                          : incompatible
+                            ? 'Other version'
+                            : p.paired
+                              ? 'Paired'
+                              : 'Not paired'}
+                      </span>
+                      <button
+                        disabled={!p.online || incompatible || busyPeer === p.uid}
+                        onClick={() => {
+                          setBusyPeer(p.uid);
+                          connectPeer(p.uid).catch((e) => {
+                            setBusyPeer(null);
+                            onStatus(String(e));
+                          });
+                        }}
+                      >
+                        {busyPeer === p.uid ? 'Connecting…' : p.paired ? 'Ping' : 'Pair'}
+                      </button>
+                      {p.paired && <button onClick={() => unpair(p)}>Unpair</button>}
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           )}
           <p className="set-note">
-            Discovery only for now — nothing is connected or transferred yet. Both devices need to
-            be on the same Wi-Fi network with Sway open.
+            Pairing shows a 6-digit code on both devices — they must match. Nothing is transferred
+            yet; “Ping” just asks the other device how much library it has.
           </p>
         </section>
 

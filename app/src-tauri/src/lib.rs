@@ -6,7 +6,9 @@ mod export_xml;
 mod hashing;
 mod id3_sanitize;
 mod import;
+mod pairing;
 mod rank;
+mod wire;
 mod xml_sync;
 
 // Desktop: Player real (rodio/symphonia, thread propio). Android/iOS: stub
@@ -99,13 +101,10 @@ pub struct AppState {
     music_dir: PathBuf,
     /// Dispositivos Sway vistos en la red local (Fase 5.1).
     peers: discovery::Peers,
-    /// Socket del puerto que se anuncia por mDNS. Se reserva al arrancar y se
-    /// mantiene abierto para que nadie más lo tome entre el anuncio y el
-    /// momento en que 5.2 empiece a aceptar conexiones ahí.
-    #[allow(dead_code)] // se lee recién en 5.2 (accept loop)
-    listener: Mutex<Option<std::net::TcpListener>>,
     /// Mantener vivo el daemon es lo que mantiene el servicio publicado.
     mdns: Mutex<Option<mdns_sd::ServiceDaemon>>,
+    /// Confirmaciones de pairing esperando que el usuario mire la pantalla.
+    pairing: pairing::Pairing,
 }
 
 #[tauri::command]
@@ -358,7 +357,50 @@ fn set_device_name(state: State<AppState>, name: String) -> Result<(), String> {
 /// la sección de sync y cada vez que llega el evento `peers-changed`.
 #[tauri::command]
 fn list_peers(state: State<AppState>) -> Vec<discovery::Peer> {
-    state.peers.list()
+    let conn = state.db.lock().unwrap();
+    state.peers.merged_list(&conn)
+}
+
+/// El botón "Refresh": consulta la red de nuevo (mDNS) y recomprueba en el
+/// acto quién está alcanzable, sin esperar el sondeo periódico. Releer la
+/// lista local no alcanzaba — ya estaba al día; lo que faltaba era preguntar
+/// afuera.
+///
+/// Las respuestas de mDNS llegan por el evento `peers-changed`, no en el
+/// retorno: el protocolo es asincrónico y los peers contestan cuando
+/// contestan. El sondeo sí es inmediato.
+///
+/// Ojo: esto NO cambia quién está vinculado. El pairing vive en `devices` de
+/// cada dispositivo y se sincroniza avisando (ver `pairing::unpair`), no
+/// mirando la red.
+#[tauri::command]
+fn refresh_peers(app: AppHandle) -> Result<(), String> {
+    discovery::refresh(&app).map_err(|e| e.to_string())?;
+    let handle = app.clone();
+    std::thread::spawn(move || discovery::probe_once(&handle));
+    Ok(())
+}
+
+/// Vincula con un peer, o si ya está vinculado le pide sus conteos de
+/// biblioteca. Vuelve enseguida: el resultado llega por los eventos
+/// `pairing-request` / `pairing-done` / `peer-hello`, porque del otro lado
+/// puede haber una persona tardando en confirmar.
+#[tauri::command]
+fn connect_peer(app: AppHandle, uid: String) {
+    pairing::connect_peer(app, uid);
+}
+
+/// Respuesta del usuario al código de verificación.
+#[tauri::command]
+fn confirm_pairing(app: AppHandle, uid: String, accept: bool) -> bool {
+    pairing::resolve_decision(&app, &uid, accept)
+}
+
+#[tauri::command]
+fn unpair_device(app: AppHandle, uid: String) -> Result<(), String> {
+    pairing::unpair(&app, &uid).map_err(|e| e.to_string())?;
+    let _ = app.emit("peers-changed", ());
+    Ok(())
 }
 
 /// "Sync now" manual: escribe el XML sin importar el estado del toggle.
@@ -573,8 +615,8 @@ pub fn run() {
                 (Ok(uid), Ok(name)) => eprintln!("[sync] este dispositivo: {name} ({uid})"),
                 (a, b) => eprintln!("[sync] no se pudo fijar la identidad: {a:?} / {b:?}"),
             }
-            // Puerto efímero reservado por el SO. Se anuncia por mDNS y queda
-            // tomado hasta que 5.2 acepte conexiones acá.
+            // Puerto efímero reservado por el SO: se anuncia por mDNS y es
+            // donde escucha el servidor de sync.
             let listener = std::net::TcpListener::bind("0.0.0.0:0").ok();
             let sync_port = listener
                 .as_ref()
@@ -588,9 +630,14 @@ pub fn run() {
                 covers: Mutex::new(HashMap::new()),
                 music_dir: music_dir.clone(),
                 peers: discovery::Peers::default(),
-                listener: Mutex::new(listener),
                 mdns: Mutex::new(None),
+                pairing: pairing::Pairing::default(),
             });
+
+            if let Some(listener) = listener {
+                pairing::spawn_server(app.handle().clone(), listener);
+                discovery::spawn_prober(app.handle().clone());
+            }
 
             // Descubrimiento. Va después de `manage` porque el thread de mDNS
             // resuelve el estado por el AppHandle.
@@ -654,7 +701,11 @@ pub fn run() {
             sync_xml_after_change,
             device_identity,
             set_device_name,
-            list_peers
+            list_peers,
+            refresh_peers,
+            connect_peer,
+            confirm_pairing,
+            unpair_device
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

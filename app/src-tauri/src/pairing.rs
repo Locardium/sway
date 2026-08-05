@@ -1,0 +1,690 @@
+//! Vinculación de dispositivos (Fase 5.2).
+//!
+//! El handshake Noise deja un canal cifrado con *alguien*; el pairing es lo
+//! que lo convierte en un canal cifrado con *este dispositivo*. Los dos lados
+//! muestran el mismo código de 6 dígitos y el usuario confirma en ambas
+//! pantallas — recién ahí se fija la clave pública del otro en `devices`.
+//!
+//! Reglas duras:
+//! - El pairing necesita que **los dos** acepten. Que uno solo vea un código
+//!   distinto alcanza para cortar.
+//! - Una clave distinta para un uid ya conocido **se rechaza y se avisa**.
+//!   Nunca se vuelve a confiar en silencio: eso sería exactamente lo que
+//!   haría un intermediario para hacerse pasar por un dispositivo tuyo.
+//! - Un dispositivo sin parear no recibe ningún dato de la biblioteca. El
+//!   `Hello` con los conteos va después del pairing, nunca antes.
+
+use crate::db;
+use crate::wire::{Msg, Session};
+use crate::AppState;
+use anyhow::{anyhow, Result};
+use base64::Engine;
+use serde::Serialize;
+use std::collections::HashMap;
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::mpsc::{channel, Sender};
+use std::sync::Mutex;
+use std::time::Duration;
+use tauri::{AppHandle, Emitter, Manager};
+
+/// Cuánto se espera a que una persona mire la pantalla y confirme.
+const DECISION_TIMEOUT: Duration = Duration::from_secs(120);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Generoso a propósito: del otro lado puede haber alguien todavía decidiendo.
+const IO_TIMEOUT: Duration = Duration::from_secs(180);
+
+const SETTING_PRIVKEY: &str = "noise_private";
+const SETTING_PUBKEY: &str = "noise_public";
+
+/// Decisiones de pairing pendientes, por uid del peer. El hilo de la conexión
+/// espera en el receptor; el comando `confirm_pairing` manda la respuesta.
+#[derive(Default)]
+pub struct Pairing {
+    pending: Mutex<HashMap<String, Sender<bool>>>,
+}
+
+impl Pairing {
+    fn resolve(&self, uid: &str, accepted: bool) -> bool {
+        match self.pending.lock().unwrap().remove(uid) {
+            Some(tx) => tx.send(accepted).is_ok(),
+            None => false,
+        }
+    }
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PairingRequestEvent {
+    uid: String,
+    name: String,
+    platform: String,
+    code: String,
+    /// `true` si el otro dispositivo inició el pairing.
+    incoming: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PairingDoneEvent {
+    uid: String,
+    name: String,
+    ok: bool,
+    error: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerHelloEvent {
+    pub uid: String,
+    pub name: String,
+    pub tracks: i64,
+    pub playlists: i64,
+    /// Diferencia de reloj con el otro dispositivo, en ms. Importa para el
+    /// merge por LWW de 5.5: con relojes corridos, "el último gana" elige mal.
+    pub clock_skew_ms: i64,
+}
+
+// ---------------------------------------------------------------------------
+// Identidad criptográfica de este dispositivo
+// ---------------------------------------------------------------------------
+
+/// Par de claves estático, generado una sola vez. Vive en `app_settings`, o
+/// sea en la DB de la app (en Android, almacenamiento privado del paquete).
+fn keypair(conn: &rusqlite::Connection) -> Result<(Vec<u8>, Vec<u8>)> {
+    let b64 = base64::engine::general_purpose::STANDARD;
+    if let (Some(priv_b64), Some(pub_b64)) = (
+        db::get_setting(conn, SETTING_PRIVKEY)?,
+        db::get_setting(conn, SETTING_PUBKEY)?,
+    ) {
+        if let (Ok(pv), Ok(pb)) = (b64.decode(&priv_b64), b64.decode(&pub_b64)) {
+            return Ok((pv, pb));
+        }
+    }
+    let (private, public) = crate::wire::generate_keypair()?;
+    db::set_setting(conn, SETTING_PRIVKEY, &b64.encode(&private))?;
+    db::set_setting(conn, SETTING_PUBKEY, &b64.encode(&public))?;
+    log::info!("[pair] par de claves nuevo generado");
+    Ok((private, public))
+}
+
+fn private_key(handle: &AppHandle) -> Result<Vec<u8>> {
+    let state = handle.state::<AppState>();
+    let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
+    Ok(keypair(&conn)?.0)
+}
+
+// ---------------------------------------------------------------------------
+// Estado de `devices`
+// ---------------------------------------------------------------------------
+
+enum Known {
+    /// Ya pareado y la clave coincide.
+    Trusted,
+    /// Nunca se pareó con este uid.
+    Unknown,
+    /// Conocido pero con OTRA clave pública. Alarma, no rutina.
+    KeyMismatch,
+}
+
+fn known_state(handle: &AppHandle, uid: &str, pubkey: &[u8]) -> Known {
+    let state = handle.state::<AppState>();
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(_) => return Known::Unknown,
+    };
+    let stored: Option<Option<Vec<u8>>> = conn
+        .query_row("SELECT pubkey FROM devices WHERE uid = ?1", [uid], |r| r.get(0))
+        .ok();
+    match stored {
+        Some(Some(k)) if k == pubkey => Known::Trusted,
+        Some(Some(_)) => Known::KeyMismatch,
+        _ => Known::Unknown,
+    }
+}
+
+fn store_device(handle: &AppHandle, uid: &str, name: &str, platform: &str, pubkey: &[u8]) -> Result<()> {
+    let state = handle.state::<AppState>();
+    let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
+    let now = db::now_ms();
+    conn.execute(
+        "INSERT INTO devices (uid, name, platform, pubkey, paired_at, last_seen)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+         ON CONFLICT(uid) DO UPDATE SET
+            name = excluded.name, platform = excluded.platform,
+            pubkey = excluded.pubkey, paired_at = excluded.paired_at,
+            last_seen = excluded.last_seen",
+        rusqlite::params![uid, name, platform, pubkey, now],
+    )?;
+    // Política por defecto. Todavía no hace nada (5.6/5.7 la usan), pero la
+    // fila tiene que existir desde el pairing para que la UI pueda editarla.
+    conn.execute(
+        "INSERT OR IGNORE INTO sync_policy (device_uid) VALUES (?1)",
+        [uid],
+    )?;
+    conn.execute(
+        "INSERT INTO sync_log (ts, peer, kind, detail) VALUES (?1, ?2, 'paired', ?3)",
+        rusqlite::params![now, uid, name],
+    )?;
+    Ok(())
+}
+
+fn library_counts(handle: &AppHandle) -> (i64, i64) {
+    let state = handle.state::<AppState>();
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(_) => return (0, 0),
+    };
+    let tracks = conn
+        .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
+        .unwrap_or(0);
+    let playlists = conn
+        .query_row("SELECT COUNT(*) FROM playlists WHERE kind = 'playlist'", [], |r| r.get(0))
+        .unwrap_or(0);
+    (tracks, playlists)
+}
+
+fn me(handle: &AppHandle) -> Result<(String, String)> {
+    let state = handle.state::<AppState>();
+    let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
+    let uid = db::this_device_uid(&conn)?;
+    let name = db::device_name(&conn)?;
+    Ok((uid, name))
+}
+
+fn platform() -> String {
+    if cfg!(target_os = "android") {
+        "android".into()
+    } else if cfg!(target_os = "windows") {
+        "windows".into()
+    } else if cfg!(target_os = "macos") {
+        "macos".into()
+    } else {
+        "linux".into()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Confirmación del usuario
+// ---------------------------------------------------------------------------
+
+/// Muestra el código y espera a que la persona decida. El timeout evita que
+/// un hilo (y una conexión) queden colgados si nadie mira la pantalla.
+fn ask_user(handle: &AppHandle, ev: PairingRequestEvent) -> bool {
+    let (tx, rx) = channel();
+    {
+        let state = handle.state::<AppState>();
+        state.pairing.pending.lock().unwrap().insert(ev.uid.clone(), tx);
+    }
+    let uid = ev.uid.clone();
+    let _ = handle.emit("pairing-request", ev);
+    let answer = rx.recv_timeout(DECISION_TIMEOUT).unwrap_or(false);
+    let state = handle.state::<AppState>();
+    state.pairing.pending.lock().unwrap().remove(&uid);
+    answer
+}
+
+/// Lo llama el comando `confirm_pairing` desde la UI.
+pub fn resolve_decision(handle: &AppHandle, uid: &str, accepted: bool) -> bool {
+    handle.state::<AppState>().pairing.resolve(uid, accepted)
+}
+
+// ---------------------------------------------------------------------------
+// Lado que acepta conexiones
+// ---------------------------------------------------------------------------
+
+/// Escucha en el puerto que 5.1 reservó y anunció por mDNS.
+pub fn spawn_server(handle: AppHandle, listener: TcpListener) {
+    std::thread::spawn(move || {
+        log::info!("[pair] escuchando en {:?}", listener.local_addr());
+        for stream in listener.incoming() {
+            let stream = match stream {
+                Ok(s) => s,
+                Err(e) => {
+                    log::warn!("[pair] accept fallo: {e}");
+                    continue;
+                }
+            };
+            let handle = handle.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = serve(&handle, stream) {
+                    // Los sondeos de alcanzabilidad (ver discovery::spawn_prober)
+                    // conectan y cortan sin mandar nada: es trafico esperado,
+                    // no un error que valga la pena reportar cada 10 segundos.
+                    if is_disconnect(&e) {
+                        log::debug!("[pair] sondeo de alcanzabilidad");
+                    } else {
+                        log::warn!("[pair] conexion entrante terminada: {e}");
+                    }
+                }
+            });
+        }
+    });
+}
+
+/// El otro lado cerró sin decir nada: un sondeo, o una app que se fue.
+fn is_disconnect(e: &anyhow::Error) -> bool {
+    use std::io::ErrorKind::*;
+    e.downcast_ref::<std::io::Error>()
+        .map(|io| matches!(io.kind(), UnexpectedEof | ConnectionReset | ConnectionAborted))
+        .unwrap_or(false)
+}
+
+fn serve(handle: &AppHandle, stream: TcpStream) -> Result<()> {
+    stream.set_read_timeout(Some(IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(IO_TIMEOUT))?;
+    let private = private_key(handle)?;
+    let mut sess = Session::accept(stream, &private)?;
+
+    match sess.recv()? {
+        Msg::PairRequest { uid, name, platform } => {
+            match known_state(handle, &uid, &sess.peer_pubkey) {
+                Known::KeyMismatch => {
+                    let _ = sess.send(&Msg::Reject {
+                        reason: "clave distinta a la que ya tenías para este dispositivo".into(),
+                    });
+                    warn_key_mismatch(handle, &uid, &name);
+                    return Err(anyhow!("clave distinta para {uid}"));
+                }
+                Known::Trusted | Known::Unknown => {}
+            }
+
+            let accepted_here = ask_user(
+                handle,
+                PairingRequestEvent {
+                    uid: uid.clone(),
+                    name: name.clone(),
+                    platform: platform.clone(),
+                    code: sess.code.clone(),
+                    incoming: true,
+                },
+            );
+            sess.send(&Msg::PairResponse {
+                accepted: accepted_here,
+            })?;
+            if !accepted_here {
+                emit_done(handle, &uid, &name, false, Some("rechazado en este dispositivo"));
+                return Ok(());
+            }
+            // El otro lado también tiene que haber aceptado.
+            let accepted_there = match sess.recv()? {
+                Msg::PairAck { accepted } => accepted,
+                Msg::Reject { reason } => {
+                    emit_done(handle, &uid, &name, false, Some(&reason));
+                    return Ok(());
+                }
+                other => return Err(anyhow!("se esperaba PairAck, llego {other:?}")),
+            };
+            if !accepted_there {
+                emit_done(handle, &uid, &name, false, Some("rechazado en el otro dispositivo"));
+                return Ok(());
+            }
+            store_device(handle, &uid, &name, &platform, &sess.peer_pubkey)?;
+            emit_done(handle, &uid, &name, true, None);
+            let _ = handle.emit("peers-changed", ());
+            exchange_hello(handle, &mut sess, &uid, &name)
+        }
+        Msg::Hello {
+            uid,
+            name,
+            tracks,
+            playlists,
+            clock_ms,
+            ..
+        } => {
+            match known_state(handle, &uid, &sess.peer_pubkey) {
+                Known::Trusted => {}
+                Known::KeyMismatch => {
+                    let _ = sess.send(&Msg::Reject {
+                        reason: "clave distinta a la que ya tenías para este dispositivo".into(),
+                    });
+                    warn_key_mismatch(handle, &uid, &name);
+                    return Err(anyhow!("clave distinta para {uid}"));
+                }
+                Known::Unknown => {
+                    // No es un error del otro lado: probablemente lo
+                    // desvinculamos nosotros. Que se entere y limpie su fila.
+                    let _ = sess.send(&Msg::NotPaired);
+                    return Ok(());
+                }
+            }
+            let (my_uid, my_name) = me(handle)?;
+            let (my_tracks, my_playlists) = library_counts(handle);
+            sess.send(&Msg::Hello {
+                uid: my_uid,
+                name: my_name,
+                platform: platform(),
+                tracks: my_tracks,
+                playlists: my_playlists,
+                clock_ms: db::now_ms(),
+            })?;
+            report_hello(handle, &uid, &name, tracks, playlists, clock_ms);
+            Ok(())
+        }
+        // El otro lado nos sacó de sus dispositivos. Solo se acepta si su
+        // clave es la que teníamos guardada — o sea, si el handshake probó
+        // que es realmente él y no alguien pidiendo que nos desvinculemos.
+        Msg::Unpair { uid } => {
+            match known_state(handle, &uid, &sess.peer_pubkey) {
+                Known::Trusted => {
+                    forget_device(handle, &uid)?;
+                    log::info!("[pair] {uid} nos desvinculó");
+                    let _ = handle.emit("peers-changed", ());
+                    Ok(())
+                }
+                _ => Err(anyhow!("unpair de un peer que no está vinculado ({uid})")),
+            }
+        }
+        other => Err(anyhow!("primer mensaje inesperado: {other:?}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lado que llama
+// ---------------------------------------------------------------------------
+
+/// Conecta con un peer: lo parea si hace falta, y si ya está pareado
+/// intercambia `Hello`. Corre en su propio hilo — del otro lado puede haber
+/// una persona tardando en confirmar.
+pub fn connect_peer(handle: AppHandle, uid: String) {
+    std::thread::spawn(move || {
+        let name = peer_name(&handle, &uid);
+        if let Err(e) = connect_inner(&handle, &uid) {
+            log::warn!("[pair] conexion con {uid} fallo: {e}");
+            // Solo los fallos de RED apagan la fila: que diga "conectado"
+            // justo después de un timeout es la peor combinación posible.
+            // Un rechazo lógico (no vinculado, clave distinta) no significa
+            // que el dispositivo no esté ahí — pintarlo de gris sería mentir
+            // igual, en la otra dirección.
+            if e.downcast_ref::<std::io::Error>().is_some() {
+                let state = handle.state::<AppState>();
+                if state.peers.mark_unreachable(&uid) {
+                    let _ = handle.emit("peers-changed", ());
+                }
+            }
+            emit_done(&handle, &uid, &name, false, Some(&e.to_string()));
+        }
+    });
+}
+
+fn peer_name(handle: &AppHandle, uid: &str) -> String {
+    handle
+        .state::<AppState>()
+        .peers
+        .list()
+        .into_iter()
+        .find(|p| p.uid == uid)
+        .map(|p| p.name)
+        .unwrap_or_else(|| uid.to_string())
+}
+
+fn peer_addr(handle: &AppHandle, uid: &str) -> Result<SocketAddr> {
+    let peer = handle
+        .state::<AppState>()
+        .peers
+        .list()
+        .into_iter()
+        .find(|p| p.uid == uid)
+        .ok_or_else(|| anyhow!("el dispositivo ya no está visible en la red"))?;
+    let addr = peer
+        .addrs
+        .first()
+        .ok_or_else(|| anyhow!("el dispositivo no publicó ninguna dirección"))?;
+    format!("{addr}:{}", peer.port)
+        .parse()
+        .map_err(|e| anyhow!("dirección inválida ({addr}): {e}"))
+}
+
+fn connect_inner(handle: &AppHandle, uid: &str) -> Result<()> {
+    let addr = peer_addr(handle, uid)?;
+    let name = peer_name(handle, uid);
+    let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)?;
+    stream.set_read_timeout(Some(IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(IO_TIMEOUT))?;
+    let private = private_key(handle)?;
+    let mut sess = Session::connect(stream, &private)?;
+
+    let (my_uid, my_name) = me(handle)?;
+    match known_state(handle, uid, &sess.peer_pubkey) {
+        Known::KeyMismatch => {
+            warn_key_mismatch(handle, uid, &name);
+            return Err(anyhow!(
+                "la clave de {name} no coincide con la que tenías guardada"
+            ));
+        }
+        Known::Trusted => {
+            let (tracks, playlists) = library_counts(handle);
+            sess.send(&Msg::Hello {
+                uid: my_uid,
+                name: my_name,
+                platform: platform(),
+                tracks,
+                playlists,
+                clock_ms: db::now_ms(),
+            })?;
+            match sess.recv()? {
+                Msg::Hello {
+                    uid: their_uid,
+                    name: their_name,
+                    tracks,
+                    playlists,
+                    clock_ms,
+                    ..
+                } => {
+                    report_hello(handle, &their_uid, &their_name, tracks, playlists, clock_ms);
+                    Ok(())
+                }
+                // Nos desvincularon del otro lado. Es creíble: el handshake ya
+                // probó que la clave es la que teníamos guardada. Seguir
+                // mostrando "Paired" sería mentir.
+                Msg::NotPaired => {
+                    forget_device(handle, uid)?;
+                    let _ = handle.emit("peers-changed", ());
+                    Err(anyhow!("{name} ya no te tiene vinculado"))
+                }
+                Msg::Reject { reason } => Err(anyhow!(reason)),
+                other => Err(anyhow!("se esperaba Hello, llego {other:?}")),
+            }
+        }
+        Known::Unknown => {
+            sess.send(&Msg::PairRequest {
+                uid: my_uid,
+                name: my_name,
+                platform: platform(),
+            })?;
+            let accepted_here = ask_user(
+                handle,
+                PairingRequestEvent {
+                    uid: uid.to_string(),
+                    name: name.clone(),
+                    platform: String::new(),
+                    code: sess.code.clone(),
+                    incoming: false,
+                },
+            );
+            if !accepted_here {
+                // Cortar acá y no esperar la respuesta del otro: puede haber
+                // alguien mirando la pantalla hasta que expire el timeout.
+                let _ = sess.send(&Msg::Reject {
+                    reason: "rechazado en el otro dispositivo".into(),
+                });
+                emit_done(handle, uid, &name, false, Some("rechazado en este dispositivo"));
+                return Ok(());
+            }
+            let accepted_there = match sess.recv()? {
+                Msg::PairResponse { accepted } => accepted,
+                Msg::Reject { reason } => {
+                    emit_done(handle, uid, &name, false, Some(&reason));
+                    return Ok(());
+                }
+                other => return Err(anyhow!("se esperaba PairResponse, llego {other:?}")),
+            };
+            sess.send(&Msg::PairAck {
+                accepted: accepted_here,
+            })?;
+            if !accepted_there {
+                emit_done(handle, uid, &name, false, Some("rechazado en el otro dispositivo"));
+                return Ok(());
+            }
+            store_device(handle, uid, &name, &platform_of(handle, uid), &sess.peer_pubkey)?;
+            emit_done(handle, uid, &name, true, None);
+            let _ = handle.emit("peers-changed", ());
+            exchange_hello(handle, &mut sess, uid, &name)
+        }
+    }
+}
+
+fn platform_of(handle: &AppHandle, uid: &str) -> String {
+    handle
+        .state::<AppState>()
+        .peers
+        .list()
+        .into_iter()
+        .find(|p| p.uid == uid)
+        .map(|p| p.platform)
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Comunes
+// ---------------------------------------------------------------------------
+
+/// Prueba de que el canal quedó vivo: cada lado le dice al otro cuánta
+/// biblioteca tiene. Es lo primero que se ve funcionar de punta a punta sin
+/// haber movido un solo byte de audio.
+fn exchange_hello(handle: &AppHandle, sess: &mut Session, uid: &str, name: &str) -> Result<()> {
+    let (my_uid, my_name) = me(handle)?;
+    let (tracks, playlists) = library_counts(handle);
+    sess.send(&Msg::Hello {
+        uid: my_uid,
+        name: my_name,
+        platform: platform(),
+        tracks,
+        playlists,
+        clock_ms: db::now_ms(),
+    })?;
+    match sess.recv()? {
+        Msg::Hello {
+            tracks,
+            playlists,
+            clock_ms,
+            ..
+        } => {
+            report_hello(handle, uid, name, tracks, playlists, clock_ms);
+            Ok(())
+        }
+        other => Err(anyhow!("se esperaba Hello, llego {other:?}")),
+    }
+}
+
+fn report_hello(
+    handle: &AppHandle,
+    uid: &str,
+    name: &str,
+    tracks: i64,
+    playlists: i64,
+    their_clock: i64,
+) {
+    let skew = their_clock - db::now_ms();
+    if skew.abs() > 5 * 60 * 1000 {
+        log::warn!("[pair] reloj de {name} corrido {skew} ms — el merge por LWW puede elegir mal");
+    }
+    {
+        let state = handle.state::<AppState>();
+        // El guard va a una variable propia: como binding del `if let` sería
+        // un temporario que vive más que `state`, y no compila.
+        let db = state.db.lock();
+        if let Ok(conn) = db {
+            let _ = conn.execute(
+                "UPDATE devices SET last_seen = ?1, name = ?2 WHERE uid = ?3",
+                rusqlite::params![db::now_ms(), name, uid],
+            );
+        }
+    }
+    let _ = handle.emit(
+        "peer-hello",
+        PeerHelloEvent {
+            uid: uid.to_string(),
+            name: name.to_string(),
+            tracks,
+            playlists,
+            clock_skew_ms: skew,
+        },
+    );
+}
+
+fn emit_done(handle: &AppHandle, uid: &str, name: &str, ok: bool, error: Option<&str>) {
+    let _ = handle.emit(
+        "pairing-done",
+        PairingDoneEvent {
+            uid: uid.to_string(),
+            name: name.to_string(),
+            ok,
+            error: error.map(|s| s.to_string()),
+        },
+    );
+}
+
+/// Una clave distinta para un uid conocido puede ser una reinstalación del
+/// otro lado — o alguien haciéndose pasar por él. No se resuelve solo: queda
+/// registrado y el usuario tiene que desvincular a mano para volver a parear.
+fn warn_key_mismatch(handle: &AppHandle, uid: &str, name: &str) {
+    log::warn!("[pair] clave distinta para {name} ({uid}) — conexión rechazada");
+    {
+        let state = handle.state::<AppState>();
+        // El guard va a una variable propia: como binding del `if let` sería
+        // un temporario que vive más que `state`, y no compila.
+        let db = state.db.lock();
+        if let Ok(conn) = db {
+            let _ = conn.execute(
+                "INSERT INTO sync_log (ts, peer, kind, detail) VALUES (?1, ?2, 'key-mismatch', ?3)",
+                rusqlite::params![db::now_ms(), uid, name],
+            );
+        }
+    }
+    emit_done(
+        handle,
+        uid,
+        name,
+        false,
+        Some("la clave de este dispositivo cambió — desvinculalo y volvé a vincularlo si fuiste vos"),
+    );
+}
+
+fn forget_device(handle: &AppHandle, uid: &str) -> Result<()> {
+    let state = handle.state::<AppState>();
+    let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
+    conn.execute("DELETE FROM devices WHERE uid = ?1", [uid])?;
+    Ok(())
+}
+
+/// Saca un dispositivo de la lista de confiados y **le avisa**.
+///
+/// El pairing se guarda de los dos lados. Sin el aviso, desvincular acá dejaba
+/// al otro mostrando "Paired" para siempre, y ningún Refresh lo iba a
+/// corregir: la lista de dispositivos no tiene nada que ver con lo que ve
+/// mDNS. El aviso es best-effort — si el otro está apagado, se entera solo la
+/// próxima vez que intente conectarse y reciba `NotPaired`.
+pub fn unpair(handle: &AppHandle, uid: &str) -> Result<()> {
+    let addr = peer_addr(handle, uid).ok();
+    forget_device(handle, uid)?;
+    if let Some(addr) = addr {
+        let handle = handle.clone();
+        let uid = uid.to_string();
+        std::thread::spawn(move || {
+            if let Err(e) = notify_unpair(&handle, addr) {
+                log::debug!("[pair] no se pudo avisar el unpair a {uid}: {e}");
+            }
+        });
+    }
+    Ok(())
+}
+
+fn notify_unpair(handle: &AppHandle, addr: SocketAddr) -> Result<()> {
+    let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)?;
+    stream.set_read_timeout(Some(CONNECT_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONNECT_TIMEOUT))?;
+    let private = private_key(handle)?;
+    let mut sess = Session::connect(stream, &private)?;
+    let (my_uid, _) = me(handle)?;
+    sess.send(&Msg::Unpair { uid: my_uid })
+}

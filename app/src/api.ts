@@ -114,6 +114,9 @@ export interface Peer {
   port: number;
   lastSeen: number;
   paired: boolean;
+  /// Visible en la red ahora mismo. Los pareados se listan igual cuando no
+  /// están: siguen siendo tus dispositivos aunque el celu esté sin wifi.
+  online: boolean;
 }
 
 /// [uid, name] de este dispositivo. El uid no se puede cambiar (lo
@@ -122,3 +125,40 @@ export interface Peer {
 export const deviceIdentity = () => invoke<[string, string]>('device_identity');
 export const setDeviceName = (name: string) => invoke<void>('set_device_name', { name });
 export const listPeers = () => invoke<Peer[]>('list_peers');
+
+/// Manda una consulta mDNS nueva. Las respuestas llegan por `peers-changed`,
+/// no en el retorno: los peers contestan cuando contestan.
+export const refreshPeers = () => invoke<void>('refresh_peers');
+
+/// Vincula, o si ya está vinculado pide los conteos del otro lado. Vuelve
+/// enseguida: el resultado llega por eventos, porque del otro lado puede
+/// haber una persona tardando en confirmar el código.
+export const connectPeer = (uid: string) => invoke<void>('connect_peer', { uid });
+export const confirmPairing = (uid: string, accept: boolean) =>
+  invoke<boolean>('confirm_pairing', { uid, accept });
+export const unpairDevice = (uid: string) => invoke<void>('unpair_device', { uid });
+
+/// Payload del evento `pairing-request`: hay que mostrar `code` y esperar que
+/// el usuario confirme. El mismo código aparece en las dos pantallas.
+export interface PairingRequest {
+  uid: string;
+  name: string;
+  platform: string;
+  code: string;
+  incoming: boolean;
+}
+
+export interface PairingDone {
+  uid: string;
+  name: string;
+  ok: boolean;
+  error: string | null;
+}
+
+export interface PeerHello {
+  uid: string;
+  name: string;
+  tracks: number;
+  playlists: number;
+  clockSkewMs: number;
+}

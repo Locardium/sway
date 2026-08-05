@@ -38,6 +38,22 @@ uuid = { version = "1", features = ["v4"] }
 # codigo en desktop y Android. OJO Android: sin MulticastLock no recibe NADA
 # y sin error visible (ver MainActivity.kt).
 mdns-sd = "0.20.3"
+# Canal cifrado del sync (Fase 5.2): handshake Noise XX. Sin features por
+# default a proposito — el set completo arrastra `ring` (C/asm, un problema
+# mas en el cross-compile a Android) y AES, que no se usa. Esto deja
+# exactamente lo que pide Noise_XX_25519_ChaChaPoly_BLAKE2s, todo Rust puro.
+#
+# OJO: tampoco va la feature "std". En snow 0.10 esta declarada como
+# `std = [..., "ring/std"]` (sin el `?`), asi que prenderla FUERZA la
+# dependencia opcional `ring` aunque no se use ningun resolver de ring.
+snow = { version = "0.10", default-features = false, features = [
+    "default-resolver",
+    "use-curve25519",
+    "use-chacha20poly1305",
+    "use-blake2",
+    "use-sha2",
+    "use-getrandom",
+] }
 
 # En Android eprintln! no llega a logcat; sin esto no hay forma de ver
 # errores en runtime (nos quemamos con esto: lofty fallaba en silencio en
