@@ -140,14 +140,29 @@ fn managed_dest(managed: &Path, src: &Path) -> PathBuf {
     dest
 }
 
-/// Inserta (o reusa via INSERT OR IGNORE) el track ya ubicado en `dest`
-/// dentro de la carpeta gestionada. Compartido por `import_one` (src en
-/// disco) e `import_bytes` (src en memoria, ver mas abajo).
+/// Inserta el track ya ubicado en `dest` dentro de la carpeta gestionada, o
+/// refresca sus tags si la fila ya existe (el path es UNIQUE). Compartido por
+/// `import_one` (src en disco) e `import_bytes` (src en memoria, ver mas
+/// abajo).
+///
+/// El refresh importa: reimportar un archivo que ya estaba en la biblioteca es
+/// la unica forma que tiene el user de recuperar tags que un import viejo no
+/// supo leer (ej. los tracks importados antes del fix de `id3_sanitize`). Con
+/// `INSERT OR IGNORE` el reimport era un no-op silencioso y la fila quedaba
+/// con los campos vacios para siempre. Cada campo solo se pisa si la lectura
+/// nueva trae algo — una lectura peor (tag ilegible) nunca borra datos buenos.
 fn insert_track(conn: &Connection, dest: &Path) -> Result<i64> {
     let m = read_meta(dest);
     conn.execute(
-        "INSERT OR IGNORE INTO tracks (path, title, artist, album, genre, duration_ms, bpm)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO tracks (path, title, artist, album, genre, duration_ms, bpm)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(path) DO UPDATE SET
+            title       = CASE WHEN excluded.title  <> '' THEN excluded.title  ELSE tracks.title  END,
+            artist      = CASE WHEN excluded.artist <> '' THEN excluded.artist ELSE tracks.artist END,
+            album       = CASE WHEN excluded.album  <> '' THEN excluded.album  ELSE tracks.album  END,
+            genre       = CASE WHEN excluded.genre  <> '' THEN excluded.genre  ELSE tracks.genre  END,
+            duration_ms = CASE WHEN excluded.duration_ms > 0 THEN excluded.duration_ms ELSE tracks.duration_ms END,
+            bpm         = COALESCE(excluded.bpm, tracks.bpm)",
         params![
             dest.to_string_lossy(),
             m.title,
