@@ -10,6 +10,7 @@ import {
   getAutoSyncXml,
   importFromUri,
   listPeers,
+  previewSync,
   refreshPeers,
   setAutoSyncXml,
   setDeviceName,
@@ -19,6 +20,7 @@ import {
   type PairingRequest,
   type Peer,
   type PeerHello,
+  type SyncPlanEvent,
 } from '../api';
 import { isAndroid } from '../platform';
 
@@ -58,6 +60,61 @@ function guessFileName(uri: string): string {
   return `track-${Date.now()}.mp3`;
 }
 
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+
+/// Qué pasaría si se sincronizara ahora. Todavía no se ejecuta nada: esta
+/// pantalla existe para poder mirar las decisiones del merge antes de que
+/// puedan tocar un archivo.
+function PlanSummary({ ev }: { ev: SyncPlanEvent }) {
+  const p = ev.plan;
+  const rows: [string, string][] = [];
+  if (p.pullFiles.length)
+    rows.push(['Files to receive', `${p.pullFiles.length} · ${formatBytes(ev.bytesIn)}`]);
+  if (p.pushFiles.length)
+    rows.push(['Files to send', `${p.pushFiles.length} · ${formatBytes(ev.bytesOut)}`]);
+  if (p.pullMeta || p.pushMeta) rows.push(['Metadata updates', `${p.pullMeta} in · ${p.pushMeta} out`]);
+  if (p.pullPlaylists || p.pushPlaylists)
+    rows.push(['Playlists', `${p.pullPlaylists} in · ${p.pushPlaylists} out`]);
+  if (p.pullMemberships || p.pushMemberships)
+    rows.push(['Playlist entries', `${p.pullMemberships} in · ${p.pushMemberships} out`]);
+  if (p.deletesIn || p.deletesOut)
+    rows.push(['Deletions', `${p.deletesIn} here · ${p.deletesOut} there`]);
+
+  return (
+    <div className="plan">
+      {rows.length === 0 ? (
+        <div className="plan-row">
+          <span>Already in sync</span>
+        </div>
+      ) : (
+        rows.map(([label, value]) => (
+          <div className="plan-row" key={label}>
+            <span>{label}</span>
+            <strong>{value}</strong>
+          </div>
+        ))
+      )}
+      {p.unhashed > 0 && (
+        <div className="plan-row">
+          <span>Still hashing</span>
+          <strong>{p.unhashed} tracks</strong>
+        </div>
+      )}
+      <p className="set-note">Preview only — nothing is transferred yet.</p>
+    </div>
+  );
+}
+
 function Switch({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
   return (
     <button
@@ -92,6 +149,8 @@ export default function Settings({ trackCount, volume, onClose, onStatus, onImpo
   // Conteos que mandó cada peer en su Hello — la prueba visible de que el
   // canal cifrado quedó vivo.
   const [hellos, setHellos] = useState<Record<string, PeerHello>>({});
+  // Simulacro de sync por peer: qué pasaría si se sincronizara ahora.
+  const [plans, setPlans] = useState<Record<string, SyncPlanEvent>>({});
 
   const android = isAndroid();
   const showExport = !android;
@@ -147,6 +206,10 @@ export default function Settings({ trackCount, volume, onClose, onStatus, onImpo
       listen<PeerHello>('peer-hello', (e) => {
         setBusyPeer(null);
         setHellos((h) => ({ ...h, [e.payload.uid]: e.payload }));
+      }),
+      listen<SyncPlanEvent>('sync-plan', (e) => {
+        setBusyPeer(null);
+        setPlans((p) => ({ ...p, [e.payload.uid]: e.payload }));
       }),
     ];
     const timer = setInterval(reloadPeers, 15000);
@@ -480,8 +543,23 @@ export default function Settings({ trackCount, volume, onClose, onStatus, onImpo
                       >
                         {busyPeer === p.uid ? 'Connecting…' : p.paired ? 'Ping' : 'Pair'}
                       </button>
+                      {p.paired && p.online && (
+                        <button
+                          disabled={busyPeer === p.uid}
+                          onClick={() => {
+                            setBusyPeer(p.uid);
+                            previewSync(p.uid).catch((e) => {
+                              setBusyPeer(null);
+                              onStatus(String(e));
+                            });
+                          }}
+                        >
+                          Preview sync
+                        </button>
+                      )}
                       {p.paired && <button onClick={() => unpair(p)}>Unpair</button>}
                     </div>
+                    {plans[p.uid] && <PlanSummary ev={plans[p.uid]} />}
                   </li>
                 );
               })}

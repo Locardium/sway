@@ -6,6 +6,7 @@ mod export_xml;
 mod hashing;
 mod id3_sanitize;
 mod import;
+mod manifest;
 mod pairing;
 mod rank;
 mod wire;
@@ -390,6 +391,13 @@ fn connect_peer(app: AppHandle, uid: String) {
     pairing::connect_peer(app, uid);
 }
 
+/// Simulacro de sync: compara las dos bibliotecas y publica por el evento
+/// `sync-plan` lo que pasaría. No escribe nada — la transferencia real es 5.4.
+#[tauri::command]
+fn preview_sync(app: AppHandle, uid: String) {
+    pairing::preview_sync(app, uid);
+}
+
 /// Respuesta del usuario al código de verificación.
 #[tauri::command]
 fn confirm_pairing(app: AppHandle, uid: String, accept: bool) -> bool {
@@ -704,6 +712,7 @@ pub fn run() {
             list_peers,
             refresh_peers,
             connect_peer,
+            preview_sync,
             confirm_pairing,
             unpair_device
         ])

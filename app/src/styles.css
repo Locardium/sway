@@ -708,6 +708,20 @@ table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
 }
 .peer-badge.ok { color: var(--accent); border-color: color-mix(in oklch, var(--accent) 55%, transparent); }
 
+/* Simulacro de sync */
+.peer { flex-wrap: wrap; }
+.plan {
+  flex-basis: 100%; margin-top: 8px; padding-top: 8px;
+  border-top: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: 3px;
+}
+.plan-row {
+  display: flex; justify-content: space-between; gap: 12px;
+  font-size: 12px; color: var(--muted);
+}
+.plan-row strong { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
+.plan .set-note { margin-top: 4px; font-size: 11px; }
+
 /* Codigo de verificacion del pairing */
 .pair-dialog { display: flex; flex-direction: column; gap: 14px; }
 .pair-code {

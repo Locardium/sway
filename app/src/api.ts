@@ -155,6 +155,33 @@ export interface PairingDone {
   error: string | null;
 }
 
+/// Lo que pasaría si se sincronizara ahora (Fase 5.3). Sólo se calcula y se
+/// muestra: nada de esto se ejecuta todavía.
+export interface SyncPlan {
+  pullFiles: { trackUid: string; hash: string; filename: string; size: number }[];
+  pushFiles: { trackUid: string; hash: string; filename: string; size: number }[];
+  pullMeta: number;
+  pushMeta: number;
+  pullPlaylists: number;
+  pushPlaylists: number;
+  pullMemberships: number;
+  pushMemberships: number;
+  deletesIn: number;
+  deletesOut: number;
+  /// Tracks locales que todavía no tienen hash: no participan del plan.
+  unhashed: number;
+}
+
+export interface SyncPlanEvent {
+  uid: string;
+  name: string;
+  plan: SyncPlan;
+  bytesIn: number;
+  bytesOut: number;
+}
+
+export const previewSync = (uid: string) => invoke<void>('preview_sync', { uid });
+
 export interface PeerHello {
   uid: string;
   name: string;

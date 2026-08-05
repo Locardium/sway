@@ -261,6 +261,35 @@ pub fn spawn_server(handle: AppHandle, listener: TcpListener) {
     });
 }
 
+/// Después de presentarse, la sesión queda abierta atendiendo pedidos hasta
+/// que el otro corta. Por ahora el único es el manifest; 5.4 agrega los
+/// bloques de audio sobre la misma sesión, para no rehacer el handshake por
+/// cada archivo.
+fn serve_requests(handle: &AppHandle, sess: &mut Session) -> Result<()> {
+    loop {
+        let msg = match sess.recv() {
+            Ok(m) => m,
+            // Cortó: fin normal de la sesión, no un error.
+            Err(e) if is_disconnect(&e) => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        match msg {
+            Msg::ManifestReq => {
+                let manifest = {
+                    let state = handle.state::<AppState>();
+                    let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
+                    crate::manifest::build(&conn)?
+                };
+                sess.send(&Msg::ManifestData {
+                    manifest: Box::new(manifest),
+                })?;
+            }
+            Msg::Bye => return Ok(()),
+            other => return Err(anyhow!("pedido inesperado: {other:?}")),
+        }
+    }
+}
+
 /// El otro lado cerró sin decir nada: un sondeo, o una app que se fue.
 fn is_disconnect(e: &anyhow::Error) -> bool {
     use std::io::ErrorKind::*;
@@ -358,7 +387,7 @@ fn serve(handle: &AppHandle, stream: TcpStream) -> Result<()> {
                 clock_ms: db::now_ms(),
             })?;
             report_hello(handle, &uid, &name, tracks, playlists, clock_ms);
-            Ok(())
+            serve_requests(handle, &mut sess)
         }
         // El otro lado nos sacó de sus dispositivos. Solo se acepta si su
         // clave es la que teníamos guardada — o sea, si el handshake probó
@@ -531,6 +560,93 @@ fn connect_inner(handle: &AppHandle, uid: &str) -> Result<()> {
             exchange_hello(handle, &mut sess, uid, &name)
         }
     }
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncPlanEvent {
+    pub uid: String,
+    pub name: String,
+    pub plan: crate::manifest::Plan,
+    pub bytes_in: i64,
+    pub bytes_out: i64,
+}
+
+/// Simulacro de sync (Fase 5.3): pide el inventario del otro lado, lo compara
+/// con el propio y publica lo que pasaría. **No escribe nada.**
+pub fn preview_sync(handle: AppHandle, uid: String) {
+    std::thread::spawn(move || {
+        let name = peer_name(&handle, &uid);
+        match preview_inner(&handle, &uid) {
+            Ok(plan) => {
+                if plan.is_empty() {
+                    log::info!("[sync] {name}: nada que sincronizar");
+                }
+                let _ = handle.emit(
+                    "sync-plan",
+                    SyncPlanEvent {
+                        uid: uid.clone(),
+                        name,
+                        bytes_in: plan.bytes_in(),
+                        bytes_out: plan.bytes_out(),
+                        plan,
+                    },
+                );
+            }
+            Err(e) => {
+                log::warn!("[sync] preview con {uid} fallo: {e}");
+                emit_done(&handle, &uid, &name, false, Some(&e.to_string()));
+            }
+        }
+    });
+}
+
+fn preview_inner(handle: &AppHandle, uid: &str) -> Result<crate::manifest::Plan> {
+    let addr = peer_addr(handle, uid)?;
+    let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)?;
+    stream.set_read_timeout(Some(IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(IO_TIMEOUT))?;
+    let private = private_key(handle)?;
+    let mut sess = Session::connect(stream, &private)?;
+
+    match known_state(handle, uid, &sess.peer_pubkey) {
+        Known::Trusted => {}
+        Known::KeyMismatch => return Err(anyhow!("la clave del dispositivo no coincide")),
+        Known::Unknown => return Err(anyhow!("todavía no está vinculado")),
+    }
+
+    let (my_uid, my_name) = me(handle)?;
+    let (tracks, playlists) = library_counts(handle);
+    sess.send(&Msg::Hello {
+        uid: my_uid,
+        name: my_name,
+        platform: platform(),
+        tracks,
+        playlists,
+        clock_ms: db::now_ms(),
+    })?;
+    match sess.recv()? {
+        Msg::Hello { .. } => {}
+        Msg::NotPaired => {
+            forget_device(handle, uid)?;
+            let _ = handle.emit("peers-changed", ());
+            return Err(anyhow!("ese dispositivo ya no te tiene vinculado"));
+        }
+        other => return Err(anyhow!("se esperaba Hello, llego {other:?}")),
+    }
+
+    sess.send(&Msg::ManifestReq)?;
+    let remote = match sess.recv()? {
+        Msg::ManifestData { manifest } => *manifest,
+        other => return Err(anyhow!("se esperaba el manifest, llego {other:?}")),
+    };
+    let local = {
+        let state = handle.state::<AppState>();
+        let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
+        crate::manifest::build(&conn)?
+    };
+    let _ = sess.send(&Msg::Bye);
+    Ok(crate::manifest::plan(&local, &remote))
 }
 
 fn platform_of(handle: &AppHandle, uid: &str) -> String {

@@ -61,6 +61,13 @@ pub enum Msg {
     /// que no conoce; el que llama lo usa para darse cuenta de que lo
     /// desvincularon del otro lado.
     NotPaired,
+    /// Pedido y respuesta del inventario de la biblioteca (Fase 5.3).
+    ManifestReq,
+    ManifestData {
+        manifest: Box<crate::manifest::Manifest>,
+    },
+    /// Cierre ordenado de la sesion.
+    Bye,
 }
 
 // ---------------------------------------------------------------------------
