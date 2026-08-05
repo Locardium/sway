@@ -897,6 +897,7 @@ export default function App() {
           )}
         </main>
 
+        {infoOpen && <div className="rp-scrim" onClick={() => setInfoOpen(false)} />}
         <RightPanel
           open={infoOpen}
           track={infoTrack}

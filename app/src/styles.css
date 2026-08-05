@@ -332,6 +332,9 @@ body.dragging * { cursor: grabbing !important; }
   will-change: transform;
 }
 .right-panel.open { transform: none; }
+/* En desktop el panel convive con la tabla (se clickea un track y el panel lo
+   muestra), asi que no lleva scrim: solo se vuelve drawer en pantalla chica. */
+.rp-scrim { display: none; }
 .rp-inner { width: 288px; padding: 14px 16px 110px; overflow-y: auto; height: 100%; }
 .rp-head {
   display: flex; align-items: center; justify-content: space-between;
@@ -404,14 +407,25 @@ button.ctl.main {
 }
 button.ctl.main:hover { background: var(--accent); color: var(--accent-ink); transform: scale(1.05); }
 button.ctl.stop { color: var(--muted); }
-/* En touch el :hover se queda pegado despues del tap (parece que el boton
-   quedo activado). Sin mouse, el estado hover no existe. */
+/* En touch el :hover se queda pegado despues del tap: el boton sigue pintado
+   como activo aunque ya lo soltaste (se veia sobre todo en el icono de info,
+   que quedaba encendido despues de cerrar el panel). Sin mouse no existe el
+   estado hover, asi que aca se lo neutraliza y solo mandan las clases de
+   estado real (.on). */
 @media (hover: none) {
+  button:hover { border-color: var(--line); }
+  button.primary:hover { background: var(--accent); }
+  button.mini:hover { color: var(--muted); }
+  button.mini.on, button.mini.on:hover { color: var(--accent); }
   button.ctl:hover, button.ctl.main:hover { transform: none; }
   button.ctl:hover { color: var(--text); }
   button.ctl.side:hover { color: var(--muted); }
   button.ctl.side.on:hover { color: var(--accent); }
   button.ctl.main:hover { background: var(--text); color: var(--bg); }
+  .seek-bar:hover { height: 4px; }
+  .seek-bar:hover .seek-fill { background: var(--text); }
+  .seek-bar.dragging { height: 6px; }
+  .seek-bar.dragging .seek-fill { background: var(--accent); }
 }
 
 .seek { display: flex; align-items: center; gap: 10px; }
@@ -597,7 +611,16 @@ input.range:active::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--accent-so
     animation: fade-in 150ms var(--ease);
   }
 
+  /* Acá el panel tapa casi toda la pantalla: se comporta como el sidebar,
+     con scrim y tocando afuera se cierra. El z-index no se toca — el panel
+     queda debajo del player, que va siempre arriba de todo. El scrim comparte
+     capa con el panel y queda abajo por orden en el DOM. */
   .right-panel { width: min(320px, 88vw); }
+  .rp-scrim {
+    display: block; position: absolute; inset: 0; z-index: var(--z-sticky);
+    background: oklch(0% 0 0 / 0.5);
+    animation: fade-in 150ms var(--ease);
+  }
 }
 
 /* ---------- Header icon toggled ---------- */
