@@ -25,6 +25,7 @@ import {
   stopPlayback,
   playbackPosition,
   subscribePlayback,
+  setAppVisible,
   seekTo,
   setVolume as setVolumeBackend,
   revealTrack,
@@ -187,11 +188,13 @@ export default function App() {
   useEffect(() => {
     const w = window as typeof window & {
       __swayMediaButton?: (button: string) => void;
+      __swayAppVisible?: (visible: boolean) => void;
     };
     // MainActivity escucha por dos vias distintas (MediaSession y broadcast de
     // la notificacion) porque cual esta activa depende de la version de
     // Android y de la capa del fabricante. Si un mismo toque llega por las
     // dos, esto se queda con el primero.
+    w.__swayAppVisible = (visible) => setAppVisible(visible);
     let lastAt = 0;
     w.__swayMediaButton = (button) => {
       const now = Date.now();
@@ -202,6 +205,7 @@ export default function App() {
     };
     return () => {
       delete w.__swayMediaButton;
+      delete w.__swayAppVisible;
     };
   }, []);
 

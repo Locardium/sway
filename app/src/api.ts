@@ -76,6 +76,7 @@ const desktopSetVolume = (volume: number) => invoke<void>('set_volume', { volume
 // queda null y la app cae al poll de posicion de siempre.
 export type { PlaybackEvent } from './nativeAudio';
 export const subscribePlayback = android ? nativeAudio.subscribePlayback : null;
+export const setAppVisible = nativeAudio.setAppVisible;
 
 export const playTrack = android ? nativeAudio.playTrack : desktopPlayTrack;
 export const pausePlayback = android ? nativeAudio.pausePlayback : desktopPausePlayback;

@@ -82,10 +82,38 @@ export type PlaybackEvent =
 
 let endedSent = false;
 
+/// Cuanto antes del final se cambia de track con la app fuera de pantalla.
+///
+/// Cuando el player llega a `STATE_ENDED`, la notificacion del plugin deja de
+/// ser "ongoing" y su servicio SALE de foreground. Arrancar el track siguiente
+/// lo hace volver, y `Service.startForeground()` desde background esta
+/// prohibido en Android 12+: crashea con
+/// ForegroundServiceStartNotAllowedException. Cambiando de track mientras
+/// todavia suena, la notificacion nunca deja de ser "ongoing", el servicio
+/// nunca sale de foreground y el problema no existe — es la misma ruta que ya
+/// funciona al tocar "siguiente" en la notificacion.
+///
+/// Solo aplica con la app fuera de pantalla: en foreground el proceso tiene
+/// permiso de sobra y no hace falta recortarle nada al track. El margen tiene
+/// que cubrir un par de ticks del plugin, que en background son de 250ms.
+const NEAR_END_LEAD_MS = 500;
+
+let appVisible = true;
+let endedEarly = false;
+
+/// Visibilidad real de la app, empujada por `MainActivity` (ver el
+/// `eval` de onPause/onResume). No se usa `document.visibilityState` porque
+/// MainActivity resume el WebView a mano cuando la Activity pausa, asi que el
+/// documento se sigue reportando visible.
+export function setAppVisible(visible: boolean) {
+  appVisible = visible;
+}
+
 /// Descarta el estado derivado tras un cambio de posicion hecho a proposito
 /// (seek, stop, track nuevo).
 function quiet() {
   endedSent = false;
+  endedEarly = false;
 }
 
 /// Traduce el chorro de estados del plugin a eventos con sentido para la app.
@@ -117,6 +145,19 @@ function handleState(st: NativeAudioState, emit: (e: PlaybackEvent) => void) {
     return;
   }
   endedSent = false;
+
+  const durationMs = Math.round((st.duration || 0) * 1000);
+  if (
+    !appVisible &&
+    !endedEarly &&
+    st.isPlaying &&
+    durationMs > 0 &&
+    durationMs - ms <= NEAR_END_LEAD_MS
+  ) {
+    endedEarly = true;
+    emit({ type: 'ended' });
+    return;
+  }
 
   if (now - lastPositionEmit >= POSITION_MS) {
     lastPositionEmit = now;

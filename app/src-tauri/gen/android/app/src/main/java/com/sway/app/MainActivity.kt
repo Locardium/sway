@@ -33,14 +33,13 @@ class MainActivity : TauriActivity() {
 
         fun dispatchMediaButton(button: String) {
             Log.i(TAG, "boton multimedia: $button")
+            eval("window.__swayMediaButton && window.__swayMediaButton('$button')")
+        }
+
+        private fun eval(js: String) {
             val activity = live ?: return
             val view = activity.webView ?: return
-            view.post {
-                view.evaluateJavascript(
-                    "window.__swayMediaButton && window.__swayMediaButton('$button')",
-                    null,
-                )
-            }
+            view.post { view.evaluateJavascript(js, null) }
         }
     }
 
@@ -104,6 +103,20 @@ class MainActivity : TauriActivity() {
     override fun onPause() {
         super.onPause()
         webView?.onResume()
+        // Con la app fuera de pantalla, el proceso pierde el derecho a llamar
+        // `Service.startForeground()`. El plugin lo llama cada vez que su
+        // notificacion vuelve a ser "ongoing" — y sale de foreground cuando el
+        // track llega a STATE_ENDED. O sea: terminar un track en background y
+        // arrancar el siguiente crasheaba con
+        // ForegroundServiceStartNotAllowedException. La app usa esta senal
+        // para adelantar el cambio de track y no pisar nunca ese estado (ver
+        // nativeAudio.ts).
+        eval("window.__swayAppVisible && window.__swayAppVisible(false)")
+    }
+
+    override fun onResume() {
+        super.onResume()
+        eval("window.__swayAppVisible && window.__swayAppVisible(true)")
     }
 
     /// Anterior/siguiente de la notificacion y el lockscreen -> la app.

@@ -22,6 +22,71 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+/// Migración de una sola vez: en Android los tracks vivían en
+/// `<carpeta gestionada>/Sway`, un nivel de más — la carpeta gestionada ya es
+/// privada de la app (`…/files/Music`), así que ese subdirectorio no separaba
+/// de nada. Lo que quedó adentro se sube un nivel.
+///
+/// Los paths guardados son absolutos: si no se actualizan junto con los
+/// archivos, cada track queda apuntando a algo que ya no está ahí. Nunca borra
+/// nada — ante un choque de nombres desambigua, que es lo mismo que hace el
+/// import.
+#[cfg(target_os = "android")]
+fn flatten_legacy_subdir(conn: &Connection, music_dir: &std::path::Path) -> anyhow::Result<()> {
+    let legacy = music_dir.join("Sway");
+    if !legacy.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(&legacy)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let from = entry.path();
+        let name = entry.file_name();
+        let mut to = music_dir.join(&name);
+        if to.exists() {
+            let stem = std::path::Path::new(&name)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("track")
+                .to_string();
+            let ext = std::path::Path::new(&name)
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            let mut i = 2;
+            loop {
+                let cand = if ext.is_empty() {
+                    music_dir.join(format!("{stem} ({i})"))
+                } else {
+                    music_dir.join(format!("{stem} ({i}).{ext}"))
+                };
+                if !cand.exists() {
+                    to = cand;
+                    break;
+                }
+                i += 1;
+            }
+        }
+        std::fs::rename(&from, &to)?;
+        conn.execute(
+            "UPDATE tracks SET path = ?1 WHERE path = ?2",
+            rusqlite::params![to.to_string_lossy(), from.to_string_lossy()],
+        )?;
+        eprintln!("[lib] migrado: {} -> {}", from.display(), to.display());
+    }
+    // Solo borra el directorio si quedó vacío.
+    std::fs::remove_dir(&legacy).ok();
+    Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
+fn flatten_legacy_subdir(_conn: &Connection, _music_dir: &std::path::Path) -> anyhow::Result<()> {
+    Ok(())
+}
+
 pub struct AppState {
     db: Mutex<Connection>,
     player: Player,
@@ -371,13 +436,22 @@ pub fn run() {
                 .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
                 .unwrap_or(-1);
             eprintln!("[db] tracks al iniciar: {n}");
-            // Carpeta gestionada: <Música del usuario>/Sway (fallback: appdata).
-            let music_dir = app
-                .path()
-                .audio_dir()
-                .unwrap_or_else(|_| dir.clone())
-                .join("Sway");
+            // Carpeta gestionada. En desktop `audio_dir()` es la carpeta de
+            // música del usuario, compartida con todo lo demás, así que Sway se
+            // queda en su propio subdirectorio. En Android ya es una carpeta
+            // privada de la app (`getExternalFilesDir(DIRECTORY_MUSIC)`, o sea
+            // `…/files/Music`): anidar otro "Sway" adentro solo agrega un nivel
+            // que no separa de nada.
+            let audio_dir = app.path().audio_dir().unwrap_or_else(|_| dir.clone());
+            let music_dir = if cfg!(target_os = "android") {
+                audio_dir
+            } else {
+                audio_dir.join("Sway")
+            };
             std::fs::create_dir_all(&music_dir).ok();
+            if let Err(e) = flatten_legacy_subdir(&conn, &music_dir) {
+                eprintln!("[lib] migración de la carpeta gestionada falló: {e}");
+            }
             eprintln!("[lib] carpeta gestionada: {}", music_dir.display());
             app.manage(AppState {
                 db: Mutex::new(conn),
