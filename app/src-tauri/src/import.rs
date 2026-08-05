@@ -153,10 +153,22 @@ fn managed_dest(managed: &Path, src: &Path) -> PathBuf {
 /// nueva trae algo — una lectura peor (tag ilegible) nunca borra datos buenos.
 fn insert_track(conn: &Connection, dest: &Path) -> Result<i64> {
     let m = read_meta(dest);
+    // Identidad para sync (Fase 5). El hash se calcula aca y no en el backfill
+    // de arranque porque el archivo ya se acaba de leer entero para copiarlo:
+    // el costo marginal es nulo y el track queda sincronizable de entrada.
+    let (size, mtime) = crate::hashing::file_stamp(dest).unwrap_or((0, 0));
+    let hash = crate::hashing::hash_file(dest).ok();
+    let rel = dest.file_name().map(|n| n.to_string_lossy().into_owned());
     conn.execute(
-        "INSERT INTO tracks (path, title, artist, album, genre, duration_ms, bpm)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO tracks (path, title, artist, album, genre, duration_ms, bpm,
+                             uid, content_hash, rel_path, size_bytes, mtime_ms, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT(path) DO UPDATE SET
+            content_hash = excluded.content_hash,
+            size_bytes   = excluded.size_bytes,
+            mtime_ms     = excluded.mtime_ms,
+            rel_path     = COALESCE(tracks.rel_path, excluded.rel_path),
+            updated_at   = excluded.updated_at,
             title       = CASE WHEN excluded.title  <> '' THEN excluded.title  ELSE tracks.title  END,
             artist      = CASE WHEN excluded.artist <> '' THEN excluded.artist ELSE tracks.artist END,
             album       = CASE WHEN excluded.album  <> '' THEN excluded.album  ELSE tracks.album  END,
@@ -170,7 +182,16 @@ fn insert_track(conn: &Connection, dest: &Path) -> Result<i64> {
             m.album,
             m.genre,
             m.duration_ms,
-            m.bpm
+            m.bpm,
+            // El uid NO se pisa en el UPDATE: reimportar un archivo que ya
+            // estaba es la misma cancion, y su identidad logica tiene que
+            // sobrevivir (playlists y tombstones la referencian).
+            crate::db::new_uid(),
+            hash,
+            rel,
+            size,
+            mtime,
+            crate::db::now_ms()
         ],
     )?;
     conn.query_row(

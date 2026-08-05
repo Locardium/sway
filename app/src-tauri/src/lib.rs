@@ -1,8 +1,10 @@
 mod cover;
 mod db;
 mod export_xml;
+mod hashing;
 mod id3_sanitize;
 mod import;
+mod rank;
 mod xml_sync;
 
 // Desktop: Player real (rodio/symphonia, thread propio). Android/iOS: stub
@@ -323,6 +325,24 @@ fn playback_position(state: State<AppState>) -> u64 {
     state.player.position_secs()
 }
 
+/// Identidad de este dispositivo, para mostrarla y poder renombrarla en
+/// Settings. El uid no se puede cambiar (lo referencian tombstones y clocks);
+/// el nombre es solo para reconocerlo en la lista de dispositivos del otro
+/// lado.
+#[tauri::command]
+fn device_identity(state: State<AppState>) -> Result<(String, String), String> {
+    let conn = state.db.lock().unwrap();
+    let uid = db::this_device_uid(&conn).map_err(|e| e.to_string())?;
+    let name = db::device_name(&conn).map_err(|e| e.to_string())?;
+    Ok((uid, name))
+}
+
+#[tauri::command]
+fn set_device_name(state: State<AppState>, name: String) -> Result<(), String> {
+    let conn = state.db.lock().unwrap();
+    db::set_device_name(&conn, &name).map_err(|e| e.to_string())
+}
+
 /// "Sync now" manual: escribe el XML sin importar el estado del toggle.
 #[tauri::command]
 fn export_library_xml_now(app: AppHandle, state: State<AppState>) -> Result<(), String> {
@@ -349,6 +369,77 @@ fn sync_xml_after_change(app: AppHandle, state: State<AppState>) -> Result<(), S
     let conn = state.db.lock().unwrap();
     xml_sync::write_if_enabled(&app, &conn, &state.music_dir);
     Ok(())
+}
+
+/// Completa `rel_path` (nombre del archivo dentro de la carpeta gestionada)
+/// en las filas que no lo tengan. `path` es absoluto y por lo tanto local:
+/// `E:\...\Sway\x.flac` en la PC y `/storage/.../Music/x.flac` en el celu. Lo
+/// que viaja entre dispositivos es `rel_path`; el path absoluto se rearma en
+/// cada uno. Los tracks legacy de afuera de la carpeta gestionada quedan sin
+/// `rel_path` — no son sincronizables hasta que se los reimporte.
+fn backfill_rel_paths(conn: &Connection, music_dir: &std::path::Path) -> rusqlite::Result<usize> {
+    let rows: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare("SELECT id, path FROM tracks WHERE rel_path IS NULL")?;
+        let r = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        r.collect::<rusqlite::Result<_>>()?
+    };
+    let mut done = 0;
+    for (id, path) in rows {
+        let p = std::path::Path::new(&path);
+        if let Ok(rel) = p.strip_prefix(music_dir) {
+            conn.execute(
+                "UPDATE tracks SET rel_path = ?1 WHERE id = ?2",
+                rusqlite::params![rel.to_string_lossy(), id],
+            )?;
+            done += 1;
+        }
+    }
+    Ok(done)
+}
+
+/// Hashea en segundo plano los tracks que todavia no tienen `content_hash`.
+///
+/// Corre en su propio thread y **suelta el lock de la DB entre archivo y
+/// archivo**: con 100 GB de biblioteca esto tarda minutos, y sostener el mutex
+/// dejaria la UI congelada todo ese tiempo. El hash en si se calcula fuera del
+/// lock; adentro solo entran el SELECT inicial y el UPDATE de cada fila.
+///
+/// Reanudable por construccion: el criterio de "falta" esta en la DB, asi que
+/// cerrar la app a mitad solo deja pendiente lo que no llego a hashearse.
+fn spawn_hash_backfill(handle: AppHandle) {
+    std::thread::spawn(move || {
+        let state = handle.state::<AppState>();
+        let pending = {
+            let conn = state.db.lock().unwrap();
+            hashing::pending(&conn).unwrap_or_default()
+        };
+        if pending.is_empty() {
+            return;
+        }
+        let total = pending.len();
+        eprintln!("[hash] {total} tracks sin hashear");
+        for (i, (id, path)) in pending.into_iter().enumerate() {
+            let p = std::path::PathBuf::from(&path);
+            let stamp = hashing::file_stamp(&p);
+            let hash = match stamp {
+                Ok(_) => hashing::hash_file(&p).ok(),
+                Err(_) => None, // archivo faltante: se reintenta en el proximo arranque
+            };
+            if let (Ok((size, mtime)), Some(hash)) = (stamp, hash) {
+                let conn = state.db.lock().unwrap();
+                let _ = conn.execute(
+                    "UPDATE tracks SET content_hash = ?1, size_bytes = ?2, mtime_ms = ?3
+                     WHERE id = ?4",
+                    rusqlite::params![hash, size, mtime, id],
+                );
+            }
+            if (i + 1) % 25 == 0 || i + 1 == total {
+                let _ = handle.emit("hash-progress", (i + 1, total));
+            }
+        }
+        eprintln!("[hash] backfill completo");
+        let _ = handle.emit("hash-progress", (total, total));
+    });
 }
 
 /// Observa la carpeta gestionada y auto-importa archivos de audio nuevos.
@@ -453,6 +544,17 @@ pub fn run() {
                 eprintln!("[lib] migración de la carpeta gestionada falló: {e}");
             }
             eprintln!("[lib] carpeta gestionada: {}", music_dir.display());
+            match backfill_rel_paths(&conn, &music_dir) {
+                Ok(n) if n > 0 => eprintln!("[lib] rel_path completado en {n} tracks"),
+                Err(e) => eprintln!("[lib] backfill de rel_path fallo: {e}"),
+                _ => {}
+            }
+            // Identidad de este dispositivo: se genera una sola vez y no
+            // cambia mas (firma tombstones y desempata los LWW).
+            match (db::this_device_uid(&conn), db::device_name(&conn)) {
+                (Ok(uid), Ok(name)) => eprintln!("[sync] este dispositivo: {name} ({uid})"),
+                (a, b) => eprintln!("[sync] no se pudo fijar la identidad: {a:?} / {b:?}"),
+            }
             app.manage(AppState {
                 db: Mutex::new(conn),
                 player: Player::new(),
@@ -463,6 +565,9 @@ pub fn run() {
             // Watch de la carpeta gestionada: archivos nuevos (copiados por el
             // usuario fuera de la app, o por otro medio) se importan solos.
             spawn_folder_watch(app.handle().clone(), music_dir);
+            // Despues del watch: el backfill puede tardar minutos con una
+            // biblioteca grande y no debe demorar el arranque.
+            spawn_hash_backfill(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -494,7 +599,9 @@ pub fn run() {
             export_library_xml_now,
             get_auto_sync_xml,
             set_auto_sync_xml,
-            sync_xml_after_change
+            sync_xml_after_change,
+            device_identity,
+            set_device_name
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

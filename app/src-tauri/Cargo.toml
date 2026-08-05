@@ -27,6 +27,14 @@ base64 = "0.22"
 notify-debouncer-mini = "0.7.0"
 log = "0.4"
 
+# Fase 5 (sync P2P). blake3 = identidad de los bytes de cada archivo: elegido
+# sobre sha256 por velocidad (importa con bibliotecas de 100+ GB) y porque su
+# arbol interno permite verificar por chunk, no solo al final del archivo.
+# uuid = identidad logica de tracks/playlists, estable entre dispositivos
+# (los `id` INTEGER son locales y no significan nada del otro lado).
+blake3 = "1"
+uuid = { version = "1", features = ["v4"] }
+
 # En Android eprintln! no llega a logcat; sin esto no hay forma de ver
 # errores en runtime (nos quemamos con esto: lofty fallaba en silencio en
 # import_bytes/thumb_data_url y no habia como verlo).

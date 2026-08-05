@@ -448,32 +448,10 @@ mod tests {
     fn mem() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
-        // Reusa el mismo SCHEMA que db::open aplica, via una insercion minima:
-        // db.rs no expone SCHEMA como pub, asi que armamos las tablas a mano
-        // (mismo DDL) para no depender de internals del modulo.
-        conn.execute_batch(
-            "
-            CREATE TABLE tracks (
-                id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE,
-                title TEXT NOT NULL DEFAULT '', artist TEXT NOT NULL DEFAULT '',
-                album TEXT NOT NULL DEFAULT '', genre TEXT NOT NULL DEFAULT '',
-                duration_ms INTEGER NOT NULL DEFAULT 0, bpm INTEGER
-            );
-            CREATE TABLE playlists (
-                id INTEGER PRIMARY KEY, name TEXT NOT NULL,
-                kind TEXT NOT NULL DEFAULT 'playlist',
-                parent_id INTEGER REFERENCES playlists(id) ON DELETE CASCADE,
-                position INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE playlist_tracks (
-                playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
-                track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
-                position INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (playlist_id, track_id)
-            );
-            ",
-        )
-        .unwrap();
+        // El schema sale de db.rs, no de una copia a mano: una copia se
+        // desactualiza en silencio cada vez que se agrega una columna, y el
+        // test se cae por un motivo que no tiene nada que ver con el XML.
+        db::init_schema(&conn).unwrap();
         conn
     }
 
