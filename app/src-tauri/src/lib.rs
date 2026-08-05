@@ -1,5 +1,7 @@
 mod cover;
 mod db;
+mod device_info;
+mod discovery;
 mod export_xml;
 mod hashing;
 mod id3_sanitize;
@@ -95,6 +97,15 @@ pub struct AppState {
     covers: Mutex<HashMap<i64, Option<String>>>,
     /// Carpeta gestionada (<Música>/Sway): todo lo importado se copia acá.
     music_dir: PathBuf,
+    /// Dispositivos Sway vistos en la red local (Fase 5.1).
+    peers: discovery::Peers,
+    /// Socket del puerto que se anuncia por mDNS. Se reserva al arrancar y se
+    /// mantiene abierto para que nadie más lo tome entre el anuncio y el
+    /// momento en que 5.2 empiece a aceptar conexiones ahí.
+    #[allow(dead_code)] // se lee recién en 5.2 (accept loop)
+    listener: Mutex<Option<std::net::TcpListener>>,
+    /// Mantener vivo el daemon es lo que mantiene el servicio publicado.
+    mdns: Mutex<Option<mdns_sd::ServiceDaemon>>,
 }
 
 #[tauri::command]
@@ -343,6 +354,13 @@ fn set_device_name(state: State<AppState>, name: String) -> Result<(), String> {
     db::set_device_name(&conn, &name).map_err(|e| e.to_string())
 }
 
+/// Dispositivos Sway visibles en la red local. El frontend lo llama al abrir
+/// la sección de sync y cada vez que llega el evento `peers-changed`.
+#[tauri::command]
+fn list_peers(state: State<AppState>) -> Vec<discovery::Peer> {
+    state.peers.list()
+}
+
 /// "Sync now" manual: escribe el XML sin importar el estado del toggle.
 #[tauri::command]
 fn export_library_xml_now(app: AppHandle, state: State<AppState>) -> Result<(), String> {
@@ -555,12 +573,46 @@ pub fn run() {
                 (Ok(uid), Ok(name)) => eprintln!("[sync] este dispositivo: {name} ({uid})"),
                 (a, b) => eprintln!("[sync] no se pudo fijar la identidad: {a:?} / {b:?}"),
             }
+            // Puerto efímero reservado por el SO. Se anuncia por mDNS y queda
+            // tomado hasta que 5.2 acepte conexiones acá.
+            let listener = std::net::TcpListener::bind("0.0.0.0:0").ok();
+            let sync_port = listener
+                .as_ref()
+                .and_then(|l| l.local_addr().ok())
+                .map(|a| a.port())
+                .unwrap_or(0);
+
             app.manage(AppState {
                 db: Mutex::new(conn),
                 player: Player::new(),
                 covers: Mutex::new(HashMap::new()),
                 music_dir: music_dir.clone(),
+                peers: discovery::Peers::default(),
+                listener: Mutex::new(listener),
+                mdns: Mutex::new(None),
             });
+
+            // Descubrimiento. Va después de `manage` porque el thread de mDNS
+            // resuelve el estado por el AppHandle.
+            if sync_port != 0 {
+                let state = app.state::<AppState>();
+                let ident = {
+                    let conn = state.db.lock().unwrap();
+                    db::this_device_uid(&conn)
+                        .and_then(|uid| db::device_name(&conn).map(|name| (uid, name)))
+                };
+                match ident {
+                    Ok((uid, name)) => {
+                        match discovery::start(app.handle().clone(), &uid, &name, sync_port) {
+                            Ok(daemon) => *state.mdns.lock().unwrap() = Some(daemon),
+                            Err(e) => eprintln!("[mdns] no se pudo iniciar: {e}"),
+                        }
+                    }
+                    Err(e) => eprintln!("[mdns] sin identidad de dispositivo: {e}"),
+                }
+            } else {
+                eprintln!("[mdns] no se pudo reservar puerto, descubrimiento apagado");
+            }
 
             // Watch de la carpeta gestionada: archivos nuevos (copiados por el
             // usuario fuera de la app, o por otro medio) se importan solos.
@@ -601,7 +653,8 @@ pub fn run() {
             set_auto_sync_xml,
             sync_xml_after_change,
             device_identity,
-            set_device_name
+            set_device_name,
+            list_peers
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

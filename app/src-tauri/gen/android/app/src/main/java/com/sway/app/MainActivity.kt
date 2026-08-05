@@ -4,7 +4,10 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.wifi.WifiManager
 import android.os.Build
+import android.provider.Settings
+import android.system.Os
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -55,10 +58,68 @@ class MainActivity : TauriActivity() {
         webView.settings.displayZoomControls = false
     }
 
+    /// Sin esto, el descubrimiento mDNS del sync (Fase 5.1) no recibe NADA.
+    ///
+    /// El Wi-Fi de Android descarta los paquetes multicast y broadcast que no
+    /// van dirigidos a la interfaz, para ahorrar bateria. mDNS es multicast
+    /// puro (224.0.0.251:5353), asi que sin el lock la busqueda corre
+    /// perfecta, no da ningun error, y simplemente no aparece jamas un
+    /// dispositivo. El anuncio SI sale — o sea que la PC ve al celu pero el
+    /// celu no ve a nadie, que es la pista para reconocerlo.
+    private var multicastLock: WifiManager.MulticastLock? = null
+
+    private fun acquireMulticastLock() {
+        if (multicastLock != null) return
+        val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+        multicastLock = wifi?.createMulticastLock("sway-mdns")?.apply {
+            setReferenceCounted(false)
+            runCatching { acquire() }
+                .onSuccess { Log.i(TAG, "MulticastLock tomado (mDNS puede recibir)") }
+                .onFailure { Log.w(TAG, "MulticastLock fallo: $it") }
+        }
+    }
+
+    /// El nombre del equipo, para que en la lista de sync del otro dispositivo
+    /// diga "Galaxy S24+" y no "Android".
+    ///
+    /// Solo existe del lado de Java, y Rust no puede ir a buscarlo por JNI:
+    /// `ndk_context` (la via estandar para conseguir el JavaVM) nunca queda
+    /// inicializado en una app Tauri, y su `expect` aborta el proceso. Asi
+    /// que se resuelve aca y se pasa por variable de entorno.
+    ///
+    /// **Tiene que correr ANTES de `super.onCreate()`**: ahi es donde arranca
+    /// el runtime de Rust, que la lee en su setup.
+    private fun exportDeviceName() {
+        val userName = runCatching {
+            Settings.Global.getString(contentResolver, "device_name")
+        }.getOrNull()?.trim()
+
+        val name = if (!userName.isNullOrEmpty()) {
+            userName
+        } else {
+            val model = Build.MODEL?.trim().orEmpty()
+            val maker = Build.MANUFACTURER?.trim().orEmpty()
+            // "samsung SM-S926B" queda redundante si el modelo ya nombra la marca.
+            if (maker.isNotEmpty() && !model.lowercase().startsWith(maker.lowercase())) {
+                "${maker.replaceFirstChar { it.uppercase() }} $model"
+            } else {
+                model
+            }
+        }
+
+        if (name.isNotEmpty()) {
+            runCatching { Os.setenv("SWAY_DEVICE_NAME", name, true) }
+                .onSuccess { Log.i(TAG, "nombre del dispositivo: $name") }
+                .onFailure { Log.w(TAG, "no se pudo exportar el nombre: $it") }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        exportDeviceName()
         super.onCreate(savedInstanceState)
         live = this
         main.post(installTransportWrapper)
+        acquireMulticastLock()
 
         val filter = IntentFilter().apply {
             addAction(PlayerNotificationManager.ACTION_FAST_FORWARD)
@@ -83,6 +144,8 @@ class MainActivity : TauriActivity() {
     override fun onDestroy() {
         main.removeCallbacks(installTransportWrapper)
         runCatching { unregisterReceiver(notificationButtons) }
+        multicastLock?.let { lock -> runCatching { if (lock.isHeld) lock.release() } }
+        multicastLock = null
         if (live === this) live = null
         super.onDestroy()
     }

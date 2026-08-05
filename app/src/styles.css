@@ -685,6 +685,26 @@ table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
 .set-select:disabled { opacity: 0.5; }
 .set-slider { width: 140px; }
 .set-note { color: var(--muted); font-size: 12px; margin: 6px 0 0; line-height: 1.5; }
+.set-input {
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 6px 9px; font-size: 12px; outline: none; width: 180px;
+  transition: border-color 160ms var(--ease);
+}
+.set-input:focus { border-color: var(--accent); }
+
+/* Dispositivos vistos en la LAN (Fase 5) */
+.peer-list { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.peer {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--panel-2);
+}
+.peer-badge {
+  flex: none; font-size: 11px; padding: 3px 8px; border-radius: 999px;
+  border: 1px solid var(--line); color: var(--muted);
+}
+.peer-badge.ok { color: var(--accent); border-color: color-mix(in oklch, var(--accent) 55%, transparent); }
 
 /* Switch prototipo */
 .switch {

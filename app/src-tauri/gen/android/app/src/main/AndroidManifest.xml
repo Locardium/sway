@@ -2,6 +2,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- Sync P2P en la LAN (Fase 5). ACCESS_WIFI_STATE + CHANGE_WIFI_MULTICAST_STATE
+         son para el MulticastLock que necesita mDNS: sin el, el Wi-Fi descarta
+         los paquetes multicast y el descubrimiento no ve nada (ver MainActivity). -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
 

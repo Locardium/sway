@@ -34,6 +34,10 @@ log = "0.4"
 # (los `id` INTEGER son locales y no significan nada del otro lado).
 blake3 = "1"
 uuid = { version = "1", features = ["v4"] }
+# Descubrimiento de dispositivos en la LAN (Fase 5.1). Puro Rust, mismo
+# codigo en desktop y Android. OJO Android: sin MulticastLock no recibe NADA
+# y sin error visible (ver MainActivity.kt).
+mdns-sd = "0.20.3"
 
 # En Android eprintln! no llega a logcat; sin esto no hay forma de ver
 # errores en runtime (nos quemamos con esto: lofty fallaba en silencio en

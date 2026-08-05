@@ -1,7 +1,18 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
+import { listen } from '@tauri-apps/api/event';
 import { Modal } from './Modal';
-import { exportLibraryXmlNow, getAutoSyncXml, importFromUri, setAutoSyncXml } from '../api';
+import {
+  deviceIdentity,
+  exportLibraryXmlNow,
+  getAutoSyncXml,
+  importFromUri,
+  listPeers,
+  setAutoSyncXml,
+  setDeviceName,
+  SYNC_PROTO,
+  type Peer,
+} from '../api';
 import { isAndroid } from '../platform';
 
 interface Props {
@@ -66,6 +77,9 @@ export default function Settings({ trackCount, volume, onClose, onStatus, onImpo
   const [autoSyncXml, setAutoSyncXmlState] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [deviceName, setDeviceNameState] = useState('');
+  const [savedName, setSavedName] = useState('');
+  const [peers, setPeers] = useState<Peer[]>([]);
 
   const android = isAndroid();
   const showExport = !android;
@@ -76,6 +90,42 @@ export default function Settings({ trackCount, volume, onClose, onStatus, onImpo
       .then(setAutoSyncXmlState)
       .catch(() => {});
   }, [showExport]);
+
+  const refreshPeers = useCallback(() => {
+    listPeers().then(setPeers).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!('__TAURI_INTERNALS__' in window)) return;
+    deviceIdentity()
+      .then(([, name]) => {
+        setDeviceNameState(name);
+        setSavedName(name);
+      })
+      .catch(() => {});
+    refreshPeers();
+    // El backend avisa cuando alguien aparece o se va. El intervalo es solo
+    // por los que se van sin avisar (bateria, modo avion): esos se detectan
+    // recien cuando su ultima señal queda vieja.
+    const un = listen('peers-changed', refreshPeers);
+    const timer = setInterval(refreshPeers, 15000);
+    return () => {
+      un.then((f) => f());
+      clearInterval(timer);
+    };
+  }, [refreshPeers]);
+
+  async function saveDeviceName() {
+    const name = deviceName.trim();
+    if (!name || name === savedName) return;
+    try {
+      await setDeviceName(name);
+      setSavedName(name);
+      onStatus('Device renamed');
+    } catch (e) {
+      onStatus(String(e));
+    }
+  }
 
   async function toggleAutoSync(v: boolean) {
     setAutoSyncXmlState(v);
@@ -274,6 +324,58 @@ export default function Settings({ trackCount, volume, onClose, onStatus, onImpo
             </div>
           </section>
         )}
+
+        <section>
+          <h4>Sync</h4>
+          <div className="set-row">
+            <div className="set-label">
+              <span>This device</span>
+              <small>The name other devices see on your network</small>
+            </div>
+            <input
+              className="set-input"
+              value={deviceName}
+              maxLength={48}
+              onChange={(e) => setDeviceNameState(e.target.value)}
+              onBlur={saveDeviceName}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+              }}
+            />
+          </div>
+          <div className="set-row">
+            <div className="set-label">
+              <span>Devices on this network</span>
+              <small>
+                {peers.length === 0
+                  ? 'Looking for other devices running Sway…'
+                  : `${peers.length} found`}
+              </small>
+            </div>
+            <button onClick={refreshPeers}>Refresh</button>
+          </div>
+          {peers.length > 0 && (
+            <ul className="peer-list">
+              {peers.map((p) => (
+                <li key={p.uid} className="peer">
+                  <div className="set-label">
+                    <span>{p.name}</span>
+                    <small>
+                      {p.platform} · {p.addrs[0] ?? 'no address'}:{p.port}
+                    </small>
+                  </div>
+                  <span className={'peer-badge' + (p.paired ? ' ok' : '')}>
+                    {p.proto !== SYNC_PROTO ? 'Other version' : p.paired ? 'Paired' : 'Not paired'}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="set-note">
+            Discovery only for now — nothing is connected or transferred yet. Both devices need to
+            be on the same Wi-Fi network with Sway open.
+          </p>
+        </section>
 
         <section>
           <h4>About</h4>

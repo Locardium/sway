@@ -392,29 +392,25 @@ pub fn this_device_uid(conn: &Connection) -> Result<String> {
     Ok(uid)
 }
 
+/// Nombre visible de este dispositivo. Si lo guardado es un placeholder de
+/// una version anterior (el celu se llamaba literalmente "Android") se
+/// recalcula: el nombre real recien se puede averiguar desde que existe
+/// `device_info`, y si no, el telefono se quedaria con ese nombre para
+/// siempre.
 pub fn device_name(conn: &Connection) -> Result<String> {
     if let Some(n) = get_setting(conn, SETTING_DEVICE_NAME)? {
-        if !n.is_empty() {
+        let n = n.trim().to_string();
+        if !n.is_empty() && !crate::device_info::PLACEHOLDERS.contains(&n.as_str()) {
             return Ok(n);
         }
     }
-    let n = default_device_name();
+    let n = crate::device_info::default_device_name();
     set_setting(conn, SETTING_DEVICE_NAME, &n)?;
     Ok(n)
 }
 
 pub fn set_device_name(conn: &Connection, name: &str) -> Result<()> {
     set_setting(conn, SETTING_DEVICE_NAME, name)
-}
-
-fn default_device_name() -> String {
-    std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            if cfg!(target_os = "android") { "Android".into() } else { "Sway".into() }
-        })
 }
 
 /// Default true: el punto central de Fase 2 es que el XML se mantenga

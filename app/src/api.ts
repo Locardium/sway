@@ -97,3 +97,28 @@ export const exportLibraryXmlNow = () => invoke<void>('export_library_xml_now');
 export const syncXmlAfterChange = () => invoke<void>('sync_xml_after_change');
 export const getAutoSyncXml = () => invoke<boolean>('get_auto_sync_xml');
 export const setAutoSyncXml = (enabled: boolean) => invoke<void>('set_auto_sync_xml', { enabled });
+
+// Sync P2P en la LAN (Fase 5).
+
+/// Tiene que coincidir con `discovery::PROTO` del lado Rust. Un peer que
+/// anuncia otra version se lista igual, pero marcado: mejor no ofrecer
+/// sincronizar que fallar a mitad de camino.
+export const SYNC_PROTO = '1';
+
+export interface Peer {
+  uid: string;
+  name: string;
+  platform: string;
+  proto: string;
+  addrs: string[];
+  port: number;
+  lastSeen: number;
+  paired: boolean;
+}
+
+/// [uid, name] de este dispositivo. El uid no se puede cambiar (lo
+/// referencian tombstones y clocks); el nombre es solo para reconocerlo desde
+/// el otro lado.
+export const deviceIdentity = () => invoke<[string, string]>('device_identity');
+export const setDeviceName = (name: string) => invoke<void>('set_device_name', { name });
+export const listPeers = () => invoke<Peer[]>('list_peers');
