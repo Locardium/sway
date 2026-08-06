@@ -66,6 +66,45 @@ pub enum Msg {
     ManifestData {
         manifest: Box<crate::manifest::Manifest>,
     },
+    // --- Transferencia de archivos (Fase 5.4) -----------------------------
+    //
+    // Los bytes NO viajan adentro de estos mensajes: van como payloads crudos
+    // por el mismo canal (`Session::send_bytes`). Meterlos en el JSON
+    // costaria 1.33x en base64 o 3-4x como array de numeros, sobre gigabytes.
+    // El protocolo es: BlobStart -> N payloads crudos -> BlobEnd.
+    /// Pedido de un archivo por su hash. `offset` != 0 es una reanudacion.
+    BlobReq { hash: String, offset: u64 },
+    /// Empieza el envio: `size` es lo que queda por mandar desde el offset.
+    BlobStart { size: u64 },
+    /// Fin del envio; `hash` es el del archivo COMPLETO, para verificar.
+    BlobEnd { hash: String },
+    /// Empuje en la otra direccion: "tomá este archivo". Le siguen los
+    /// payloads crudos y un BlobEnd, igual que arriba.
+    BlobPush {
+        track_uid: String,
+        hash: String,
+        filename: String,
+        size: u64,
+        title: String,
+        artist: String,
+        album: String,
+        genre: String,
+        duration_ms: i64,
+        bpm: Option<i64>,
+        updated_at: i64,
+    },
+    /// El otro lado no puede servir lo pedido (no lo tiene, no lo puede leer).
+    BlobError { reason: String },
+    /// Metadata, playlists, carpetas y membresias que le faltan al otro lado
+    /// (Fase 5.5). Va despues de los archivos: una membresia de un track que
+    /// todavia no llego se ignora, asi que primero conviene que exista.
+    MetaPush {
+        changes: Box<crate::merge::Changes>,
+    },
+    /// Cuantos registros se aplicaron de verdad del otro lado.
+    MetaAck {
+        applied: crate::merge::Applied,
+    },
     /// Cierre ordenado de la sesion.
     Bye,
 }

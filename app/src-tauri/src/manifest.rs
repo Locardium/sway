@@ -54,6 +54,10 @@ pub struct Membership {
     pub playlist_uid: String,
     pub track_uid: String,
     pub rank: String,
+    /// Cuando entro el track a la playlist. Se compara contra el
+    /// `deleted_at` del tombstone del mismo par: gana el mas reciente.
+    #[serde(default)]
+    pub added_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -340,7 +344,7 @@ pub fn build(conn: &Connection) -> rusqlite::Result<Manifest> {
 
     let memberships = {
         let mut stmt = conn.prepare(
-            "SELECT p.uid, t.uid, pt.rank
+            "SELECT p.uid, t.uid, pt.rank, pt.added_at
              FROM playlist_tracks pt
              JOIN playlists p ON p.id = pt.playlist_id
              JOIN tracks t ON t.id = pt.track_id
@@ -351,6 +355,7 @@ pub fn build(conn: &Connection) -> rusqlite::Result<Manifest> {
                 playlist_uid: r.get(0)?,
                 track_uid: r.get(1)?,
                 rank: r.get(2)?,
+                added_at: r.get(3)?,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -491,6 +496,7 @@ mod tests {
             playlist_uid: "pl".into(),
             track_uid: "tr".into(),
             rank: "V".into(),
+            added_at: 0,
         });
         // Sin tombstone: hay que traerla.
         assert_eq!(plan(&local, &remote).pull_memberships, 1);

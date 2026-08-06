@@ -76,6 +76,11 @@ CREATE TABLE IF NOT EXISTS playlist_tracks (
     playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
     track_id    INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
     rank        TEXT NOT NULL DEFAULT '',
+    -- Cuando se agrego. Se compara contra `tombstones.deleted_at` del mismo
+    -- par: sin esto, un tombstone viejo le gana para siempre a un agregado
+    -- nuevo y volver a meter una cancion en una playlist se deshacia solo en
+    -- el proximo sync.
+    added_at    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (playlist_id, track_id)
 );
 
@@ -211,6 +216,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         ("tracks", "local_state TEXT NOT NULL DEFAULT 'present'"),
         ("playlists", "uid TEXT"),
         ("playlists", "updated_at INTEGER NOT NULL DEFAULT 0"),
+        ("playlist_tracks", "added_at INTEGER NOT NULL DEFAULT 0"),
     ];
     for (table, decl) in added {
         let name = decl.split(' ').next().unwrap_or_default();
@@ -227,6 +233,13 @@ fn migrate(conn: &Connection) -> Result<()> {
          CREATE UNIQUE INDEX IF NOT EXISTS idx_playlists_uid ON playlists(uid) WHERE uid IS NOT NULL;",
     )?;
     assign_missing_uids(conn)?;
+    // Las membresias que ya estaban se fechan AHORA, no en 0: si quedaran en
+    // 0, cualquier tombstone viejo del mismo par les ganaria y el proximo
+    // sync las sacaria. Estan en la biblioteca ahora, asi que valen ahora.
+    conn.execute(
+        "UPDATE playlist_tracks SET added_at = ?1 WHERE added_at = 0",
+        [now_ms()],
+    )?;
     Ok(())
 }
 
@@ -603,8 +616,8 @@ pub fn move_playlist(
         let siblings = sibling_ranks(&tx, new_parent, Some(id)).map_err(|e| e.to_string())?;
         let rank = crate::rank::rank_at(&siblings, index.max(0) as usize);
         tx.execute(
-            "UPDATE playlists SET parent_id = ?1, rank = ?2 WHERE id = ?3",
-            rusqlite::params![new_parent, rank, id],
+            "UPDATE playlists SET parent_id = ?1, rank = ?2, updated_at = ?3 WHERE id = ?4",
+            rusqlite::params![new_parent, rank, now_ms(), id],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -661,8 +674,9 @@ pub fn add_tracks_to_playlist(
     for tid in track_ids {
         let rank = crate::rank::between(last.as_deref(), None);
         let n = tx.execute(
-            "INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, rank) VALUES (?1, ?2, ?3)",
-            rusqlite::params![playlist_id, tid, rank],
+            "INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, rank, added_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![playlist_id, tid, rank, now_ms()],
         )?;
         // Solo avanza si entro: un duplicado ignorado no consume rank.
         if n > 0 {
@@ -670,6 +684,7 @@ pub fn add_tracks_to_playlist(
         }
         added += n;
     }
+    touch_playlist(&tx, playlist_id)?;
     tx.commit()?;
     // Volver a agregar un track que se habia sacado tiene que levantar su
     // tombstone; si no, el par queda muerto para siempre y el proximo sync lo
@@ -710,6 +725,7 @@ pub fn remove_tracks_from_playlist(
     }
     // Sin reindexado: los ranks de los que quedan siguen siendo validos y
     // ordenados entre si. Sacar del medio no le mueve el rank a nadie.
+    touch_playlist(&tx, playlist_id)?;
     tx.commit()?;
     // La membresia mergea por union (agregar le gana a quitar concurrente),
     // asi que sacar un track solo se propaga si queda constancia explicita.
@@ -764,7 +780,19 @@ pub fn reorder_playlist_tracks(
         )?;
         prev = Some(rank);
     }
+    touch_playlist(&tx, playlist_id)?;
     tx.commit()
+}
+
+/// Marca la playlist como modificada. Es el reloj que usa el merge para
+/// decidir de quien es el orden bueno cuando los dos lados reordenaron: las
+/// membresias no tienen timestamp propio, la playlist si.
+fn touch_playlist(tx: &rusqlite::Transaction, playlist_id: i64) -> Result<()> {
+    tx.execute(
+        "UPDATE playlists SET updated_at = ?1 WHERE id = ?2",
+        rusqlite::params![now_ms(), playlist_id],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

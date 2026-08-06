@@ -168,7 +168,14 @@ fn insert_track(conn: &Connection, dest: &Path) -> Result<i64> {
             size_bytes   = excluded.size_bytes,
             mtime_ms     = excluded.mtime_ms,
             rel_path     = COALESCE(tracks.rel_path, excluded.rel_path),
-            updated_at   = excluded.updated_at,
+            -- Solo cuenta como cambio si cambiaron los BYTES. Reimportar el
+            -- mismo archivo (el watcher emite varios eventos por archivo, y
+            -- el sync deja archivos nuevos en la carpeta observada) no es una
+            -- edicion: si bumpeara la fecha, este dispositivo pareceria mas
+            -- nuevo en cada vuelta y el otro le re-aplicaria la misma
+            -- metadata para siempre, sin converger nunca.
+            updated_at   = CASE WHEN excluded.content_hash IS NOT tracks.content_hash
+                                THEN excluded.updated_at ELSE tracks.updated_at END,
             title       = CASE WHEN excluded.title  <> '' THEN excluded.title  ELSE tracks.title  END,
             artist      = CASE WHEN excluded.artist <> '' THEN excluded.artist ELSE tracks.artist END,
             album       = CASE WHEN excluded.album  <> '' THEN excluded.album  ELSE tracks.album  END,
@@ -219,7 +226,7 @@ fn import_one(conn: &Connection, managed: &Path, src: &Path) -> Result<i64> {
 
 /// Igual que `managed_dest` pero sin un archivo fuente en disco para
 /// stat-ear (los bytes ya estan en memoria — ver `import_bytes`).
-fn managed_dest_for(managed: &Path, name: &str, size: u64) -> PathBuf {
+pub fn managed_dest_for(managed: &Path, name: &str, size: u64) -> PathBuf {
     let dest = managed.join(name);
     if dest.exists() {
         let dsize = std::fs::metadata(&dest).ok().map(|m| m.len());
@@ -258,17 +265,47 @@ pub fn import_bytes(conn: &Connection, managed: &Path, name: &str, bytes: &[u8])
     insert_track(conn, &dest)
 }
 
+/// Directorios internos de la app dentro de la carpeta gestionada. NADA de
+/// lo que hay acá adentro se importa.
+///
+/// `.sway-trash` es el caso que importa: conserva el nombre y la extensión
+/// original del archivo, asi que sin esta exclusion el watcher ve aparecer un
+/// .flac, lo auto-importa, y lo que acabas de borrar reaparece en la
+/// biblioteca con un uid nuevo — y en el proximo sync se lo mandas al otro
+/// dispositivo. Un borrado que se deshace solo.
+pub fn is_internal_dir(name: &str) -> bool {
+    name.starts_with(".sway-")
+}
+
+/// True si el path esta adentro de un directorio interno de la app.
+pub fn is_internal_path(path: &Path) -> bool {
+    path.components().any(|c| match c {
+        std::path::Component::Normal(n) => {
+            n.to_str().map(is_internal_dir).unwrap_or(false)
+        }
+        _ => false,
+    })
+}
+
 /// Junta todos los archivos de audio bajo `roots` (expande directorios).
 fn collect_audio(roots: &[&Path]) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for root in roots {
         if root.is_dir() {
-            for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+            let walk = WalkDir::new(root)
+                .into_iter()
+                .filter_entry(|e| {
+                    !e.file_name()
+                        .to_str()
+                        .map(is_internal_dir)
+                        .unwrap_or(false)
+                });
+            for entry in walk.filter_map(|e| e.ok()) {
                 if entry.file_type().is_file() && is_audio(entry.path()) {
                     files.push(entry.path().to_path_buf());
                 }
             }
-        } else if root.is_file() && is_audio(root) {
+        } else if root.is_file() && is_audio(root) && !is_internal_path(root) {
             files.push(root.to_path_buf());
         }
     }
@@ -311,4 +348,77 @@ pub fn import_paths(
         progress(i + 1, total);
     }
     Ok(ids)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reimportar el mismo archivo no puede contar como una edición.
+    ///
+    /// Si bumpeara `updated_at`, este dispositivo parecería más nuevo que el
+    /// otro en cada vuelta y el sync le re-aplicaría la misma metadata para
+    /// siempre, sin converger nunca. Pasó de verdad: el watcher re-importaba
+    /// lo que dejaba el sync y cada sync reportaba los mismos "5 meta".
+    #[test]
+    fn reimporting_the_same_file_does_not_look_like_an_edit() {
+        let dir = std::env::temp_dir().join(format!("sway-reimp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("track.mp3");
+        std::fs::write(&f, b"unos bytes").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+
+        insert_track(&conn, &f).unwrap();
+        let first: i64 = conn
+            .query_row("SELECT updated_at FROM tracks", [], |r| r.get(0))
+            .unwrap();
+        assert!(first > 0);
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        insert_track(&conn, &f).unwrap();
+        let second: i64 = conn
+            .query_row("SELECT updated_at FROM tracks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(first, second, "reimportar lo mismo no es un cambio");
+
+        // Pero si cambian los bytes, sí.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        std::fs::write(&f, b"otros bytes distintos").unwrap();
+        insert_track(&conn, &f).unwrap();
+        let third: i64 = conn
+            .query_row("SELECT updated_at FROM tracks", [], |r| r.get(0))
+            .unwrap();
+        assert!(third > second, "un archivo distinto sí es un cambio");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// La papelera vive DENTRO de la carpeta gestionada y conserva el nombre
+    /// y la extension original. Sin excluirla, el watcher ve aparecer un
+    /// .flac ahi, lo auto-importa, y lo que acabas de borrar vuelve a la
+    /// biblioteca con un uid nuevo — y en el proximo sync se lo mandas al
+    /// otro dispositivo. Un borrado que se deshace solo.
+    #[test]
+    fn internal_folders_are_never_imported() {
+        let root = std::env::temp_dir().join(format!("sway-imp-{}", std::process::id()));
+        let trash = root.join(".sway-trash");
+        let incoming = root.join(".sway-incoming");
+        std::fs::create_dir_all(&trash).unwrap();
+        std::fs::create_dir_all(&incoming).unwrap();
+        std::fs::write(root.join("normal.flac"), b"x").unwrap();
+        std::fs::write(trash.join("borrado.flac"), b"x").unwrap();
+        std::fs::write(incoming.join("bajando.flac"), b"x").unwrap();
+
+        let found = collect_audio(&[root.as_path()]);
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["normal.flac"]);
+
+        // Y tampoco entra si el path se pasa suelto (drop de un archivo).
+        assert!(collect_audio(&[trash.join("borrado.flac").as_path()]).is_empty());
+        std::fs::remove_dir_all(&root).ok();
+    }
 }

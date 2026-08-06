@@ -64,6 +64,11 @@ android_logger = "0.14"
 # Desktop-only: symphonia/rodio decodifican audio; trash no soporta Android
 # (sin papelera de OS ahi, ver db.rs::delete_tracks).
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+# En Android los log::* van a logcat via android_logger; en desktop, sin un
+# logger instalado, NO IMPRIMEN NADA. Todo el modulo de sync usa log::*, asi
+# que sin esto la mitad de las trazas de Fase 5 eran invisibles justo donde
+# hacian falta.
+env_logger = "0.11.11"
 rodio = { version = "0.19", features = ["symphonia-all"] }
 trash = "5.2.6"
 

@@ -334,15 +334,37 @@ pub fn spawn_prober(handle: AppHandle) {
 pub fn probe_once(handle: &AppHandle) {
     let state = handle.state::<crate::AppState>();
     let mut changed = false;
+    let mut came_online = Vec::new();
     for (uid, ip, port) in state.peers.probe_targets() {
         let reachable = match format!("{ip}:{port}").parse() {
             Ok(addr) => std::net::TcpStream::connect_timeout(&addr, PROBE_TIMEOUT).is_ok(),
             Err(_) => false,
         };
-        changed |= state.peers.set_online(&uid, reachable);
+        if state.peers.set_online(&uid, reachable) {
+            changed = true;
+            if reachable {
+                came_online.push(uid);
+            }
+        }
     }
     if changed {
         let _ = handle.emit("peers-changed", ());
+    }
+    // Volvió a estar disponible: ponerse al día sin esperar a que cambie algo.
+    // El celular puede haber estado sin wifi toda la tarde.
+    for uid in came_online {
+        let paired = {
+            let guard = state.db.lock();
+            match guard {
+                Ok(conn) => conn
+                    .query_row("SELECT 1 FROM devices WHERE uid = ?1", [&uid], |_| Ok(()))
+                    .is_ok(),
+                Err(_) => false,
+            }
+        };
+        if paired {
+            crate::autosync::peer_came_online(handle, &uid);
+        }
     }
 }
 

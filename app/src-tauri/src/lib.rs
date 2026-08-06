@@ -1,3 +1,4 @@
+mod autosync;
 mod cover;
 mod db;
 mod device_info;
@@ -7,8 +8,11 @@ mod hashing;
 mod id3_sanitize;
 mod import;
 mod manifest;
+mod merge;
 mod pairing;
 mod rank;
+mod transfer;
+mod trash;
 mod wire;
 mod xml_sync;
 
@@ -106,15 +110,57 @@ pub struct AppState {
     mdns: Mutex<Option<mdns_sd::ServiceDaemon>>,
     /// Confirmaciones de pairing esperando que el usuario mire la pantalla.
     pairing: pairing::Pairing,
+    /// Archivos que el sync acaba de dejar en la carpeta gestionada.
+    ///
+    /// El watcher observa esa carpeta y auto-importa lo que aparece — que es
+    /// justo lo que NO hay que hacer con algo traído por sync: crearía una
+    /// fila con un uid nuevo (rompiendo la identidad compartida entre
+    /// dispositivos) y le pisaría la metadata sincronizada con los tags del
+    /// archivo. El sync anota el destino antes del rename y el watcher lo
+    /// saltea una vez.
+    /// Con timestamp y no de a uno: el filesystem emite varios eventos por
+    /// archivo (create, modify, close), así que consumir la marca en el
+    /// primero dejaba pasar los siguientes — y cada re-import bumpeaba la
+    /// fecha del track, dejando a este dispositivo "más nuevo" en cada vuelta.
+    expected_paths: Mutex<HashMap<PathBuf, i64>>,
+    /// Estado del sync automático (cambios pendientes de propagar).
+    autosync: autosync::AutoSync,
+}
+
+/// Cuánto tiempo se ignoran los eventos de un archivo que dejó el sync.
+/// Cubre la ráfaga de eventos del filesystem sin tapar un cambio real hecho
+/// mucho después.
+const EXPECTED_PATH_TTL_MS: i64 = 60_000;
+
+impl AppState {
+    pub fn expect_path(&self, p: &std::path::Path) {
+        let now = db::now_ms();
+        let mut map = self.expected_paths.lock().unwrap();
+        map.retain(|_, ts| now - *ts < EXPECTED_PATH_TTL_MS);
+        map.insert(p.to_path_buf(), now);
+    }
+
+    /// True si el path lo escribió el sync hace poco.
+    fn is_expected(&self, p: &std::path::Path) -> bool {
+        let now = db::now_ms();
+        match self.expected_paths.lock().unwrap().get(p) {
+            Some(ts) => now - *ts < EXPECTED_PATH_TTL_MS,
+            None => false,
+        }
+    }
 }
 
 #[tauri::command]
 fn import_folder(app: AppHandle, state: State<AppState>, folder: String) -> Result<usize, String> {
-    let conn = state.db.lock().unwrap();
-    import::import_folder(&conn, &state.music_dir, &folder, |done, total| {
-        let _ = app.emit("import-progress", (done, total));
-    })
-    .map_err(|e| e.to_string())
+    let n = {
+        let conn = state.db.lock().unwrap();
+        import::import_folder(&conn, &state.music_dir, &folder, |done, total| {
+            let _ = app.emit("import-progress", (done, total));
+        })
+        .map_err(|e| e.to_string())?
+    };
+    autosync::note_change(&app);
+    Ok(n)
 }
 
 #[tauri::command]
@@ -129,11 +175,15 @@ fn import_files(
     state: State<AppState>,
     paths: Vec<String>,
 ) -> Result<Vec<i64>, String> {
-    let conn = state.db.lock().unwrap();
-    import::import_paths(&conn, &state.music_dir, &paths, |done, total| {
-        let _ = app.emit("import-progress", (done, total));
-    })
-    .map_err(|e| e.to_string())
+    let ids = {
+        let conn = state.db.lock().unwrap();
+        import::import_paths(&conn, &state.music_dir, &paths, |done, total| {
+            let _ = app.emit("import-progress", (done, total));
+        })
+        .map_err(|e| e.to_string())?
+    };
+    autosync::note_change(&app);
+    Ok(ids)
 }
 
 /// Import desde un picker de archivos (Android/iOS): el picker da un
@@ -152,8 +202,13 @@ fn import_from_uri(app: AppHandle, state: State<AppState>, uri: String, name: St
     let resolved_name = app.path().file_name(&uri).unwrap_or(name);
     let file_path = FilePath::from_str(&uri).map_err(|e| e.to_string())?;
     let bytes = app.fs().read(file_path).map_err(|e| e.to_string())?;
-    let conn = state.db.lock().unwrap();
-    import::import_bytes(&conn, &state.music_dir, &resolved_name, &bytes).map_err(|e| e.to_string())
+    let id = {
+        let conn = state.db.lock().unwrap();
+        import::import_bytes(&conn, &state.music_dir, &resolved_name, &bytes)
+            .map_err(|e| e.to_string())?
+    };
+    autosync::note_change(&app);
+    Ok(id)
 }
 
 #[tauri::command]
@@ -163,10 +218,14 @@ fn track_playlists(state: State<AppState>, id: i64) -> Result<Vec<i64>, String> 
 }
 
 #[tauri::command]
-fn delete_tracks(state: State<AppState>, ids: Vec<i64>) -> Result<(), String> {
+fn delete_tracks(app: AppHandle, state: State<AppState>, ids: Vec<i64>) -> Result<(), String> {
     let music = state.music_dir.clone();
-    let mut conn = state.db.lock().unwrap();
-    db::delete_tracks(&mut conn, &music, &ids).map_err(|e| e.to_string())
+    {
+        let mut conn = state.db.lock().unwrap();
+        db::delete_tracks(&mut conn, &music, &ids).map_err(|e| e.to_string())?;
+    }
+    autosync::note_change(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -232,36 +291,54 @@ fn list_playlists(state: State<AppState>) -> Result<Vec<db::PlaylistNode>, Strin
 
 #[tauri::command]
 fn create_playlist(
+    app: AppHandle,
     state: State<AppState>,
     name: String,
     kind: String,
     parent_id: Option<i64>,
 ) -> Result<i64, String> {
-    let conn = state.db.lock().unwrap();
-    db::create_playlist(&conn, &name, &kind, parent_id).map_err(|e| e.to_string())
+    let id = {
+        let conn = state.db.lock().unwrap();
+        db::create_playlist(&conn, &name, &kind, parent_id).map_err(|e| e.to_string())?
+    };
+    autosync::note_change(&app);
+    Ok(id)
 }
 
 #[tauri::command]
-fn rename_playlist(state: State<AppState>, id: i64, name: String) -> Result<(), String> {
-    let conn = state.db.lock().unwrap();
-    db::rename_playlist(&conn, id, &name).map_err(|e| e.to_string())
+fn rename_playlist(app: AppHandle, state: State<AppState>, id: i64, name: String) -> Result<(), String> {
+    {
+        let conn = state.db.lock().unwrap();
+        db::rename_playlist(&conn, id, &name).map_err(|e| e.to_string())?;
+    }
+    autosync::note_change(&app);
+    Ok(())
 }
 
 #[tauri::command]
-fn delete_playlist(state: State<AppState>, id: i64) -> Result<(), String> {
-    let conn = state.db.lock().unwrap();
-    db::delete_playlist(&conn, id).map_err(|e| e.to_string())
+fn delete_playlist(app: AppHandle, state: State<AppState>, id: i64) -> Result<(), String> {
+    {
+        let conn = state.db.lock().unwrap();
+        db::delete_playlist(&conn, id).map_err(|e| e.to_string())?;
+    }
+    autosync::note_change(&app);
+    Ok(())
 }
 
 #[tauri::command]
 fn move_playlist(
+    app: AppHandle,
     state: State<AppState>,
     id: i64,
     parent_id: Option<i64>,
     index: i64,
 ) -> Result<(), String> {
-    let mut conn = state.db.lock().unwrap();
-    db::move_playlist(&mut conn, id, parent_id, index)
+    {
+        let mut conn = state.db.lock().unwrap();
+        db::move_playlist(&mut conn, id, parent_id, index)?;
+    }
+    autosync::note_change(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -272,33 +349,50 @@ fn playlist_tracks(state: State<AppState>, playlist_id: i64) -> Result<Vec<db::T
 
 #[tauri::command]
 fn add_tracks_to_playlist(
+    app: AppHandle,
     state: State<AppState>,
     playlist_id: i64,
     track_ids: Vec<i64>,
 ) -> Result<usize, String> {
-    let mut conn = state.db.lock().unwrap();
-    db::add_tracks_to_playlist(&mut conn, playlist_id, &track_ids).map_err(|e| e.to_string())
+    let n = {
+        let mut conn = state.db.lock().unwrap();
+        db::add_tracks_to_playlist(&mut conn, playlist_id, &track_ids).map_err(|e| e.to_string())?
+    };
+    autosync::note_change(&app);
+    Ok(n)
 }
 
 #[tauri::command]
 fn remove_tracks_from_playlist(
+    app: AppHandle,
     state: State<AppState>,
     playlist_id: i64,
     track_ids: Vec<i64>,
 ) -> Result<(), String> {
-    let mut conn = state.db.lock().unwrap();
-    db::remove_tracks_from_playlist(&mut conn, playlist_id, &track_ids).map_err(|e| e.to_string())
+    {
+        let mut conn = state.db.lock().unwrap();
+        db::remove_tracks_from_playlist(&mut conn, playlist_id, &track_ids)
+            .map_err(|e| e.to_string())?;
+    }
+    autosync::note_change(&app);
+    Ok(())
 }
 
 #[tauri::command]
 fn reorder_playlist_tracks(
+    app: AppHandle,
     state: State<AppState>,
     playlist_id: i64,
     track_ids: Vec<i64>,
     index: i64,
 ) -> Result<(), String> {
-    let mut conn = state.db.lock().unwrap();
-    db::reorder_playlist_tracks(&mut conn, playlist_id, &track_ids, index).map_err(|e| e.to_string())
+    {
+        let mut conn = state.db.lock().unwrap();
+        db::reorder_playlist_tracks(&mut conn, playlist_id, &track_ids, index)
+            .map_err(|e| e.to_string())?;
+    }
+    autosync::note_change(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -398,6 +492,14 @@ fn preview_sync(app: AppHandle, uid: String) {
     pairing::preview_sync(app, uid);
 }
 
+/// Ejecuta la transferencia de archivos del plan. Sólo archivos: metadata,
+/// playlists y borrados llegan en 5.5/5.6. El progreso va por `sync-progress`
+/// y el resumen final por `sync-done`.
+#[tauri::command]
+fn sync_files(app: AppHandle, uid: String) {
+    pairing::sync_files(app, uid);
+}
+
 /// Respuesta del usuario al código de verificación.
 #[tauri::command]
 fn confirm_pairing(app: AppHandle, uid: String, accept: bool) -> bool {
@@ -432,11 +534,27 @@ fn set_auto_sync_xml(state: State<AppState>, enabled: bool) -> Result<(), String
 
 /// Lo llama el frontend despues de cada mutacion (import, playlists, tracks).
 /// El backend decide si hace algo: si el toggle esta apagado, no-op.
+///
+/// Solo el XML: el sync P2P se entera por su cuenta, desde los comandos que
+/// mutan la biblioteca. Avisarle tambien desde aca lo disparaba dos veces por
+/// operacion, porque el frontend llama a esto DESPUES de cada mutacion.
 #[tauri::command]
 fn sync_xml_after_change(app: AppHandle, state: State<AppState>) -> Result<(), String> {
     let conn = state.db.lock().unwrap();
     xml_sync::write_if_enabled(&app, &conn, &state.music_dir);
     Ok(())
+}
+
+#[tauri::command]
+fn get_auto_sync_p2p(state: State<AppState>) -> bool {
+    let conn = state.db.lock().unwrap();
+    autosync::enabled(&conn)
+}
+
+#[tauri::command]
+fn set_auto_sync_p2p(state: State<AppState>, enabled: bool) -> Result<(), String> {
+    let conn = state.db.lock().unwrap();
+    autosync::set_enabled(&conn, enabled).map_err(|e| e.to_string())
 }
 
 /// Completa `rel_path` (nombre del archivo dentro de la carpeta gestionada)
@@ -536,14 +654,21 @@ fn spawn_folder_watch(handle: AppHandle, dir: PathBuf) {
                 Ok(ev) => ev,
                 Err(_) => continue,
             };
+            let state = handle.state::<AppState>();
             let paths: Vec<String> = events
                 .into_iter()
+                // Lo que dejó el sync ya está en la DB con su uid del otro
+                // dispositivo: reimportarlo sería duplicarlo mal.
+                .filter(|e| !state.is_expected(&e.path))
+                // Y lo que hay en .sway-trash / .sway-incoming no es
+                // biblioteca: es lo que se acaba de borrar y lo que se está
+                // bajando. Auto-importarlo resucitaría cada borrado.
+                .filter(|e| !import::is_internal_path(&e.path))
                 .map(|e| e.path.to_string_lossy().into_owned())
                 .collect();
             if paths.is_empty() {
                 continue;
             }
-            let state = handle.state::<AppState>();
             let changed = {
                 let conn = state.db.lock().unwrap();
                 let before: i64 = conn
@@ -560,6 +685,7 @@ fn spawn_folder_watch(handle: AppHandle, dir: PathBuf) {
             };
             if changed {
                 eprintln!("[watch] importados nuevos ({} rutas), avisando UI", paths.len());
+                autosync::note_change(&handle);
                 let _ = handle.emit("library-changed", ());
             }
         }
@@ -568,6 +694,16 @@ fn spawn_folder_watch(handle: AppHandle, dir: PathBuf) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Desktop: sin esto los log::* del sync no se ven en ningun lado.
+    // RUST_LOG=debug para mas detalle; por default, info.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let _ = env_logger::Builder::from_env(
+            env_logger::Env::default().default_filter_or("info"),
+        )
+        .try_init();
+    }
+
     #[cfg(target_os = "android")]
     android_logger::init_once(
         android_logger::Config::default()
@@ -640,11 +776,14 @@ pub fn run() {
                 peers: discovery::Peers::default(),
                 mdns: Mutex::new(None),
                 pairing: pairing::Pairing::default(),
+                expected_paths: Mutex::new(HashMap::new()),
+                autosync: autosync::AutoSync::default(),
             });
 
             if let Some(listener) = listener {
                 pairing::spawn_server(app.handle().clone(), listener);
                 discovery::spawn_prober(app.handle().clone());
+                autosync::spawn(app.handle().clone());
             }
 
             // Descubrimiento. Va después de `manage` porque el thread de mDNS
@@ -671,6 +810,10 @@ pub fn run() {
 
             // Watch de la carpeta gestionada: archivos nuevos (copiados por el
             // usuario fuera de la app, o por otro medio) se importan solos.
+            // Lo que cumplió la retención se va de verdad. Al arrancar y no
+            // en un timer: es una limpieza, no algo urgente.
+            trash::purge_old(&music_dir, trash::RETENTION_DAYS);
+
             spawn_folder_watch(app.handle().clone(), music_dir);
             // Despues del watch: el backfill puede tardar minutos con una
             // biblioteca grande y no debe demorar el arranque.
@@ -707,12 +850,15 @@ pub fn run() {
             get_auto_sync_xml,
             set_auto_sync_xml,
             sync_xml_after_change,
+            get_auto_sync_p2p,
+            set_auto_sync_p2p,
             device_identity,
             set_device_name,
             list_peers,
             refresh_peers,
             connect_peer,
             preview_sync,
+            sync_files,
             confirm_pairing,
             unpair_device
         ])

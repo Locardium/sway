@@ -221,18 +221,25 @@ export default function App() {
     };
   }, []);
 
-  // Watch de carpeta: el backend importa archivos nuevos y avisa.
+  // La biblioteca cambió por fuera de esta pantalla: archivos nuevos que
+  // encontró el watcher, o cambios que trajo el sync desde otro dispositivo.
+  //
+  // Hay que recargar TAMBIÉN la playlist abierta. Sin eso, el otro dispositivo
+  // mueve o saca una canción, la DB local ya está bien, y la vista sigue
+  // mostrando el orden viejo hasta que uno vuelve a hacer click en la
+  // playlist.
   useEffect(() => {
     if (!('__TAURI_INTERNALS__' in window)) return;
     const un = listen('library-changed', () => {
       refreshLibrary();
       refreshPlaylists();
+      refreshPlaylistTracks();
       setStatus('Library updated');
     });
     return () => {
       un.then((f) => f());
     };
-  }, [refreshLibrary, refreshPlaylists]);
+  }, [refreshLibrary, refreshPlaylists, refreshPlaylistTracks]);
 
   // El status se auto-oculta (toast breve, no texto persistente).
   useEffect(() => {

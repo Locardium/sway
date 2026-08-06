@@ -7,11 +7,14 @@ import {
   connectPeer,
   deviceIdentity,
   exportLibraryXmlNow,
+  getAutoSyncP2p,
   getAutoSyncXml,
   importFromUri,
   listPeers,
   previewSync,
+  syncFiles,
   refreshPeers,
+  setAutoSyncP2p,
   setAutoSyncXml,
   setDeviceName,
   SYNC_PROTO,
@@ -20,7 +23,9 @@ import {
   type PairingRequest,
   type Peer,
   type PeerHello,
+  type SyncDone,
   type SyncPlanEvent,
+  type SyncProgress,
 } from '../api';
 import { isAndroid } from '../platform';
 
@@ -115,6 +120,27 @@ function PlanSummary({ ev }: { ev: SyncPlanEvent }) {
   );
 }
 
+/// Transferencia en curso. Con archivos de 40 MB por una red doméstica, sin
+/// esto la app parece colgada.
+function TransferProgress({ p }: { p: SyncProgress }) {
+  const pct = p.total > 0 ? Math.min(100, (p.done / p.total) * 100) : 0;
+  return (
+    <div className="plan">
+      <div className="plan-row">
+        <span>
+          {p.sending ? 'Sending' : 'Receiving'} {p.fileIndex}/{p.fileTotal} · {p.filename}
+        </span>
+        <strong>
+          {formatBytes(p.done)} / {formatBytes(p.total)}
+        </strong>
+      </div>
+      <div className="xfer-bar">
+        <div className="xfer-fill" style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
 function Switch({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
   return (
     <button
@@ -151,6 +177,8 @@ export default function Settings({ trackCount, volume, onClose, onStatus, onImpo
   const [hellos, setHellos] = useState<Record<string, PeerHello>>({});
   // Simulacro de sync por peer: qué pasaría si se sincronizara ahora.
   const [plans, setPlans] = useState<Record<string, SyncPlanEvent>>({});
+  const [progress, setProgress] = useState<Record<string, SyncProgress>>({});
+  const [autoSyncP2p, setAutoSyncP2pState] = useState(true);
 
   const android = isAndroid();
   const showExport = !android;
@@ -190,6 +218,7 @@ export default function Settings({ trackCount, volume, onClose, onStatus, onImpo
       })
       .catch(() => {});
     reloadPeers();
+    getAutoSyncP2p().then(setAutoSyncP2pState).catch(() => {});
     // El backend avisa por `peers-changed` cuando alguien aparece, se va o
     // deja de responder al sondeo. El intervalo es solo una red de contencion
     // por si se pierde un evento.
@@ -211,6 +240,37 @@ export default function Settings({ trackCount, volume, onClose, onStatus, onImpo
         setBusyPeer(null);
         setPlans((p) => ({ ...p, [e.payload.uid]: e.payload }));
       }),
+      listen<SyncProgress>('sync-progress', (e) => {
+        setProgress((p) => ({ ...p, [e.payload.uid]: e.payload }));
+      }),
+      listen<SyncDone>('sync-done', (e) => {
+        const { uid, name, received, sent, failed, organized, auto, error } = e.payload;
+        setBusyPeer(null);
+        setProgress((p) => {
+          const next = { ...p };
+          delete next[uid];
+          return next;
+        });
+        // El plan viejo quedó obsoleto: lo que se transfirió ya no falta.
+        setPlans((p) => {
+          const next = { ...p };
+          delete next[uid];
+          return next;
+        });
+        // Un sync automático que no hizo nada no merece un cartel: pasaría
+        // cada pocos minutos.
+        if (auto && !error && !received && !sent && !organized && !failed) return;
+        if (error) onStatus(`${name}: ${error}`);
+        else {
+          const parts = [];
+          if (received) parts.push(`${received} received`);
+          if (sent) parts.push(`${sent} sent`);
+          if (organized) parts.push(`${organized} playlist/metadata updates`);
+          if (failed) parts.push(`${failed} failed`);
+          onStatus(parts.length ? `${name}: ${parts.join(', ')}` : `${name}: nothing to transfer`);
+        }
+        onImported();
+      }),
     ];
     const timer = setInterval(reloadPeers, 15000);
     return () => {
@@ -226,6 +286,15 @@ export default function Settings({ trackCount, volume, onClose, onStatus, onImpo
     if (!accept) setBusyPeer(null);
     try {
       await confirmPairing(uid, accept);
+    } catch (e) {
+      onStatus(String(e));
+    }
+  }
+
+  async function toggleAutoSyncP2p(v: boolean) {
+    setAutoSyncP2pState(v);
+    try {
+      await setAutoSyncP2p(v);
     } catch (e) {
       onStatus(String(e));
     }
@@ -497,6 +566,15 @@ export default function Settings({ trackCount, volume, onClose, onStatus, onImpo
           </div>
           <div className="set-row">
             <div className="set-label">
+              <span>Sync automatically</span>
+              <small>
+                When something changes here, when a device shows up, and periodically
+              </small>
+            </div>
+            <Switch checked={autoSyncP2p} onChange={toggleAutoSyncP2p} />
+          </div>
+          <div className="set-row">
+            <div className="set-label">
               <span>Devices on this network</span>
               <small>
                 {peers.length === 0
@@ -557,17 +635,33 @@ export default function Settings({ trackCount, volume, onClose, onStatus, onImpo
                           Preview sync
                         </button>
                       )}
+                      {p.paired && p.online && (
+                        <button
+                          className="primary"
+                          disabled={busyPeer === p.uid}
+                          onClick={() => {
+                            setBusyPeer(p.uid);
+                            syncFiles(p.uid).catch((e) => {
+                              setBusyPeer(null);
+                              onStatus(String(e));
+                            });
+                          }}
+                        >
+                          Sync
+                        </button>
+                      )}
                       {p.paired && <button onClick={() => unpair(p)}>Unpair</button>}
                     </div>
-                    {plans[p.uid] && <PlanSummary ev={plans[p.uid]} />}
+                    {progress[p.uid] && <TransferProgress p={progress[p.uid]} />}
+                    {!progress[p.uid] && plans[p.uid] && <PlanSummary ev={plans[p.uid]} />}
                   </li>
                 );
               })}
             </ul>
           )}
           <p className="set-note">
-            Pairing shows a 6-digit code on both devices — they must match. Nothing is transferred
-            yet; “Ping” just asks the other device how much library it has.
+            Sync transfers missing files in both directions, then playlists, folders and metadata.
+            “Sync” forces it now. Deletions do not propagate yet.
           </p>
         </section>
 

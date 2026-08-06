@@ -182,6 +182,40 @@ export interface SyncPlanEvent {
 
 export const previewSync = (uid: string) => invoke<void>('preview_sync', { uid });
 
+/// Ejecuta la transferencia de archivos del plan (Fase 5.4). Sólo archivos:
+/// metadata, playlists y borrados llegan en 5.5/5.6.
+export const syncFiles = (uid: string) => invoke<void>('sync_files', { uid });
+
+export interface SyncProgress {
+  uid: string;
+  fileIndex: number;
+  fileTotal: number;
+  filename: string;
+  done: number;
+  total: number;
+  sending: boolean;
+}
+
+export interface SyncDone {
+  uid: string;
+  name: string;
+  received: number;
+  sent: number;
+  failed: number;
+  bytes: number;
+  /// Registros de organización aplicados (metadata, playlists, membresías).
+  organized: number;
+  /// Lo disparó el sync automático, no el usuario.
+  auto: boolean;
+  error: string | null;
+}
+
+/// Sync automático: al cambiar algo acá, cuando aparece un dispositivo, y
+/// cada tanto como red de contención.
+export const getAutoSyncP2p = () => invoke<boolean>('get_auto_sync_p2p');
+export const setAutoSyncP2p = (enabled: boolean) =>
+  invoke<void>('set_auto_sync_p2p', { enabled });
+
 export interface PeerHello {
   uid: string;
   name: string;

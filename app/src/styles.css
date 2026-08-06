@@ -721,6 +721,14 @@ table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
 }
 .plan-row strong { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
 .plan .set-note { margin-top: 4px; font-size: 11px; }
+.xfer-bar {
+  height: 4px; border-radius: 999px; overflow: hidden;
+  background: var(--line); margin-top: 4px;
+}
+.xfer-fill {
+  height: 100%; background: var(--accent);
+  transition: width 120ms linear;
+}
 
 /* Codigo de verificacion del pairing */
 .pair-dialog { display: flex; flex-direction: column; gap: 14px; }

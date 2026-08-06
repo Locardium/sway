@@ -20,7 +20,7 @@ use crate::AppState;
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Mutex;
@@ -41,6 +41,37 @@ const SETTING_PUBKEY: &str = "noise_public";
 #[derive(Default)]
 pub struct Pairing {
     pending: Mutex<HashMap<String, Sender<bool>>>,
+    /// Syncs en curso, por uid. Con el sync automático hay varios
+    /// disparadores (cambio local, peer que aparece, periódico) que pueden
+    /// caer casi juntos: dos corridas simultáneas contra el mismo
+    /// dispositivo se pisarían los archivos a medio bajar.
+    active: Mutex<HashSet<String>>,
+}
+
+/// Marca un sync en curso; al soltarse lo desmarca pase lo que pase.
+struct SyncGuard(AppHandle, String);
+
+impl SyncGuard {
+    fn acquire(handle: &AppHandle, uid: &str) -> Option<Self> {
+        let state = handle.state::<AppState>();
+        let mut active = state.pairing.active.lock().ok()?;
+        if !active.insert(uid.to_string()) {
+            return None; // ya hay uno corriendo con este peer
+        }
+        Some(SyncGuard(handle.clone(), uid.to_string()))
+    }
+}
+
+impl Drop for SyncGuard {
+    fn drop(&mut self) {
+        let state = self.0.state::<AppState>();
+        // El guard va a una variable propia: como binding del `if let` sería
+        // un temporario que vive más que `state`, y no compila.
+        let active = state.pairing.active.lock();
+        if let Ok(mut active) = active {
+            active.remove(&self.1);
+        }
+    }
 }
 
 impl Pairing {
@@ -265,7 +296,7 @@ pub fn spawn_server(handle: AppHandle, listener: TcpListener) {
 /// que el otro corta. Por ahora el único es el manifest; 5.4 agrega los
 /// bloques de audio sobre la misma sesión, para no rehacer el handshake por
 /// cada archivo.
-fn serve_requests(handle: &AppHandle, sess: &mut Session) -> Result<()> {
+fn serve_requests(handle: &AppHandle, sess: &mut Session, peer_uid: &str) -> Result<()> {
     loop {
         let msg = match sess.recv() {
             Ok(m) => m,
@@ -283,6 +314,85 @@ fn serve_requests(handle: &AppHandle, sess: &mut Session) -> Result<()> {
                 sess.send(&Msg::ManifestData {
                     manifest: Box::new(manifest),
                 })?;
+            }
+            // Alguien pide un archivo nuestro.
+            Msg::BlobReq { hash, offset } => {
+                let path = {
+                    let state = handle.state::<AppState>();
+                    let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
+                    crate::transfer::path_for_hash(&conn, &hash)
+                };
+                match path {
+                    Some(p) => crate::transfer::send_file(sess, &p, offset, &hash)?,
+                    None => sess.send(&Msg::BlobError {
+                        reason: format!("no tengo el archivo {hash}"),
+                    })?,
+                }
+            }
+            // Nos empujan un archivo.
+            Msg::BlobPush {
+                track_uid,
+                hash,
+                filename,
+                title,
+                artist,
+                album,
+                genre,
+                duration_ms,
+                bpm,
+                updated_at,
+                ..
+            } => {
+                let music_dir = handle.state::<AppState>().music_dir.clone();
+                let handle2 = handle.clone();
+                let got = crate::transfer::receive_file(
+                    sess,
+                    &music_dir,
+                    &hash,
+                    &filename,
+                    &mut |_, _| {},
+                    &mut |dest| handle2.state::<AppState>().expect_path(dest),
+                )?;
+                {
+                    let state = handle.state::<AppState>();
+                    let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
+                    crate::transfer::insert_received(
+                        &conn,
+                        &got.path,
+                        &track_uid,
+                        &hash,
+                        got.bytes,
+                        &title,
+                        &artist,
+                        &album,
+                        &genre,
+                        duration_ms,
+                        bpm,
+                        updated_at,
+                    )?;
+                }
+                log::info!("[sync] recibido {filename} ({} bytes)", got.bytes);
+                let _ = handle.emit("library-changed", ());
+            }
+            // Cambios de organización que nos manda el otro lado.
+            Msg::MetaPush { changes } => {
+                let applied = {
+                    let state = handle.state::<AppState>();
+                    let music_dir = state.music_dir.clone();
+                    let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
+                    let policy = delete_policy(&conn, peer_uid);
+                    crate::merge::apply(&conn, &changes, &music_dir, policy)?
+                };
+                if applied.total() > 0 {
+                    log::info!(
+                        "[sync] aplicados {} tracks, {} playlists, {} membresías",
+                        applied.tracks,
+                        applied.playlists,
+                        applied.memberships
+                    );
+                    let _ = handle.emit("library-changed", ());
+                }
+                sess.send(&Msg::MetaAck { applied })?;
             }
             Msg::Bye => return Ok(()),
             other => return Err(anyhow!("pedido inesperado: {other:?}")),
@@ -387,7 +497,7 @@ fn serve(handle: &AppHandle, stream: TcpStream) -> Result<()> {
                 clock_ms: db::now_ms(),
             })?;
             report_hello(handle, &uid, &name, tracks, playlists, clock_ms);
-            serve_requests(handle, &mut sess)
+            serve_requests(handle, &mut sess, &uid)
         }
         // El otro lado nos sacó de sus dispositivos. Solo se acepta si su
         // clave es la que teníamos guardada — o sea, si el handshake probó
@@ -601,7 +711,8 @@ pub fn preview_sync(handle: AppHandle, uid: String) {
     });
 }
 
-fn preview_inner(handle: &AppHandle, uid: &str) -> Result<crate::manifest::Plan> {
+/// Abre una sesión con un dispositivo ya vinculado y se presenta.
+fn open_session(handle: &AppHandle, uid: &str) -> Result<Session> {
     let addr = peer_addr(handle, uid)?;
     let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)?;
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
@@ -626,15 +737,23 @@ fn preview_inner(handle: &AppHandle, uid: &str) -> Result<crate::manifest::Plan>
         clock_ms: db::now_ms(),
     })?;
     match sess.recv()? {
-        Msg::Hello { .. } => {}
+        Msg::Hello { .. } => Ok(sess),
         Msg::NotPaired => {
             forget_device(handle, uid)?;
             let _ = handle.emit("peers-changed", ());
-            return Err(anyhow!("ese dispositivo ya no te tiene vinculado"));
+            Err(anyhow!("ese dispositivo ya no te tiene vinculado"))
         }
-        other => return Err(anyhow!("se esperaba Hello, llego {other:?}")),
+        other => Err(anyhow!("se esperaba Hello, llego {other:?}")),
     }
+}
 
+/// Pide el inventario del otro lado y calcula el plan. Devuelve también el
+/// manifest remoto: la transferencia necesita la metadata de cada track para
+/// dar de alta lo que reciba con el uid del otro dispositivo.
+fn fetch_plan(
+    handle: &AppHandle,
+    sess: &mut Session,
+) -> Result<(crate::manifest::Plan, crate::manifest::Manifest)> {
     sess.send(&Msg::ManifestReq)?;
     let remote = match sess.recv()? {
         Msg::ManifestData { manifest } => *manifest,
@@ -645,8 +764,348 @@ fn preview_inner(handle: &AppHandle, uid: &str) -> Result<crate::manifest::Plan>
         let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
         crate::manifest::build(&conn)?
     };
+    Ok((crate::manifest::plan(&local, &remote), remote))
+}
+
+fn preview_inner(handle: &AppHandle, uid: &str) -> Result<crate::manifest::Plan> {
+    let mut sess = open_session(handle, uid)?;
+    let (plan, _) = fetch_plan(handle, &mut sess)?;
     let _ = sess.send(&Msg::Bye);
-    Ok(crate::manifest::plan(&local, &remote))
+    Ok(plan)
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncProgressEvent {
+    uid: String,
+    /// Índice del archivo actual y total de archivos de esta corrida.
+    file_index: usize,
+    file_total: usize,
+    filename: String,
+    /// Bytes del archivo actual.
+    done: u64,
+    total: u64,
+    sending: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncDoneEvent {
+    uid: String,
+    name: String,
+    received: usize,
+    sent: usize,
+    failed: usize,
+    bytes: u64,
+    /// Registros de organización (metadata, playlists, membresías) aplicados
+    /// entre los dos lados. Sin esto, un sync que sólo movió playlists
+    /// reportaría "nada que transferir", que es falso.
+    organized: usize,
+    /// Lo disparó el sync automático, no el usuario. La UI no avisa de los
+    /// automáticos que no hicieron nada: serían un cartel cada pocos minutos.
+    auto: bool,
+    error: Option<String>,
+}
+
+/// Ejecuta la transferencia de archivos del plan (Fase 5.4).
+///
+/// Sólo archivos: metadata, playlists y borrados son 5.5 y 5.6. Un archivo
+/// que falla no corta la corrida — se cuenta y se sigue con el siguiente,
+/// porque quedarse a mitad por un archivo ilegible sería peor que terminar
+/// con un faltante.
+pub fn sync_files(handle: AppHandle, uid: String) {
+    run_sync(handle, uid, false)
+}
+
+/// Igual, pero disparado por el sync automático.
+pub fn sync_files_auto(handle: AppHandle, uid: String) {
+    run_sync(handle, uid, true)
+}
+
+fn run_sync(handle: AppHandle, uid: String, auto: bool) {
+    std::thread::spawn(move || {
+        let Some(_guard) = SyncGuard::acquire(&handle, &uid) else {
+            log::debug!("[sync] ya hay un sync corriendo con {uid}");
+            return;
+        };
+        let name = peer_name(&handle, &uid);
+        match sync_inner(&handle, &uid) {
+            Ok(SyncResult { received, sent, failed, bytes, organized }) => {
+                log::info!(
+                    "[sync] {name}: {received} recibidos, {sent} enviados, {failed} fallados, {organized} de organización"
+                );
+                let _ = handle.emit(
+                    "sync-done",
+                    SyncDoneEvent {
+                        uid: uid.clone(),
+                        name,
+                        received,
+                        sent,
+                        failed,
+                        bytes,
+                        organized,
+                        auto,
+                        error: None,
+                    },
+                );
+                let _ = handle.emit("library-changed", ());
+            }
+            Err(e) => {
+                log::warn!("[sync] {name} fallo: {e}");
+                let _ = handle.emit(
+                    "sync-done",
+                    SyncDoneEvent {
+                        uid: uid.clone(),
+                        name,
+                        received: 0,
+                        sent: 0,
+                        failed: 0,
+                        bytes: 0,
+                        organized: 0,
+                        auto,
+                        error: Some(e.to_string()),
+                    },
+                );
+            }
+        }
+    });
+}
+
+struct SyncResult {
+    received: usize,
+    sent: usize,
+    failed: usize,
+    bytes: u64,
+    organized: usize,
+}
+
+fn sync_inner(handle: &AppHandle, uid: &str) -> Result<SyncResult> {
+    let mut sess = open_session(handle, uid)?;
+    let (plan, remote) = fetch_plan(handle, &mut sess)?;
+    let music_dir = handle.state::<AppState>().music_dir.clone();
+
+    let total_files = plan.pull_files.len() + plan.push_files.len();
+    let (mut received, mut sent, mut failed, mut bytes) = (0usize, 0usize, 0usize, 0u64);
+    let mut index = 0usize;
+
+    // --- Traer lo que falta acá ------------------------------------------
+    for f in &plan.pull_files {
+        index += 1;
+        let entry = remote.tracks.iter().find(|t| t.uid == f.track_uid);
+        let Some(entry) = entry else { continue };
+        let h = handle.clone();
+        let uid_owned = uid.to_string();
+        let fname = f.filename.clone();
+        let mut progress = |done: u64, total: u64| {
+            let _ = h.emit(
+                "sync-progress",
+                SyncProgressEvent {
+                    uid: uid_owned.clone(),
+                    file_index: index,
+                    file_total: total_files,
+                    filename: fname.clone(),
+                    done,
+                    total,
+                    sending: false,
+                },
+            );
+        };
+        let h2 = handle.clone();
+        let got = crate::transfer::pull_file(
+            &mut sess,
+            &music_dir,
+            &f.hash,
+            &f.filename,
+            &mut progress,
+            &mut |dest| h2.state::<AppState>().expect_path(dest),
+        );
+        match got {
+            Ok(got) => {
+                let state = handle.state::<AppState>();
+                let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
+                crate::transfer::insert_received(
+                    &conn,
+                    &got.path,
+                    &entry.uid,
+                    &f.hash,
+                    got.bytes,
+                    &entry.title,
+                    &entry.artist,
+                    &entry.album,
+                    &entry.genre,
+                    entry.duration_ms,
+                    entry.bpm,
+                    entry.updated_at,
+                )?;
+                bytes += got.bytes;
+                received += 1;
+            }
+            Err(e) => {
+                log::warn!("[sync] no se pudo traer {}: {e}", f.filename);
+                failed += 1;
+            }
+        }
+    }
+
+    // --- Mandar lo que falta allá ----------------------------------------
+    for f in &plan.push_files {
+        index += 1;
+        let local = {
+            let state = handle.state::<AppState>();
+            let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
+            local_track(&conn, &f.track_uid)
+        };
+        let Some((path, entry)) = local else {
+            failed += 1;
+            continue;
+        };
+        let _ = handle.emit(
+            "sync-progress",
+            SyncProgressEvent {
+                uid: uid.to_string(),
+                file_index: index,
+                file_total: total_files,
+                filename: f.filename.clone(),
+                done: 0,
+                total: f.size as u64,
+                sending: true,
+            },
+        );
+        let push = sess.send(&Msg::BlobPush {
+            track_uid: entry.uid.clone(),
+            hash: f.hash.clone(),
+            filename: f.filename.clone(),
+            size: f.size as u64,
+            title: entry.title.clone(),
+            artist: entry.artist.clone(),
+            album: entry.album.clone(),
+            genre: entry.genre.clone(),
+            duration_ms: entry.duration_ms,
+            bpm: entry.bpm,
+            updated_at: entry.updated_at,
+        });
+        // Un archivo que no se puede leer no corta la corrida entera.
+        match push.and_then(|_| crate::transfer::send_file(&mut sess, &path, 0, &f.hash)) {
+            Ok(()) => {
+                bytes += f.size as u64;
+                sent += 1;
+            }
+            Err(e) => {
+                log::warn!("[sync] no se pudo mandar {}: {e}", f.filename);
+                failed += 1;
+            }
+        }
+    }
+
+    // --- Organización (Fase 5.5) ------------------------------------------
+    //
+    // Después de los archivos a propósito: una membresía de un track que
+    // todavía no llegó se ignora, así que primero conviene que exista.
+    //
+    // El manifest local se reconstruye acá y no se reusa el de `fetch_plan`:
+    // las filas que acaban de entrar por transferencia tienen que viajar en
+    // este mismo sync, no en el siguiente.
+    let local = {
+        let state = handle.state::<AppState>();
+        let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
+        crate::manifest::build(&conn)?
+    };
+    let mine = crate::merge::changes_for_peer(&local, &remote);
+    let theirs = crate::merge::changes_for_peer(&remote, &local);
+
+    let applied_here = {
+        let state = handle.state::<AppState>();
+        let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
+        let policy = delete_policy(&conn, uid);
+        crate::merge::apply(&conn, &theirs, &music_dir, policy)?
+    };
+    sess.send(&Msg::MetaPush {
+        changes: Box::new(mine),
+    })?;
+    let applied_there = match sess.recv()? {
+        Msg::MetaAck { applied } => applied,
+        other => return Err(anyhow!("se esperaba MetaAck, llegó {other:?}")),
+    };
+    // Desglosado y no sólo el total: si un sync repite los mismos números
+    // corrida tras corrida, no está convergiendo, y el total solo no dice
+    // qué se está re-aplicando.
+    log::info!(
+        "[sync] acá: {} meta, {} playlists, {} membresías, {} borrados | allá: {} meta, {} playlists, {} membresías, {} borrados",
+        applied_here.tracks,
+        applied_here.playlists,
+        applied_here.memberships,
+        applied_here.deleted,
+        applied_there.tracks,
+        applied_there.playlists,
+        applied_there.memberships,
+        applied_there.deleted
+    );
+    if applied_here.total() > 0 {
+        log::debug!(
+            "[sync] entrantes: {} tracks, {} playlists, {} membresías, {} tombstones",
+            theirs.tracks.len(),
+            theirs.playlists.len(),
+            theirs.memberships.len(),
+            theirs.tombstones.len()
+        );
+    }
+
+    let _ = sess.send(&Msg::Bye);
+    Ok(SyncResult {
+        received,
+        sent,
+        failed,
+        bytes,
+        organized: applied_here.total() + applied_there.total(),
+    })
+}
+
+/// Datos de un track local por uid: el path real y su entrada de manifest.
+fn local_track(
+    conn: &rusqlite::Connection,
+    uid: &str,
+) -> Option<(std::path::PathBuf, crate::manifest::TrackEntry)> {
+    conn.query_row(
+        "SELECT path, uid, content_hash, COALESCE(size_bytes,0), COALESCE(rel_path,''),
+                title, artist, album, genre, duration_ms, bpm, updated_at
+         FROM tracks WHERE uid = ?1",
+        [uid],
+        |r| {
+            let path: String = r.get(0)?;
+            Ok((
+                std::path::PathBuf::from(path),
+                crate::manifest::TrackEntry {
+                    uid: r.get(1)?,
+                    hash: r.get(2)?,
+                    size: r.get(3)?,
+                    filename: r.get(4)?,
+                    title: r.get(5)?,
+                    artist: r.get(6)?,
+                    album: r.get(7)?,
+                    genre: r.get(8)?,
+                    duration_ms: r.get(9)?,
+                    bpm: r.get(10)?,
+                    updated_at: r.get(11)?,
+                    present: true,
+                },
+            ))
+        },
+    )
+    .ok()
+}
+
+/// Qué hacer con los borrados que manda ESTE peer. Se evalúa del lado que
+/// recibe: poner `ask` en la PC principal la protege de un borrado hecho en
+/// otro dispositivo sin bloquear el resto del sync.
+fn delete_policy(conn: &rusqlite::Connection, peer_uid: &str) -> crate::merge::DeletePolicy {
+    let s: String = conn
+        .query_row(
+            "SELECT deletes FROM sync_policy WHERE device_uid = ?1",
+            [peer_uid],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|_| "propagate".into());
+    crate::merge::DeletePolicy::from_setting(&s)
 }
 
 fn platform_of(handle: &AppHandle, uid: &str) -> String {
