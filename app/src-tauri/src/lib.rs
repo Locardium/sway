@@ -405,9 +405,23 @@ fn move_playlist(
 #[tauri::command]
 fn playlist_tracks(state: State<AppState>, playlist_id: i64) -> Result<Vec<db::Track>, String> {
     let conn = state.db.lock().unwrap();
-    let mut tracks = db::playlist_tracks(&conn, playlist_id).map_err(|e| e.to_string())?;
-    mark_scope(&conn, &mut tracks);
-    Ok(tracks)
+    timed("playlist_tracks", || {
+        let mut tracks = db::playlist_tracks(&conn, playlist_id).map_err(|e| e.to_string())?;
+        // Acotado a esta playlist: marcar veinte filas no puede costar lo mismo
+        // que recorrer la biblioteca entera.
+        timed("  mark_scope(playlist)", || {
+            if let Ok(me) = db::this_device_uid(&conn) {
+                if let Ok(Some(in_scope)) = scope::scope_tracks_of_playlist(&conn, &me, playlist_id)
+                {
+                    for t in tracks.iter_mut() {
+                        t.in_scope =
+                            t.uid.as_deref().map(|u| in_scope.contains(u)).unwrap_or(true);
+                    }
+                }
+            }
+        });
+        Ok(tracks)
+    })
 }
 
 #[tauri::command]

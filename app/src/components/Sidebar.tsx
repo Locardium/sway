@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronRight, FolderPlus, Library, ListMusic, Plus } from 'lucide-react';
 import { PlaylistNode, NodeKind } from '../api';
 
@@ -53,8 +53,19 @@ export default function Sidebar({
     };
   }, [menu]);
 
-  const childrenOf = (pid: number | null) =>
-    nodes.filter((n) => n.parentId === pid).sort((a, b) => a.position - b.position);
+  // Hijos por padre, armados una vez. Filtrar la lista entera por cada nodo
+  // mientras se dibuja el árbol es cuadrático, y el árbol se redibuja en cada
+  // cambio de la biblioteca — en el celular eso se siente.
+  const byParent = useMemo(() => {
+    const m = new Map<number | null, PlaylistNode[]>();
+    for (const n of nodes) {
+      const list = m.get(n.parentId);
+      list ? list.push(n) : m.set(n.parentId, [n]);
+    }
+    for (const list of m.values()) list.sort((a, b) => a.position - b.position);
+    return m;
+  }, [nodes]);
+  const childrenOf = (pid: number | null) => byParent.get(pid) ?? [];
 
   function toggleCollapse(id: number) {
     setCollapsed((prev) => {

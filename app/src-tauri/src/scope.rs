@@ -445,6 +445,47 @@ pub fn scope_tracks(conn: &Connection, device_uid: &str) -> rusqlite::Result<Opt
     Ok(Some(rows.collect::<rusqlite::Result<HashSet<_>>>()?))
 }
 
+/// Igual que `scope_tracks`, pero mirando sólo los tracks de UNA playlist.
+///
+/// Abrir una playlist llamaba a `scope_tracks`, que arma el set en-scope de la
+/// biblioteca ENTERA —recorriendo todas las membresías, con un DISTINCT sobre
+/// uids— para después marcar veinte filas. Con el lock de la DB tomado. Acá se
+/// arranca por las filas de esa playlist, que son pocas, y se sale por
+/// `playlist_tracks(track_id)` a ver si alguna de las otras playlists del tema
+/// está marcada.
+pub fn scope_tracks_of_playlist(
+    conn: &Connection,
+    device_uid: &str,
+    playlist_id: i64,
+) -> rusqlite::Result<Option<HashSet<String>>> {
+    if get(conn, device_uid)?.mode == Mode::All {
+        return Ok(None);
+    }
+    let mut stmt = conn.prepare_cached(
+        "WITH RECURSIVE marcadas(uid) AS (
+             SELECT playlist_uid FROM sync_scope
+              WHERE device_uid = ?1 AND selected = 1
+             UNION
+             SELECT hija.uid FROM playlists hija
+               JOIN playlists madre ON madre.id = hija.parent_id
+               JOIN marcadas ON marcadas.uid = madre.uid
+             WHERE hija.uid IS NOT NULL
+         )
+         SELECT DISTINCT t.uid
+           FROM playlist_tracks aca
+           JOIN playlist_tracks otras ON otras.track_id = aca.track_id
+           JOIN playlists p ON p.id = otras.playlist_id
+           JOIN tracks t ON t.id = aca.track_id
+          WHERE aca.playlist_id = ?2
+            AND t.uid IS NOT NULL
+            AND p.uid IN (SELECT uid FROM marcadas)",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![device_uid, playlist_id], |r| {
+        r.get::<_, String>(0)
+    })?;
+    Ok(Some(rows.collect::<rusqlite::Result<HashSet<_>>>()?))
+}
+
 /// Qué playlists (por uid) están marcadas para un dispositivo, ya expandidas
 /// hacia abajo por el árbol. `None` = todas.
 ///
@@ -545,34 +586,51 @@ pub fn evictable(
     music_dir: &std::path::Path,
 ) -> rusqlite::Result<Vec<Evictable>> {
     let me = crate::db::this_device_uid(conn)?;
-    let Some(in_scope) = scope_tracks(conn, &me)? else {
+    if get(conn, &me)?.mode == Mode::All {
         return Ok(Vec::new()); // scope = todo: no hay nada de más
-    };
+    }
 
-    let mut stmt = conn.prepare(
-        "SELECT t.id, t.uid, t.path, COALESCE(t.size_bytes, 0)
-         FROM tracks t
-         WHERE t.local_state = 'present' AND t.uid IS NOT NULL
-           AND t.content_hash IS NOT NULL
-           AND EXISTS (SELECT 1 FROM blob_replicas r
-                        WHERE r.hash = t.content_hash AND r.device_uid <> ?1)",
+    // Todo el descarte en UNA consulta, y el anti-join por `track_id` (entero)
+    // en vez de por `uid` (texto).
+    //
+    // Antes esto traía a Rust CADA track presente de la biblioteca para
+    // descartarlos en un `for`, y aparte armaba el set en-scope entero con un
+    // DISTINCT sobre uids. Con el lock de la DB tomado, que es global: mientras
+    // corría, cualquier otra cosa que tocara la DB —abrir una playlist,
+    // arrancar un tema— quedaba encolada. Es lo que hacía que abrir el panel de
+    // sync trabara la app entera.
+    let mut stmt = conn.prepare_cached(
+        "WITH RECURSIVE marcadas(uid) AS (
+             SELECT playlist_uid FROM sync_scope
+              WHERE device_uid = ?1 AND selected = 1
+             UNION
+             SELECT hija.uid FROM playlists hija
+               JOIN playlists madre ON madre.id = hija.parent_id
+               JOIN marcadas ON marcadas.uid = madre.uid
+             WHERE hija.uid IS NOT NULL
+         ),
+         en_scope(track_id) AS (
+             SELECT DISTINCT pt.track_id
+               FROM playlist_tracks pt
+               JOIN playlists p ON p.id = pt.playlist_id
+              WHERE p.uid IN (SELECT uid FROM marcadas)
+         )
+         SELECT t.id, t.path, COALESCE(t.size_bytes, 0)
+           FROM tracks t
+          WHERE t.local_state = 'present' AND t.uid IS NOT NULL
+            AND t.content_hash IS NOT NULL
+            AND t.id NOT IN (SELECT track_id FROM en_scope)
+            AND EXISTS (SELECT 1 FROM blob_replicas r
+                         WHERE r.hash = t.content_hash AND r.device_uid <> ?1)",
     )?;
     let rows = stmt.query_map([&me], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, i64>(3)?,
-        ))
+        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
     })?;
     let mut out = Vec::new();
     for row in rows {
-        let (id, uid, path, size) = row?;
-        if in_scope.contains(&uid) {
-            continue;
-        }
+        let (id, path, size) = row?;
         // Un archivo legacy de afuera de la carpeta gestionada no es nuestro
-        // para moverlo.
+        // para moverlo. Sobre las pocas filas que sobrevivieron, no sobre todas.
         if !std::path::Path::new(&path).starts_with(music_dir) {
             continue;
         }
@@ -606,35 +664,47 @@ pub struct Restorable {
 /// Qué falta y podría estar en la papelera. Sólo consulta la DB — barato.
 pub fn restorable(conn: &Connection) -> rusqlite::Result<Vec<Restorable>> {
     let me = crate::db::this_device_uid(conn)?;
-    let in_scope = scope_tracks(conn, &me)?;
-    let mut stmt = conn.prepare(
-        "SELECT id, uid, content_hash, COALESCE(rel_path, ''), COALESCE(size_bytes, 0)
-         FROM tracks
-         WHERE local_state <> 'present' AND uid IS NOT NULL AND content_hash IS NOT NULL",
-    )?;
-    let rows = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-            r.get::<_, i64>(4)?,
-        ))
+    let selectivo = get(conn, &me)?.mode == Mode::Selected;
+    // El filtro de scope va en SQL, igual que en `evictable`: esto corre en cada
+    // sync y en cada cambio de scope, con el lock global tomado.
+    let sql = if selectivo {
+        "WITH RECURSIVE marcadas(uid) AS (
+             SELECT playlist_uid FROM sync_scope
+              WHERE device_uid = ?1 AND selected = 1
+             UNION
+             SELECT hija.uid FROM playlists hija
+               JOIN playlists madre ON madre.id = hija.parent_id
+               JOIN marcadas ON marcadas.uid = madre.uid
+             WHERE hija.uid IS NOT NULL
+         ),
+         en_scope(track_id) AS (
+             SELECT DISTINCT pt.track_id
+               FROM playlist_tracks pt
+               JOIN playlists p ON p.id = pt.playlist_id
+              WHERE p.uid IN (SELECT uid FROM marcadas)
+         )
+         SELECT id, content_hash, rel_path, COALESCE(size_bytes, 0)
+           FROM tracks
+          WHERE local_state <> 'present' AND uid IS NOT NULL
+            AND content_hash IS NOT NULL AND COALESCE(rel_path, '') <> ''
+            AND id IN (SELECT track_id FROM en_scope)"
+    } else {
+        "SELECT id, content_hash, rel_path, COALESCE(size_bytes, 0)
+           FROM tracks
+          WHERE local_state <> 'present' AND uid IS NOT NULL
+            AND content_hash IS NOT NULL AND COALESCE(rel_path, '') <> ''
+            AND ?1 IS NOT NULL"
+    };
+    let mut stmt = conn.prepare_cached(sql)?;
+    let rows = stmt.query_map([&me], |r| {
+        Ok(Restorable {
+            id: r.get(0)?,
+            hash: r.get(1)?,
+            rel_path: r.get(2)?,
+            size: r.get(3)?,
+        })
     })?;
-    let mut out = Vec::new();
-    for row in rows {
-        let (id, uid, hash, rel_path, size) = row?;
-        if rel_path.is_empty() {
-            continue;
-        }
-        if let Some(set) = &in_scope {
-            if !set.contains(&uid) {
-                continue; // fuera de scope: que se quede en la papelera
-            }
-        }
-        out.push(Restorable { id, hash, rel_path, size });
-    }
-    Ok(out)
+    rows.collect()
 }
 
 /// Busca esos archivos en la papelera. **Hashea: correr sin el lock.**
