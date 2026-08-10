@@ -66,51 +66,127 @@ impl Player {
     }
 }
 
-fn run_audio(rx: Receiver<Cmd>, pos_ms: Arc<AtomicU64>) {
-    let (_stream, handle) = match OutputStream::try_default() {
-        Ok(x) => x,
+/// Nombre del dispositivo de salida por defecto del sistema, o `None` si no
+/// hay ninguno (todos desconectados).
+fn default_output_name() -> Option<String> {
+    use rodio::cpal::traits::{DeviceTrait, HostTrait};
+    rodio::cpal::default_host()
+        .default_output_device()
+        .and_then(|d| d.name().ok())
+}
+
+/// Cada cuánto se comprueba si el sistema cambió de salida. Es una consulta al
+/// host de audio, no algo gratis: un segundo es imperceptible al cambiar de
+/// auriculares y no cuesta nada mientras no se toca nada.
+const DEVICE_POLL: Duration = Duration::from_secs(1);
+
+/// Salida abierta: el stream de cpal y su handle. El stream **tiene que
+/// seguir vivo** — si se dropea, se corta el audio.
+struct Output {
+    _stream: OutputStream,
+    handle: rodio::OutputStreamHandle,
+}
+
+fn open_output() -> Option<Output> {
+    match OutputStream::try_default() {
+        Ok((stream, handle)) => {
+            eprintln!("[player] salida de audio abierta OK");
+            Some(Output { _stream: stream, handle })
+        }
         Err(e) => {
             eprintln!("[player] no se pudo abrir salida de audio: {e}");
-            return;
+            None
         }
+    }
+}
+
+/// Carga un archivo en el sink, opcionalmente salteando a `from`.
+fn load(sink: &Sink, path: &std::path::Path, from: Duration) -> bool {
+    let Ok(f) = File::open(path) else {
+        eprintln!("[player] open fail {}", path.display());
+        return false;
     };
-    eprintln!("[player] salida de audio abierta OK");
-    let mut sink = Sink::try_new(&handle).expect("sink");
+    match Decoder::new(BufReader::new(f)) {
+        Ok(src) => {
+            sink.append(src);
+            if !from.is_zero() {
+                let _ = sink.try_seek(from);
+            }
+            true
+        }
+        Err(e) => {
+            eprintln!("[player] decode fail {}: {e}", path.display());
+            false
+        }
+    }
+}
+
+/// El stream de audio queda atado al dispositivo que era el default cuando se
+/// abrió. Si el usuario cambia de salida (enchufa auriculares, cambia el
+/// default en Windows), ese stream sigue escribiendo a un dispositivo que ya
+/// no suena: la app parece reproducir —la barra avanza— y no se escucha nada.
+///
+/// Por eso la salida no se abre una sola vez: se vigila cuál es el default y,
+/// cuando cambia, se reabre y se retoma el track donde estaba. Y si al
+/// arrancar no había ninguna salida, se reintenta en cada Play en vez de
+/// quedarse mudo para siempre.
+fn run_audio(rx: Receiver<Cmd>, pos_ms: Arc<AtomicU64>) {
+    let mut out = open_output();
+    let mut sink = out.as_ref().and_then(|o| Sink::try_new(&o.handle).ok());
     let mut vol: f32 = 1.0;
+    // Qué está cargado, para poder retomarlo si hay que reabrir la salida.
+    let mut current: Option<PathBuf> = None;
+    let mut device = default_output_name();
+    let mut last_check = std::time::Instant::now();
 
     loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(Cmd::Play(path)) => {
-                sink.stop();
-                sink = Sink::try_new(&handle).expect("sink");
+                // Reintento: si al arrancar no había salida (o se cayó), este
+                // es el momento de volver a intentar.
+                if out.is_none() {
+                    out = open_output();
+                    device = default_output_name();
+                }
+                let Some(o) = out.as_ref() else { continue };
+                if let Some(s) = &sink {
+                    s.stop();
+                }
+                sink = Sink::try_new(&o.handle).ok();
+                let Some(s) = sink.as_ref() else { continue };
                 eprintln!("[player] Play: {}", path.display());
-                match File::open(&path) {
-                    Ok(f) => match Decoder::new(BufReader::new(f)) {
-                        Ok(src) => {
-                            sink.set_volume(vol);
-                            sink.append(src);
-                            sink.play();
-                            eprintln!(
-                                "[player] reproduciendo: len={} vol={} paused={}",
-                                sink.len(),
-                                sink.volume(),
-                                sink.is_paused()
-                            );
-                        }
-                        Err(e) => eprintln!("[player] decode fail {}: {e}", path.display()),
-                    },
-                    Err(e) => eprintln!("[player] open fail {}: {e}", path.display()),
+                s.set_volume(vol);
+                if load(s, &path, Duration::ZERO) {
+                    s.play();
+                    current = Some(path);
+                } else {
+                    current = None;
                 }
             }
-            Ok(Cmd::Pause) => sink.pause(),
-            Ok(Cmd::Resume) => sink.play(),
+            Ok(Cmd::Pause) => {
+                if let Some(s) = &sink {
+                    s.pause();
+                }
+            }
+            Ok(Cmd::Resume) => {
+                if let Some(s) = &sink {
+                    s.play();
+                }
+            }
             Ok(Cmd::Stop) => {
-                sink.stop();
-                sink = Sink::try_new(&handle).expect("sink");
-                sink.set_volume(vol);
+                if let Some(s) = &sink {
+                    s.stop();
+                }
+                current = None;
+                sink = out.as_ref().and_then(|o| Sink::try_new(&o.handle).ok());
+                if let Some(s) = &sink {
+                    s.set_volume(vol);
+                }
             }
             Ok(Cmd::Seek(secs)) => {
-                let _ = sink.try_seek(Duration::from_secs(secs));
+                if let Some(s) = &sink {
+                    let _ = s.try_seek(Duration::from_secs(secs));
+                }
                 // Refleja la posicion nueva de inmediato y salta el store de
                 // abajo (get_pos puede tardar en reflejar el seek => barra
                 // saltando al valor viejo).
@@ -119,11 +195,46 @@ fn run_audio(rx: Receiver<Cmd>, pos_ms: Arc<AtomicU64>) {
             }
             Ok(Cmd::Volume(v)) => {
                 vol = v;
-                sink.set_volume(v);
+                if let Some(s) = &sink {
+                    s.set_volume(v);
+                }
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
-        pos_ms.store(sink.get_pos().as_millis() as u64, Ordering::Relaxed);
+
+        // ¿Cambió la salida del sistema? Reabrir y retomar donde estaba.
+        if last_check.elapsed() >= DEVICE_POLL {
+            last_check = std::time::Instant::now();
+            let now_device = default_output_name();
+            if now_device != device && now_device.is_some() {
+                eprintln!("[player] salida cambió: {device:?} -> {now_device:?}");
+                device = now_device;
+                let was_paused = sink.as_ref().map(|s| s.is_paused()).unwrap_or(true);
+                let at = Duration::from_millis(pos_ms.load(Ordering::Relaxed));
+                if let Some(s) = &sink {
+                    s.stop();
+                }
+                sink = None;
+                // El stream nuevo se abre antes de soltar el viejo: la
+                // asignación dropea el anterior recién cuando este ya existe.
+                out = open_output();
+                if let Some(o) = out.as_ref() {
+                    sink = Sink::try_new(&o.handle).ok();
+                    if let (Some(s), Some(path)) = (sink.as_ref(), current.as_ref()) {
+                        s.set_volume(vol);
+                        if load(s, path, at) && !was_paused {
+                            s.play();
+                        } else {
+                            s.pause();
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(s) = &sink {
+            pos_ms.store(s.get_pos().as_millis() as u64, Ordering::Relaxed);
+        }
     }
 }

@@ -78,7 +78,12 @@ export default function Sidebar({
             'tree-row',
             active ? 'active' : '',
             hint ? `drop-${hint}` : '',
+            // Desmarcada pero todavía ocupando lugar. Sigue en el árbol hasta
+            // que se libere el espacio; apagada para que se vea que está de
+            // salida.
+            node.inScope ? '' : 'out-scope',
           ].join(' ')}
+          title={node.inScope ? undefined : 'Not synced to this device — still taking up space'}
           style={{ paddingLeft: 10 + depth * 15 }}
           data-dnd="node"
           data-node-id={node.id}
@@ -121,7 +126,14 @@ export default function Sidebar({
           ) : (
             <span className="tree-name">{node.name}</span>
           )}
-          {!isFolder && <span className="tree-count">{node.trackCount || ''}</span>}
+          {/* En una desmarcada el número es el de lo que todavía tiene archivo
+              acá, que es lo que se va a ver al abrirla. El total entero diría
+              un número que no coincide con la lista. */}
+          {!isFolder && (
+            <span className="tree-count">
+              {(node.inScope ? node.trackCount : node.presentCount) || ''}
+            </span>
+          )}
         </div>
         <div className={'tree-kids' + (isCollapsed ? ' closed' : '')}>
           {isFolder && !isCollapsed && kids.map((k) => renderNode(k, depth + 1))}

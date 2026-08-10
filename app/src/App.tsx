@@ -38,6 +38,7 @@ import TrackTable from './components/TrackTable';
 import PlayerBar, { RepeatMode, REPEAT_LABEL } from './components/PlayerBar';
 import RightPanel from './components/RightPanel';
 import Settings from './components/Settings';
+import Sync from './components/Sync';
 import { Modal, NamePrompt, Confirm } from './components/Modal';
 import { MenuItem } from './components/ContextMenu';
 
@@ -48,6 +49,7 @@ type ModalState =
   | { type: 'pick-playlist'; ids: number[] }
   | { type: 'track-playlists'; id: number; playlistIds: number[] }
   | { type: 'settings' }
+  | { type: 'sync' }
   | null;
 
 const VOL_STORAGE = 'sway.volume';
@@ -106,7 +108,9 @@ export default function App() {
   const seekGuard = useRef(0);
 
   const refreshLibrary = useCallback(async () => {
-    setLibrary(await listTracks());
+    const tracks = await listTracks();
+    setLibrary(tracks);
+    return tracks;
   }, []);
   const refreshPlaylists = useCallback(async () => {
     setNodes(await listPlaylists());
@@ -228,13 +232,23 @@ export default function App() {
   // mueve o saca una canción, la DB local ya está bien, y la vista sigue
   // mostrando el orden viejo hasta que uno vuelve a hacer click en la
   // playlist.
+  // Cuántos tracks había la última vez, para no anunciar lo que no cambió.
+  const libCount = useRef(0);
+  useEffect(() => {
+    libCount.current = library.length;
+  }, [library]);
+
   useEffect(() => {
     if (!('__TAURI_INTERNALS__' in window)) return;
-    const un = listen('library-changed', () => {
-      refreshLibrary();
+    const un = listen('library-changed', async () => {
+      const before = libCount.current;
+      const tracks = await refreshLibrary();
       refreshPlaylists();
       refreshPlaylistTracks();
-      setStatus('Library updated');
+      // El cartel es para lo que aparece solo (el watcher encontró archivos
+      // nuevos). Un sync ya reporta su propio resumen, así que anunciar
+      // "Library updated" encima lo tapa y no agrega nada.
+      if (tracks.length !== before) setStatus('Library updated');
     });
     return () => {
       un.then((f) => f());
@@ -326,13 +340,32 @@ export default function App() {
   // Con búsqueda activa se busca SIEMPRE en toda la biblioteca, sin importar
   // la playlist seleccionada.
   const baseTracks = searching ? library : selection.type === 'library' ? library : plTracks;
+  // Se está mirando adentro de una playlist que este dispositivo no sincroniza.
+  // Con búsqueda activa no cuenta: ahí se busca en toda la biblioteca.
+  const inUnselectedPlaylist =
+    !searching &&
+    selection.type === 'playlist' &&
+    nodes.find((n) => n.id === selection.id)?.inScope === false;
+
   const visibleTracks = useMemo(() => {
+    // Fuera de scope y sin archivo acá: ya se liberó el espacio, no tiene nada
+    // que hacer en la vista principal. Mientras el archivo siga ocupando lugar
+    // se sigue viendo, apagado, para que se note que está de salida.
+    //
+    // Adentro de una playlist desmarcada se ve todo lo que todavía tenga
+    // archivo acá, apagado, incluido lo que además está en una marcada: si un
+    // tema sigue ocupando lugar, esconderlo de una lista donde figura es mentir.
+    // Lo que decide si la playlist misma sigue existiendo es otra cuenta
+    // (`strandedCount`), y ahí el tema prestado no cuenta.
+    const shown = baseTracks.filter((t) =>
+      inUnselectedPlaylist ? t.present : t.inScope || t.present,
+    );
     const q = search.trim().toLowerCase();
-    if (!q) return baseTracks;
-    return baseTracks.filter((t) =>
+    if (!q) return shown;
+    return shown.filter((t) =>
       [t.title, t.artist, t.album, t.genre].some((f) => f.toLowerCase().includes(q)),
     );
-  }, [baseTracks, search]);
+  }, [baseTracks, search, inUnselectedPlaylist]);
 
   const findTrack = useCallback(
     (id: number | null) =>
@@ -369,6 +402,19 @@ export default function App() {
 
   const onPlay = useCallback(
     async (id: number) => {
+      // Un track fuera de scope se ve y se organiza, pero no suena, esté el
+      // archivo o no: quedó afuera de lo que este dispositivo sincroniza y
+      // dejarlo sonar hasta que alguien libere espacio haría que el mismo tema
+      // ande hoy y no mañana. Decirlo es mejor que un error sin contexto.
+      const t = visibleTracks.find((x) => x.id === id);
+      if (t && !t.inScope) {
+        setStatus('Out of sync scope — select its playlist in Sync to use it here');
+        return;
+      }
+      if (t?.present === false) {
+        setStatus('Not on this device — select its playlist in Sync to download it');
+        return;
+      }
       try {
         queueRef.current = buildQueue(visibleTracks.map((t) => t.id), id, shuffle);
         await playTrack(id);
@@ -796,16 +842,60 @@ export default function App() {
   );
   const stableWasDrag = useCallback(() => didDrag, []);
 
+  /// Qué se ve en el árbol de la vista principal. Una playlist desmarcada sigue
+  /// ahí mientras ocupe lugar —apagada, para que se vea que está de salida— y
+  /// desaparece del todo cuando se liberó su espacio.
+  ///
+  /// Una carpeta se queda si algo de lo que cuelga se queda, aunque ella misma
+  /// esté fuera de scope: marcar sólo una playlist de adentro es normal, y sin
+  /// esta regla esa playlist quedaría visible pero inalcanzable.
+  ///
+  /// El editor de scope NO usa esto: ahí se ven todas, o no habría manera de
+  /// volver a marcar lo que se escondió.
+  const visibleNodes = useMemo(() => {
+    const kids = new Map<number | null, PlaylistNode[]>();
+    for (const n of nodes) {
+      const list = kids.get(n.parentId);
+      list ? list.push(n) : kids.set(n.parentId, [n]);
+    }
+    const keep = new Set<number>();
+    const walk = (n: PlaylistNode): boolean => {
+      // Los hijos primero, y sin cortar por el propio resultado: la carpeta se
+      // queda si algo adentro se queda.
+      let anyKid = false;
+      for (const k of kids.get(n.id) ?? []) if (walk(k)) anyKid = true;
+      const stays = n.inScope || n.strandedCount > 0 || anyKid;
+      if (stays) keep.add(n.id);
+      return stays;
+    };
+    for (const root of kids.get(null) ?? []) walk(root);
+    return nodes.filter((n) => keep.has(n.id));
+  }, [nodes]);
+
+  // La playlist abierta puede haberse escondido (se liberó su espacio) mientras
+  // se la estaba mirando: quedarse en una vista que ya no está en el árbol deja
+  // la app sin forma de volver.
+  useEffect(() => {
+    if (selection.type !== 'playlist') return;
+    if (nodes.length > 0 && !visibleNodes.some((n) => n.id === selection.id)) {
+      setSelection({ type: 'library' });
+    }
+  }, [visibleNodes, nodes.length, selection]);
+
   const selectedNode =
     selection.type === 'playlist' ? nodes.find((n) => n.id === selection.id) : null;
 
   const playlistOptions = useMemo(() => {
     const path = (n: PlaylistNode): string => {
-      const parent = nodes.find((x) => x.id === n.parentId);
+      const parent = visibleNodes.find((x) => x.id === n.parentId);
       return parent ? path(parent) + ' / ' + n.name : n.name;
     };
-    return nodes.filter((n) => n.kind === 'playlist').map((n) => ({ id: n.id, label: path(n) }));
-  }, [nodes]);
+    // Sólo las que están en scope: mandar tracks a una playlist que este
+    // dispositivo no sincroniza es pedir que se vayan apenas se guarden.
+    return visibleNodes
+      .filter((n) => n.kind === 'playlist' && n.inScope)
+      .map((n) => ({ id: n.id, label: path(n) }));
+  }, [visibleNodes]);
 
   return (
     <div className="app">
@@ -849,7 +939,7 @@ export default function App() {
       <div className={'body' + (sidebarOpen ? ' sidebar-open' : '')}>
         {sidebarOpen && <div className="sidebar-scrim" onClick={() => setSidebarOpen(false)} />}
         <Sidebar
-          nodes={nodes}
+          nodes={visibleNodes}
           selection={selection}
           dropHint={nodeDropHint}
           rootHover={rootHover}
@@ -1026,6 +1116,17 @@ export default function App() {
           onStatus={setStatus}
           onImported={async () => {
             await Promise.all([refreshLibrary(), refreshPlaylists()]);
+          }}
+          onOpenSync={() => setModal({ type: 'sync' })}
+        />
+      )}
+      {modal?.type === 'sync' && (
+        <Sync
+          nodes={nodes}
+          onClose={() => setModal(null)}
+          onStatus={setStatus}
+          onLibraryChanged={async () => {
+            await Promise.all([refreshLibrary(), refreshPlaylists(), refreshPlaylistTracks()]);
           }}
         />
       )}

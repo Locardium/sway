@@ -27,6 +27,25 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
+/// Cada `library-changed` hace que el frontend recargue la biblioteca ENTERA
+/// por IPC. Emitirlo por archivo recibido significa, en una corrida de 100
+/// archivos, 100 recargas completas peleando por el mismo lock de SQLite que
+/// está usando la transferencia — en el celular la app se traba y no se puede
+/// ni abrir una pantalla. Se emite como mucho una vez cada esto; el final de
+/// la corrida siempre emite.
+const LIBRARY_EVENT_MIN_MS: i64 = 1500;
+static LAST_LIBRARY_EVENT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+fn emit_library_changed(handle: &AppHandle, force: bool) {
+    use std::sync::atomic::Ordering;
+    let now = db::now_ms();
+    if !force && now - LAST_LIBRARY_EVENT.load(Ordering::Relaxed) < LIBRARY_EVENT_MIN_MS {
+        return;
+    }
+    LAST_LIBRARY_EVENT.store(now, Ordering::Relaxed);
+    let _ = handle.emit("library-changed", ());
+}
+
 /// Cuánto se espera a que una persona mire la pantalla y confirme.
 const DECISION_TIMEOUT: Duration = Duration::from_secs(120);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -345,18 +364,27 @@ fn serve_requests(handle: &AppHandle, sess: &mut Session, peer_uid: &str) -> Res
             } => {
                 let music_dir = handle.state::<AppState>().music_dir.clone();
                 let handle2 = handle.clone();
+                // Empuje: el otro manda desde cero, no continúa nada nuestro.
                 let got = crate::transfer::receive_file(
                     sess,
                     &music_dir,
                     &hash,
                     &filename,
+                    false,
                     &mut |_, _| {},
                     &mut |dest| handle2.state::<AppState>().expect_path(dest),
                 )?;
                 {
                     let state = handle.state::<AppState>();
                     let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
-                    crate::transfer::insert_received(
+                    // Nos lo acaba de mandar: obviamente lo tiene. Es lo que
+                    // después permite liberar este archivo sin arriesgar nada.
+                    let _ = crate::scope::note_replicas(&conn, peer_uid, &[hash.clone()]);
+                    // Un fallo dando de alta ESTE archivo no puede cortar la
+                    // sesión: el `?` hacía que un solo track problemático
+                    // volteara el sync entero, que se reintentaba solo y volvía
+                    // a voltearse. Se registra y sigue con el próximo.
+                    if let Err(e) = crate::transfer::insert_received(
                         &conn,
                         &got.path,
                         &track_uid,
@@ -369,10 +397,14 @@ fn serve_requests(handle: &AppHandle, sess: &mut Session, peer_uid: &str) -> Res
                         duration_ms,
                         bpm,
                         updated_at,
-                    )?;
+                    ) {
+                        log::warn!("[sync] no se pudo dar de alta {filename}: {e}");
+                    }
                 }
                 log::info!("[sync] recibido {filename} ({} bytes)", got.bytes);
-                let _ = handle.emit("library-changed", ());
+                // Sin forzar: en una tanda de archivos, una recarga completa
+                // de la biblioteca por archivo deja la UI inservible.
+                emit_library_changed(handle, false);
             }
             // Cambios de organización que nos manda el otro lado.
             Msg::MetaPush { changes } => {
@@ -381,7 +413,7 @@ fn serve_requests(handle: &AppHandle, sess: &mut Session, peer_uid: &str) -> Res
                     let music_dir = state.music_dir.clone();
                     let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
                     let policy = delete_policy(&conn, peer_uid);
-                    crate::merge::apply(&conn, &changes, &music_dir, policy)?
+                    crate::merge::apply(&conn, &changes, &music_dir, policy, peer_uid)?
                 };
                 if applied.total() > 0 {
                     log::info!(
@@ -390,7 +422,13 @@ fn serve_requests(handle: &AppHandle, sess: &mut Session, peer_uid: &str) -> Res
                         applied.playlists,
                         applied.memberships
                     );
-                    let _ = handle.emit("library-changed", ());
+                    emit_library_changed(handle, true);
+                }
+                // El scope de este dispositivo lo pudo haber cambiado el otro:
+                // si volvió a marcar una playlist, lo liberado se recupera de
+                // la papelera antes de que nadie lo pida por la red.
+                if applied.scope > 0 {
+                    restore_local(handle);
                 }
                 sess.send(&Msg::MetaAck { applied })?;
             }
@@ -400,11 +438,22 @@ fn serve_requests(handle: &AppHandle, sess: &mut Session, peer_uid: &str) -> Res
     }
 }
 
-/// El otro lado cerró sin decir nada: un sondeo, o una app que se fue.
+/// El otro lado cerró sin decir nada: un sondeo, una app que se fue, un
+/// celular que se durmió o se cambió de red.
+///
+/// `BrokenPipe` entra acá: es lo que da escribir en un socket que el otro ya
+/// cerró, o sea el final normal de una sesión que se corta. Sin esto salía
+/// como error en la cara del usuario ("broken pipe"), que no significa nada
+/// para quien lo lee y encima suena a que se rompió algo.
 fn is_disconnect(e: &anyhow::Error) -> bool {
     use std::io::ErrorKind::*;
     e.downcast_ref::<std::io::Error>()
-        .map(|io| matches!(io.kind(), UnexpectedEof | ConnectionReset | ConnectionAborted))
+        .map(|io| {
+            matches!(
+                io.kind(),
+                UnexpectedEof | ConnectionReset | ConnectionAborted | BrokenPipe | NotConnected
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -750,10 +799,14 @@ fn open_session(handle: &AppHandle, uid: &str) -> Result<Session> {
 /// Pide el inventario del otro lado y calcula el plan. Devuelve también el
 /// manifest remoto: la transferencia necesita la metadata de cada track para
 /// dar de alta lo que reciba con el uid del otro dispositivo.
+/// Devuelve además la dirección efectiva: qué se puede traer y qué se puede
+/// mandar, resuelto con lo que dice CADA dispositivo de sí mismo (`takes`,
+/// `gives`). No se negocia por la red — las dos filas viajan replicadas en el
+/// manifest, así que los dos lados llegan solos a la misma conclusión.
 fn fetch_plan(
     handle: &AppHandle,
     sess: &mut Session,
-) -> Result<(crate::manifest::Plan, crate::manifest::Manifest)> {
+) -> Result<(crate::manifest::Plan, crate::manifest::Manifest, (bool, bool))> {
     sess.send(&Msg::ManifestReq)?;
     let remote = match sess.recv()? {
         Msg::ManifestData { manifest } => *manifest,
@@ -762,14 +815,54 @@ fn fetch_plan(
     let local = {
         let state = handle.state::<AppState>();
         let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
+        // Quién tiene qué archivo. Es lo único que después permite liberar
+        // espacio sin arriesgar la última copia (ver `scope::evictable`).
+        let hashes: Vec<String> = remote
+            .tracks
+            .iter()
+            .filter(|t| t.present)
+            .filter_map(|t| t.hash.clone())
+            .collect();
+        crate::scope::note_replicas(&conn, &remote.device_uid, &hashes)?;
         crate::manifest::build(&conn)?
     };
-    Ok((crate::manifest::plan(&local, &remote), remote))
+    let dir = crate::scope::link_from(
+        &local.device_uid,
+        &remote.device_uid,
+        &local.device_sync,
+        &remote.device_sync,
+    );
+    Ok((crate::manifest::plan(&local, &remote), remote, dir))
+}
+
+/// Recorta el plan a lo que la dirección de los dos dispositivos permite. El
+/// plan puro dice qué falta; esto dice qué de eso se va a hacer de verdad, que
+/// es lo que hay que mostrar antes de apretar Sync.
+///
+/// Archivos y organización van juntos: si un dispositivo no manda, no manda
+/// nada — mover playlists sin los archivos, o al revés, deja las dos
+/// bibliotecas describiendo cosas distintas.
+fn restrict(plan: &mut crate::manifest::Plan, (takes, gives): (bool, bool)) {
+    if !takes {
+        plan.pull_files.clear();
+        plan.pull_meta = 0;
+        plan.pull_playlists = 0;
+        plan.pull_memberships = 0;
+        plan.deletes_in = 0;
+    }
+    if !gives {
+        plan.push_files.clear();
+        plan.push_meta = 0;
+        plan.push_playlists = 0;
+        plan.push_memberships = 0;
+        plan.deletes_out = 0;
+    }
 }
 
 fn preview_inner(handle: &AppHandle, uid: &str) -> Result<crate::manifest::Plan> {
     let mut sess = open_session(handle, uid)?;
-    let (plan, _) = fetch_plan(handle, &mut sess)?;
+    let (mut plan, _, dir) = fetch_plan(handle, &mut sess)?;
+    restrict(&mut plan, dir);
     let _ = sess.send(&Msg::Bye);
     Ok(plan)
 }
@@ -801,6 +894,10 @@ struct SyncDoneEvent {
     /// entre los dos lados. Sin esto, un sync que sólo movió playlists
     /// reportaría "nada que transferir", que es falso.
     organized: usize,
+    /// Borrados entrantes que quedaron esperando confirmación (política
+    /// `ask`). Sin esto, un borrado protegido desaparecía sin dejar rastro
+    /// hasta que alguien abriera la pantalla de Sync.
+    queued: usize,
     /// Lo disparó el sync automático, no el usuario. La UI no avisa de los
     /// automáticos que no hicieron nada: serían un cartel cada pocos minutos.
     auto: bool,
@@ -830,7 +927,7 @@ fn run_sync(handle: AppHandle, uid: String, auto: bool) {
         };
         let name = peer_name(&handle, &uid);
         match sync_inner(&handle, &uid) {
-            Ok(SyncResult { received, sent, failed, bytes, organized }) => {
+            Ok(SyncResult { received, sent, failed, bytes, organized, queued }) => {
                 log::info!(
                     "[sync] {name}: {received} recibidos, {sent} enviados, {failed} fallados, {organized} de organización"
                 );
@@ -844,14 +941,30 @@ fn run_sync(handle: AppHandle, uid: String, auto: bool) {
                         failed,
                         bytes,
                         organized,
+                        queued,
                         auto,
                         error: None,
                     },
                 );
-                let _ = handle.emit("library-changed", ());
+                // Fin de la corrida: acá sí, siempre.
+                emit_library_changed(&handle, true);
             }
             Err(e) => {
                 log::warn!("[sync] {name} fallo: {e}");
+                // Que se corte la conexión no es una falla que valga un cartel:
+                // el celular se durmió, cambió de red, o se cerró la app del
+                // otro lado. El sync automático lo reintenta solo. Se avisa
+                // igual cuando el sync lo pidió una persona, que está mirando.
+                let cut = is_disconnect(&e);
+                let error = if cut {
+                    if auto {
+                        None
+                    } else {
+                        Some("connection lost".to_string())
+                    }
+                } else {
+                    Some(e.to_string())
+                };
                 let _ = handle.emit(
                     "sync-done",
                     SyncDoneEvent {
@@ -862,8 +975,9 @@ fn run_sync(handle: AppHandle, uid: String, auto: bool) {
                         failed: 0,
                         bytes: 0,
                         organized: 0,
+                        queued: 0,
                         auto,
-                        error: Some(e.to_string()),
+                        error,
                     },
                 );
             }
@@ -877,12 +991,46 @@ struct SyncResult {
     failed: usize,
     bytes: u64,
     organized: usize,
+    queued: usize,
 }
 
 fn sync_inner(handle: &AppHandle, uid: &str) -> Result<SyncResult> {
+    // Un sync que tarda es tres cosas distintas —inventario, archivos,
+    // organización— y sin medirlas por separado no hay forma de saber cuál es.
+    let started = std::time::Instant::now();
     let mut sess = open_session(handle, uid)?;
-    let (plan, remote) = fetch_plan(handle, &mut sess)?;
+    // Antes de planificar: lo que volvió al scope y sigue en la papelera se
+    // recupera de acá, no se pide por la red. Si no, re-marcar una playlist
+    // recién liberada bajaba de nuevo gigabytes que estaban a un rename de
+    // distancia.
+    restore_local(handle);
+    let (mut plan, remote, dir) = fetch_plan(handle, &mut sess)?;
+    // La dirección se resuelve acá, no en `plan()`: el plan describe qué falta
+    // entre las dos bibliotecas, la dirección describe qué se hace con eso.
+    restrict(&mut plan, dir);
+
+    // El cambio de scope pudo haberlo hecho el OTRO dispositivo, y recién
+    // aparece ahora, en su manifest. Aplicarlo antes de transferir —y rescatar
+    // de la papelera lo que vuelve a entrar— es lo que evita bajar de nuevo
+    // por la red gigabytes que están a un `rename` de distancia. Si no, se
+    // aplicaría después del bucle de archivos, o sea tarde.
+    if !plan.pull_files.is_empty() {
+        apply_remote_scope(handle, &remote)?;
+        // Sólo si algo volvió de verdad: rearmar el manifest local es recorrer
+        // la biblioteca entera, y hacerlo en cada sync "por las dudas" es caro
+        // al pedo — sobre todo en el celular.
+        if restore_local(handle) > 0 {
+            let local = {
+                let state = handle.state::<AppState>();
+                let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
+                crate::manifest::build(&conn)?
+            };
+            plan = crate::manifest::plan(&local, &remote);
+            restrict(&mut plan, dir);
+        }
+    }
     let music_dir = handle.state::<AppState>().music_dir.clone();
+    let after_plan = started.elapsed();
 
     let total_files = plan.pull_files.len() + plan.push_files.len();
     let (mut received, mut sent, mut failed, mut bytes) = (0usize, 0usize, 0usize, 0u64);
@@ -989,6 +1137,15 @@ fn sync_inner(handle: &AppHandle, uid: &str) -> Result<SyncResult> {
             Ok(()) => {
                 bytes += f.size as u64;
                 sent += 1;
+                // Ahora el archivo vive también allá: cuenta como respaldo
+                // para poder liberar espacio acá.
+                let state = handle.state::<AppState>();
+                // El guard va a una variable propia: como binding del `if let`
+                // sería un temporario que vive más que `state`, y no compila.
+                let db = state.db.lock();
+                if let Ok(conn) = db {
+                    let _ = crate::scope::note_replicas(&conn, uid, &[f.hash.clone()]);
+                }
             }
             Err(e) => {
                 log::warn!("[sync] no se pudo mandar {}: {e}", f.filename);
@@ -1010,15 +1167,31 @@ fn sync_inner(handle: &AppHandle, uid: &str) -> Result<SyncResult> {
         let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
         crate::manifest::build(&conn)?
     };
-    let mine = crate::merge::changes_for_peer(&local, &remote);
-    let theirs = crate::merge::changes_for_peer(&remote, &local);
+    // Con la dirección de metadata cortada el intercambio igual ocurre, vacío:
+    // el ida y vuelta MetaPush/MetaAck es la forma del protocolo, y saltearlo
+    // dejaría la sesión esperando un mensaje que no llega.
+    let after_files = started.elapsed();
+    let (takes, gives) = dir;
+    let mine = if gives {
+        crate::merge::changes_for_peer(&local, &remote)
+    } else {
+        crate::merge::Changes::default()
+    };
+    let theirs = if takes {
+        crate::merge::changes_for_peer(&remote, &local)
+    } else {
+        crate::merge::Changes::default()
+    };
 
     let applied_here = {
         let state = handle.state::<AppState>();
         let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
         let policy = delete_policy(&conn, uid);
-        crate::merge::apply(&conn, &theirs, &music_dir, policy)?
+        crate::merge::apply(&conn, &theirs, &music_dir, policy, uid)?
     };
+    if applied_here.scope > 0 {
+        restore_local(handle);
+    }
     sess.send(&Msg::MetaPush {
         changes: Box::new(mine),
     })?;
@@ -1051,12 +1224,44 @@ fn sync_inner(handle: &AppHandle, uid: &str) -> Result<SyncResult> {
     }
 
     let _ = sess.send(&Msg::Bye);
+    let total = started.elapsed();
+    log::info!(
+        "[sync] tiempos: inventario {} ms, {total_files} archivo(s) {} ms, organización {} ms, total {} ms",
+        after_plan.as_millis(),
+        (after_files - after_plan).as_millis(),
+        (total - after_files).as_millis(),
+        total.as_millis()
+    );
+
+    // Historial legible por dispositivo (lo muestra la pantalla de Sync). Sólo
+    // las corridas que hicieron algo: una línea por sync automático vacío cada
+    // pocos minutos no es historial, es ruido.
+    if received + sent + failed + applied_here.total() + applied_there.total() > 0 {
+        let state = handle.state::<AppState>();
+        let db = state.db.lock();
+        if let Ok(conn) = db {
+            let _ = conn.execute(
+                "INSERT INTO sync_log (ts, peer, kind, detail) VALUES (?1, ?2, 'sync', ?3)",
+                rusqlite::params![
+                    db::now_ms(),
+                    uid,
+                    format!(
+                        "{received} in, {sent} out, {} organized{}",
+                        applied_here.total() + applied_there.total(),
+                        if failed > 0 { format!(", {failed} failed") } else { String::new() }
+                    )
+                ],
+            );
+        }
+    }
+
     Ok(SyncResult {
         received,
         sent,
         failed,
         bytes,
         organized: applied_here.total() + applied_there.total(),
+        queued: applied_here.queued,
     })
 }
 
@@ -1092,6 +1297,69 @@ fn local_track(
         },
     )
     .ok()
+}
+
+/// Aplica las filas de scope del manifest del otro lado (LWW). Es el mismo
+/// merge que hace `merge::apply` más tarde; acá va antes porque el scope
+/// decide qué se transfiere en esta misma corrida.
+fn apply_remote_scope(handle: &AppHandle, remote: &crate::manifest::Manifest) -> Result<()> {
+    let state = handle.state::<AppState>();
+    let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
+    for e in &remote.scopes {
+        crate::scope::apply_entry(&conn, e)?;
+    }
+    for m in &remote.device_sync {
+        crate::scope::apply_device_sync(&conn, m)?;
+    }
+    Ok(())
+}
+
+/// Recupera de la papelera lo que haya vuelto a entrar en el scope de este
+/// dispositivo. Best-effort: si falla, el archivo se vuelve a bajar por la red
+/// y no se pierde nada.
+/// El hash se calcula **con el lock soltado**: hashear la papelera puede
+/// tardar segundos, y sostener el mutex mientras tanto congela la UI entera —
+/// cada `list_tracks` del frontend se queda esperando. Sólo las dos puntas
+/// (buscar candidatos, aplicar) tocan la DB, y las dos son baratas.
+pub fn restore_local(handle: &AppHandle) -> usize {
+    let state = handle.state::<AppState>();
+    let music_dir = state.music_dir.clone();
+
+    let candidates = {
+        let db = state.db.lock();
+        let Ok(conn) = db else { return 0 };
+        match crate::scope::restorable(&conn) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("[scope] no se pudo listar lo recuperable: {e}");
+                return 0;
+            }
+        }
+    };
+    if candidates.is_empty() {
+        return 0;
+    }
+
+    let found = crate::scope::find_in_trash(&music_dir, &candidates);
+    if found.is_empty() {
+        return 0;
+    }
+
+    let n = {
+        let db = state.db.lock();
+        let Ok(conn) = db else { return 0 };
+        match crate::scope::finish_restore(&conn, &music_dir, &found, &|p| state.expect_path(p)) {
+            Ok(n) => n,
+            Err(e) => {
+                log::warn!("[scope] recuperar de la papelera falló: {e}");
+                return 0;
+            }
+        }
+    };
+    if n > 0 {
+        emit_library_changed(handle, true);
+    }
+    n
 }
 
 /// Qué hacer con los borrados que manda ESTE peer. Se evalúa del lado que

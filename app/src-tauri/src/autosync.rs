@@ -34,6 +34,17 @@ const QUIET_PERIOD_MS: i64 = 500;
 const PERIODIC: Duration = Duration::from_secs(10 * 60);
 /// Sumado al respiro, es el techo de lo que tarda en arrancar un sync.
 const TICK: Duration = Duration::from_millis(250);
+/// Cada cuánto se reintenta cuando hay un cambio para propagar pero no hay
+/// ningún dispositivo disponible.
+///
+/// Sin esto, lo pendiente **no se limpia** (a propósito: un cambio hecho con
+/// el celular apagado tiene que viajar cuando vuelva), así que el bucle se
+/// daba por despierto en cada tick: cuatro veces por segundo tomaba el lock de
+/// la DB para listar dispositivos, escribía una línea de log, y volvía a
+/// empezar — para nada. Contra el mismo lock que necesita la UI. Y si el peer
+/// estaba marcado offline, el cambio recién salía en la red de contención de
+/// 10 minutos.
+const RETRY_WHEN_ALONE: Duration = Duration::from_secs(15);
 
 #[derive(Default)]
 pub struct AutoSync {
@@ -84,7 +95,13 @@ pub fn note_change(handle: &AppHandle) {
     handle.state::<AppState>().autosync.note_change();
 }
 
-/// Un dispositivo vinculado volvió a estar disponible: ponerse al día.
+/// Un dispositivo volvió a estar disponible: ponerse al día.
+///
+/// Se llama desde dos lados, porque ninguno cubre al otro: el sondeo TCP ve
+/// al que estaba offline y volvió, y el descubrimiento ve al que apareció en
+/// la red por primera vez (ese nace `online`, así que no hay transición que
+/// sondear). Filtra los no vinculados acá para que ninguno de los dos tenga
+/// que acordarse.
 pub fn peer_came_online(handle: &AppHandle, uid: &str) {
     let state = handle.state::<AppState>();
     {
@@ -93,20 +110,29 @@ pub fn peer_came_online(handle: &AppHandle, uid: &str) {
         if !enabled(&conn) {
             return;
         }
+        let paired = conn
+            .query_row("SELECT 1 FROM devices WHERE uid = ?1", [uid], |_| Ok(()))
+            .is_ok();
+        if !paired {
+            return;
+        }
     }
-    log::info!("[autosync] {uid} volvió a estar disponible");
+    log::info!("[autosync] {uid} está disponible: poniéndose al día");
     crate::pairing::sync_files_auto(handle.clone(), uid.to_string());
 }
 
 pub fn spawn(handle: AppHandle) {
     std::thread::spawn(move || {
         let mut since_periodic = std::time::Instant::now();
+        // Antes de este momento no se vuelve a intentar propagar. Sólo se
+        // mueve cuando un intento no encontró a nadie.
+        let mut next_try = std::time::Instant::now();
         loop {
             std::thread::sleep(TICK);
             let state = handle.state::<AppState>();
 
             let due_periodic = since_periodic.elapsed() >= PERIODIC;
-            let due_change = state.autosync.is_settled();
+            let due_change = state.autosync.is_settled() && std::time::Instant::now() >= next_try;
             if !due_periodic && !due_change {
                 continue;
             }
@@ -135,12 +161,27 @@ pub fn spawn(handle: AppHandle) {
             if peers.is_empty() {
                 // No se limpia lo pendiente: un cambio hecho con el otro
                 // dispositivo apagado tiene que viajar cuando vuelva, no
-                // perderse acá.
-                log::info!(
-                    "[autosync] hay cambios para propagar pero ningun dispositivo vinculado esta disponible"
-                );
+                // perderse acá. Pero se espera antes de volver a mirar, o esto
+                // es un bucle ocupado contra el lock de la DB.
+                next_try = std::time::Instant::now() + RETRY_WHEN_ALONE;
+                // Distinguir los dos casos: acá se llega tanto con algo
+                // pendiente como en la pasada periódica sin nada que hacer, y
+                // decir siempre "hay cambios para propagar" hace perder tiempo
+                // leyendo el log.
+                if due_change {
+                    log::info!(
+                        "[autosync] hay cambios para propagar pero ningun dispositivo vinculado esta disponible"
+                    );
+                } else {
+                    log::debug!("[autosync] ningun dispositivo vinculado disponible");
+                }
+                // Puede estar marcado offline por un sondeo viejo: preguntar de
+                // nuevo ahora en vez de esperar la red de contención.
+                let h = handle.clone();
+                std::thread::spawn(move || crate::discovery::probe_once(&h));
                 continue;
             }
+            next_try = std::time::Instant::now();
             if due_change {
                 state.autosync.clear();
                 log::info!("[autosync] cambios locales -> {} dispositivo(s)", peers.len());

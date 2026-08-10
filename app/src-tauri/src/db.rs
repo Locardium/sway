@@ -13,6 +13,19 @@ pub struct Track {
     pub genre: String,
     pub duration_ms: i64,
     pub bpm: Option<i64>,
+    /// El archivo esta en este dispositivo. `false` = la fila quedo pero el
+    /// blob se evacuo por sync selectiva (Fase 5.7), o todavia no se bajo.
+    pub present: bool,
+    /// Entra en lo que este dispositivo sincroniza. `false` = su playlist no
+    /// esta marcada: el archivo que ya esta no se toca, pero no se va a bajar
+    /// ni a actualizar. Lo completa el comando, no la query — depende del
+    /// scope, no de la fila.
+    ///
+    /// Junto con `present` decide como se ve: fuera de scope y con archivo se
+    /// muestra apagado y no suena; fuera de scope y sin archivo desaparece de
+    /// la vista principal (ya se libero el espacio).
+    pub in_scope: bool,
+    pub uid: Option<String>,
 }
 
 const SCHEMA: &str = "
@@ -100,8 +113,16 @@ CREATE TABLE IF NOT EXISTS app_settings (
 );
 
 -- ---------------------------------------------------------------------------
--- Fase 5: sync P2P. Estas tablas nunca se sincronizan a si mismas — describen
--- con quien sincroniza ESTE dispositivo y bajo que reglas.
+-- Fase 5: sync P2P.
+--
+-- `devices`, `sync_policy`, `pending_deletes` y `delete_ignores` son LOCALES:
+-- describen con quien sincroniza ESTE dispositivo y bajo que reglas. La
+-- politica de borrados en particular PROTEGE a este dispositivo; si se pudiera
+-- cambiar desde el otro lado no protegeria de nada.
+--
+-- `device_scope` y `sync_scope` en cambio SI se replican (Fase 5.7): el scope
+-- describe un deseo (quiero estas playlists en el celular), no una regla de
+-- seguridad, y se edita desde cualquier dispositivo.
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS devices (
@@ -114,22 +135,79 @@ CREATE TABLE IF NOT EXISTS devices (
     last_sync_at INTEGER             -- corte del manifest incremental
 );
 
+-- Lo unico de a pares y local que queda: que hago con los borrados que me
+-- manda ESE dispositivo. La direccion se mudo a `device_sync` (es una
+-- propiedad del dispositivo, no del vinculo).
 CREATE TABLE IF NOT EXISTS sync_policy (
     device_uid TEXT PRIMARY KEY REFERENCES devices(uid) ON DELETE CASCADE,
-    files      TEXT NOT NULL DEFAULT 'both',   -- push|pull|both|off
-    metadata   TEXT NOT NULL DEFAULT 'both',
     -- Se evalua del lado que RECIBE el tombstone: 'propagate' aplica el
     -- borrado, 'ask' lo encola para que el usuario confirme, 'ignore' lo
     -- descarta. Poner 'ask' en la PC principal la protege de un borrado
     -- hecho en otro dispositivo sin bloquear el resto del sync.
-    deletes    TEXT NOT NULL DEFAULT 'propagate',
-    scope      TEXT NOT NULL DEFAULT 'all'     -- all|selected
+    deletes    TEXT NOT NULL DEFAULT 'propagate'
 );
 
+-- Preferencias de sync de CADA dispositivo (incluido este). Replicadas, LWW
+-- por `updated_at`. Vive aparte de `sync_policy` a proposito: la politica es
+-- de a pares y local (que hago yo con lo que me manda ese), esto es una
+-- propiedad del dispositivo (que hace, y que playlists viven ahi) y la misma
+-- respuesta vale para todos los que la miren.
+--
+--   `direction`  que hace ESE dispositivo: manda, recibe, las dos, o nada.
+--                Entre dos dispositivos, A -> B pasa solo si A manda Y B
+--                recibe. No hace falta negociar nada por la red: los dos
+--                lados leen las mismas dos filas.
+--   `mode`       'all' o 'selected' (ver sync_scope).
+CREATE TABLE IF NOT EXISTS device_sync (
+    device_uid TEXT PRIMARY KEY,
+    mode       TEXT NOT NULL DEFAULT 'all',    -- all|selected
+    direction  TEXT NOT NULL DEFAULT 'both',   -- both|send|receive|off
+    updated_at INTEGER NOT NULL DEFAULT 0
+);
+
+-- Que playlists/carpetas quiere cada dispositivo. Replicada, LWW por fila.
+--
+-- Desmarcar NO borra la fila: la deja con `selected = 0`. Con la fila borrada,
+-- la union del merge la volveria a traer del otro lado en el proximo sync y
+-- desmarcar no se pegaria nunca.
 CREATE TABLE IF NOT EXISTS sync_scope (
     device_uid   TEXT NOT NULL,
     playlist_uid TEXT NOT NULL,
+    selected     INTEGER NOT NULL DEFAULT 1,
+    updated_at   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (device_uid, playlist_uid)
+);
+
+-- Que dispositivos tienen (o tenian) cada blob. Es lo unico que permite
+-- liberar espacio sin arriesgar la ultima copia: un archivo fuera de scope
+-- solo se evacua si consta que vive en otro lado.
+CREATE TABLE IF NOT EXISTS blob_replicas (
+    hash       TEXT NOT NULL,
+    device_uid TEXT NOT NULL,
+    seen_at    INTEGER NOT NULL,
+    PRIMARY KEY (hash, device_uid)
+);
+
+-- Borrados entrantes esperando confirmacion (politica `deletes = 'ask'`).
+-- Local: es la cola de este dispositivo.
+CREATE TABLE IF NOT EXISTS pending_deletes (
+    id         INTEGER PRIMARY KEY,
+    entity     TEXT NOT NULL,
+    uid        TEXT NOT NULL,
+    deleted_at INTEGER NOT NULL,
+    peer_uid   TEXT NOT NULL DEFAULT '',
+    label      TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    UNIQUE (entity, uid)
+);
+
+-- Borrados que el usuario rechazo. Sin esto, el tombstone del otro lado
+-- vuelve en cada sync y la cola pregunta lo mismo para siempre.
+CREATE TABLE IF NOT EXISTS delete_ignores (
+    entity     TEXT NOT NULL,
+    uid        TEXT NOT NULL,
+    decided_at INTEGER NOT NULL,
+    PRIMARY KEY (entity, uid)
 );
 
 -- Un borrado sin tombstone es un borrado que el proximo sync deshace: el otro
@@ -175,6 +253,15 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     migrate(conn)
 }
 
+fn has_table(conn: &Connection, table: &str) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [table],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let mut rows = stmt.query([])?;
@@ -217,20 +304,46 @@ fn migrate(conn: &Connection) -> Result<()> {
         ("playlists", "uid TEXT"),
         ("playlists", "updated_at INTEGER NOT NULL DEFAULT 0"),
         ("playlist_tracks", "added_at INTEGER NOT NULL DEFAULT 0"),
+        // Fase 5.7: el scope pasa a ser dato replicado. En una base de 5.0-5.6
+        // la tabla existe con dos columnas y ninguna fila util.
+        ("sync_scope", "selected INTEGER NOT NULL DEFAULT 1"),
+        ("sync_scope", "updated_at INTEGER NOT NULL DEFAULT 0"),
     ];
     for (table, decl) in added {
+        // Una tabla que todavia no existe no necesita migracion: la crea
+        // SCHEMA. `migrate` tambien corre sola en los tests sobre bases
+        // armadas a mano, y ahi puede faltar.
+        if !has_table(conn, table)? {
+            continue;
+        }
         let name = decl.split(' ').next().unwrap_or_default();
         if !has_column(conn, table, name)? {
             conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {decl}"))?;
         }
     }
+    // `device_scope` se llamaba asi cuando solo guardaba el scope; ahora
+    // guarda tambien la direccion, que no es scope. Se copia y se tira.
+    if has_table(conn, "device_scope")? {
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO device_sync (device_uid, mode, direction, updated_at)
+                SELECT device_uid, mode, 'both', updated_at FROM device_scope;
+             DROP TABLE device_scope;",
+        )?;
+    }
+
     // Los indices unicos de uid van despues del ALTER (SCHEMA corre antes que
     // exista la columna en una base vieja, asi que ese CREATE INDEX falla y se
     // saltea; aca ya se puede).
     conn.execute_batch(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_tracks_uid ON tracks(uid) WHERE uid IS NOT NULL;
          CREATE INDEX IF NOT EXISTS idx_tracks_hash ON tracks(content_hash);
-         CREATE UNIQUE INDEX IF NOT EXISTS idx_playlists_uid ON playlists(uid) WHERE uid IS NOT NULL;",
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_playlists_uid ON playlists(uid) WHERE uid IS NOT NULL;
+         -- La PK de playlist_tracks es (playlist_id, track_id): sirve para ir
+         -- de una playlist a sus temas, no al reves. Todo lo del scope va al
+         -- reves —de un tema a las playlists que lo contienen— y sin esto cada
+         -- una de esas consultas escanea la tabla entera.
+         CREATE INDEX IF NOT EXISTS idx_playlist_tracks_track ON playlist_tracks(track_id);
+         CREATE INDEX IF NOT EXISTS idx_tracks_state ON tracks(local_state);",
     )?;
     assign_missing_uids(conn)?;
     // Las membresias que ya estaban se fechan AHORA, no en 0: si quedaran en
@@ -305,7 +418,7 @@ fn backfill_ranks(conn: &Connection, table: &str, group_by: &str) -> Result<()> 
 
 pub fn list_tracks(conn: &Connection) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
-        "SELECT id, path, title, artist, album, genre, duration_ms, bpm
+        "SELECT id, path, title, artist, album, genre, duration_ms, bpm, local_state, uid
          FROM tracks ORDER BY artist, album, title",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -318,6 +431,9 @@ pub fn list_tracks(conn: &Connection) -> Result<Vec<Track>> {
             genre: r.get(5)?,
             duration_ms: r.get(6)?,
             bpm: r.get(7)?,
+            present: r.get::<_, String>(8)? == "present",
+            uid: r.get(9)?,
+            in_scope: true,
         })
     })?;
     rows.collect()
@@ -456,6 +572,9 @@ pub fn set_auto_sync_xml(conn: &Connection, enabled: bool) -> Result<()> {
 #[serde(rename_all = "camelCase")]
 pub struct PlaylistNode {
     pub id: i64,
+    /// Identidad compartida entre dispositivos. La necesita el editor de scope
+    /// (Fase 5.7): el `id` INTEGER es local y no significa nada del otro lado.
+    pub uid: Option<String>,
     pub name: String,
     pub kind: String, // 'folder' | 'playlist'
     pub parent_id: Option<i64>,
@@ -463,23 +582,58 @@ pub struct PlaylistNode {
     /// ordena por este numero; el rank en si no sale de Rust.
     pub position: i64,
     pub track_count: i64,
+    /// De cuantos de esos tracks hay archivo en este dispositivo. Es lo que se
+    /// ve al abrir una playlist desmarcada: mientras el archivo este, el tema
+    /// se muestra apagado, sin importar por que sigue estando.
+    pub present_count: i64,
+    /// Cuantos de esos tracks siguen ocupando lugar POR ESTA playlist: tienen
+    /// archivo aca y no entran en el scope de este dispositivo. Es lo que separa
+    /// "desmarcada pero todavia ocupa lugar" (sigue en el arbol, apagada) de
+    /// "desmarcada y ya liberada" (desaparece).
+    ///
+    /// Distinto de `present_count` a proposito: un tema que ademas esta en una
+    /// playlist marcada se sigue VIENDO aca, pero no cuenta para decidir si esta
+    /// playlist sigue existiendo. Su archivo lo sostiene la otra, asi que esta
+    /// no lo va a soltar nunca y contarlo la dejaba visible para siempre.
+    ///
+    /// Lo completa el comando, no la query — depende del scope.
+    pub stranded_count: i64,
+    /// Esta playlist entra en lo que este dispositivo sincroniza. Lo completa
+    /// el comando, no la query — depende del scope, no de la fila.
+    pub in_scope: bool,
 }
 
 pub fn list_playlists(conn: &Connection) -> Result<Vec<PlaylistNode>> {
     let mut stmt = conn.prepare(
-        "SELECT p.id, p.name, p.kind, p.parent_id,
-                (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id)
+        // Los dos conteos salen de UNA pasada agrupada, no de dos subconsultas
+        // correlacionadas por fila: asi eran 2N recorridos de playlist_tracks
+        // por cada refresco del arbol, y el arbol se refresca en cada cambio de
+        // la biblioteca.
+        "SELECT p.id, p.uid, p.name, p.kind, p.parent_id,
+                COALESCE(c.total, 0), COALESCE(c.presentes, 0)
          FROM playlists p
+         LEFT JOIN (
+             SELECT pt.playlist_id AS pid,
+                    COUNT(*) AS total,
+                    COUNT(CASE WHEN t.local_state = 'present' THEN 1 END) AS presentes
+               FROM playlist_tracks pt
+               JOIN tracks t ON t.id = pt.track_id
+              GROUP BY pt.playlist_id
+         ) c ON c.pid = p.id
          ORDER BY p.parent_id, p.rank",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok(PlaylistNode {
             id: r.get(0)?,
-            name: r.get(1)?,
-            kind: r.get(2)?,
-            parent_id: r.get(3)?,
+            uid: r.get(1)?,
+            name: r.get(2)?,
+            kind: r.get(3)?,
+            parent_id: r.get(4)?,
             position: 0,
-            track_count: r.get(4)?,
+            track_count: r.get(5)?,
+            present_count: r.get(6)?,
+            stranded_count: 0,
+            in_scope: true,
         })
     })?;
     let mut nodes: Vec<PlaylistNode> = rows.collect::<Result<_>>()?;
@@ -638,7 +792,8 @@ pub fn track_playlists(conn: &Connection, track_id: i64) -> Result<Vec<i64>> {
 
 pub fn playlist_tracks(conn: &Connection, playlist_id: i64) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.path, t.title, t.artist, t.album, t.genre, t.duration_ms, t.bpm
+        "SELECT t.id, t.path, t.title, t.artist, t.album, t.genre, t.duration_ms, t.bpm,
+                t.local_state, t.uid
          FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id
          WHERE pt.playlist_id = ?1
          ORDER BY pt.rank",
@@ -653,6 +808,9 @@ pub fn playlist_tracks(conn: &Connection, playlist_id: i64) -> Result<Vec<Track>
             genre: r.get(5)?,
             duration_ms: r.get(6)?,
             bpm: r.get(7)?,
+            present: r.get::<_, String>(8)? == "present",
+            uid: r.get(9)?,
+            in_scope: true,
         })
     })?;
     rows.collect()

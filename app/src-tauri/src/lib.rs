@@ -11,6 +11,7 @@ mod manifest;
 mod merge;
 mod pairing;
 mod rank;
+mod scope;
 mod transfer;
 mod trash;
 mod wire;
@@ -163,10 +164,44 @@ fn import_folder(app: AppHandle, state: State<AppState>, folder: String) -> Resu
     Ok(n)
 }
 
+/// Avisa cuando algo que corre con el lock de la DB tomado tardó lo suficiente
+/// como para que se note en la pantalla. Sin esto, "se traba un segundo" es
+/// imposible de atribuir: en cada refresco corren tres consultas distintas y
+/// cualquiera de las tres puede ser la cara.
+fn timed<T>(what: &str, f: impl FnOnce() -> T) -> T {
+    let t0 = std::time::Instant::now();
+    let out = f();
+    let ms = t0.elapsed().as_millis();
+    if ms >= 120 {
+        log::info!("[perf] {what}: {ms} ms");
+    }
+    out
+}
+
 #[tauri::command]
 fn list_tracks(state: State<AppState>) -> Result<Vec<db::Track>, String> {
     let conn = state.db.lock().unwrap();
-    db::list_tracks(&conn).map_err(|e| e.to_string())
+    timed("list_tracks", || {
+        let mut tracks = db::list_tracks(&conn).map_err(|e| e.to_string())?;
+        timed("  mark_scope", || mark_scope(&conn, &mut tracks));
+        Ok(tracks)
+    })
+}
+
+/// Marca qué tracks entran en lo que este dispositivo sincroniza. La tabla los
+/// muestra atenuados: sin eso, desmarcar una playlist no se nota en ningún
+/// lado hasta que alguien libera espacio.
+fn mark_scope(conn: &Connection, tracks: &mut [db::Track]) {
+    let me = match db::this_device_uid(conn) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let Ok(Some(in_scope)) = scope::scope_tracks(conn, &me) else {
+        return; // scope = todo (o error): queda el default, todo adentro
+    };
+    for t in tracks.iter_mut() {
+        t.in_scope = t.uid.as_deref().map(|u| in_scope.contains(u)).unwrap_or(true);
+    }
 }
 
 #[tauri::command]
@@ -286,7 +321,27 @@ fn reveal_track(state: State<AppState>, id: i64) -> Result<(), String> {
 #[tauri::command]
 fn list_playlists(state: State<AppState>) -> Result<Vec<db::PlaylistNode>, String> {
     let conn = state.db.lock().unwrap();
-    db::list_playlists(&conn).map_err(|e| e.to_string())
+    timed("list_playlists", || {
+        let mut nodes = db::list_playlists(&conn).map_err(|e| e.to_string())?;
+        timed("  mark_playlist_scope", || mark_playlist_scope(&conn, &mut nodes));
+        Ok(nodes)
+    })
+}
+
+/// Marca qué playlists entran en lo que este dispositivo sincroniza. El árbol
+/// de la vista principal apaga las que no y esconde las que además ya se
+/// liberaron; el editor de scope las muestra todas igual, o no habría manera de
+/// volver a marcarlas.
+fn mark_playlist_scope(conn: &Connection, nodes: &mut [db::PlaylistNode]) {
+    let Ok(me) = db::this_device_uid(conn) else { return };
+    let Ok(Some(selected)) = scope::scope_playlists(conn, &me) else {
+        return; // scope = todo (o error): queda el default, todo adentro
+    };
+    let stranded = scope::stranded_counts(conn, &me).unwrap_or_default();
+    for n in nodes.iter_mut() {
+        n.in_scope = n.uid.as_deref().map(|u| selected.contains(u)).unwrap_or(true);
+        n.stranded_count = stranded.get(&n.id).copied().unwrap_or(0);
+    }
 }
 
 #[tauri::command]
@@ -299,7 +354,13 @@ fn create_playlist(
 ) -> Result<i64, String> {
     let id = {
         let conn = state.db.lock().unwrap();
-        db::create_playlist(&conn, &name, &kind, parent_id).map_err(|e| e.to_string())?
+        let id = db::create_playlist(&conn, &name, &kind, parent_id).map_err(|e| e.to_string())?;
+        // La creó el usuario acá: que no se esconda al instante por no estar
+        // marcada. No fallar el comando si esto no sale — la playlist ya existe.
+        if let Err(e) = scope::select_new_local(&conn, id) {
+            log::warn!("[scope] no se pudo marcar la playlist nueva: {e}");
+        }
+        id
     };
     autosync::note_change(&app);
     Ok(id)
@@ -344,7 +405,9 @@ fn move_playlist(
 #[tauri::command]
 fn playlist_tracks(state: State<AppState>, playlist_id: i64) -> Result<Vec<db::Track>, String> {
     let conn = state.db.lock().unwrap();
-    db::playlist_tracks(&conn, playlist_id).map_err(|e| e.to_string())
+    let mut tracks = db::playlist_tracks(&conn, playlist_id).map_err(|e| e.to_string())?;
+    mark_scope(&conn, &mut tracks);
+    Ok(tracks)
 }
 
 #[tauri::command]
@@ -511,6 +574,312 @@ fn unpair_device(app: AppHandle, uid: String) -> Result<(), String> {
     pairing::unpair(&app, &uid).map_err(|e| e.to_string())?;
     let _ = app.emit("peers-changed", ());
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Políticas, scope selectivo y espacio (Fase 5.7)
+// ---------------------------------------------------------------------------
+
+/// Qué hago con los borrados que manda ese dispositivo. Es lo único de a pares
+/// y **local**: protege ESTA biblioteca, así que sólo se edita acá (la
+/// dirección, en cambio, es del dispositivo y se replica — ver `scope.rs`).
+#[tauri::command]
+fn get_delete_policy(state: State<AppState>, uid: String) -> Result<String, String> {
+    let conn = state.db.lock().unwrap();
+    Ok(conn
+        .query_row(
+            "SELECT deletes FROM sync_policy WHERE device_uid = ?1",
+            [&uid],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|_| "propagate".to_string()))
+}
+
+#[tauri::command]
+fn set_delete_policy(state: State<AppState>, uid: String, deletes: String) -> Result<(), String> {
+    let conn = state.db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO sync_policy (device_uid, deletes) VALUES (?1, ?2)
+         ON CONFLICT(device_uid) DO UPDATE SET deletes = excluded.deletes",
+        rusqlite::params![uid, deletes],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScopeView {
+    mode: String,
+    /// both | send | receive | off — qué hace ESE dispositivo.
+    direction: String,
+    /// Uids de playlists/carpetas marcadas a mano. Lo que cuelga de una
+    /// carpeta marcada entra sin figurar acá — el árbol lo resuelve el backend
+    /// (ver `scope::expand`), no la UI.
+    selected: Vec<String>,
+}
+
+#[tauri::command]
+fn get_scope(state: State<AppState>, device_uid: String) -> Result<ScopeView, String> {
+    let conn = state.db.lock().unwrap();
+    let s = scope::get(&conn, &device_uid).map_err(|e| e.to_string())?;
+    let direction = match (s.direction.sends, s.direction.receives) {
+        (true, true) => "both",
+        (true, false) => "send",
+        (false, true) => "receive",
+        (false, false) => "off",
+    };
+    Ok(ScopeView {
+        mode: s.mode.as_str().to_string(),
+        direction: direction.into(),
+        selected: s.selected.into_iter().collect(),
+    })
+}
+
+/// Qué hace un dispositivo: manda, recibe, las dos, o nada. Se edita desde
+/// cualquier lado — es dato replicado, igual que el scope.
+#[tauri::command]
+fn set_scope_direction(
+    app: AppHandle,
+    state: State<AppState>,
+    device_uid: String,
+    direction: String,
+) -> Result<(), String> {
+    {
+        let conn = state.db.lock().unwrap();
+        scope::set_direction(&conn, &device_uid, &direction).map_err(|e| e.to_string())?;
+    }
+    after_scope_change(&app, &device_uid);
+    Ok(())
+}
+
+/// El scope es dato replicado: cambiarlo acá dispara un sync, así que el
+/// dispositivo afectado se entera aunque el cambio se haya hecho en otro.
+#[tauri::command]
+fn set_scope_mode(
+    app: AppHandle,
+    state: State<AppState>,
+    device_uid: String,
+    mode: String,
+) -> Result<(), String> {
+    {
+        let conn = state.db.lock().unwrap();
+        scope::set_mode(&conn, &device_uid, scope::Mode::from_setting(&mode))
+            .map_err(|e| e.to_string())?;
+    }
+    after_scope_change(&app, &device_uid);
+    Ok(())
+}
+
+/// Un cambio de scope tiene dos efectos inmediatos: hay que propagarlo (es
+/// dato replicado) y, si el cambio es del scope de ESTE dispositivo, hay que
+/// rescatar de la papelera lo que acaba de volver a entrar — antes de que el
+/// próximo sync lo pida por la red.
+/// Cuánto se espera, desde el último cambio de scope, antes de hacer lo caro.
+///
+/// La fila se escribe en el acto: son microsegundos y es lo que hace que la
+/// pantalla no mienta. Lo que espera es el after: recargar la biblioteca entera
+/// por IPC, escanear la papelera (que hashea) y despertar el sync. Marcar una
+/// carpeta escribe una fila por playlist de adentro, y hacer ese trabajo por
+/// fila significaba varias recargas completas y varios escaneos peleando por el
+/// mismo lock de SQLite — la pantalla se trababa en cada tilde.
+///
+/// Corto a propósito. La espera larga tenía sentido cuando esto era caro y se
+/// pagaba por fila; ahora un click es una transacción y un after, así que
+/// alargarla sólo demora el refresco de la biblioteca de atrás sin ahorrar
+/// nada. Lo justo para que dos tildes seguidos se junten en un solo refresco.
+const SCOPE_SETTLE_MS: u64 = 400;
+static SCOPE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn after_scope_change(app: &AppHandle, device_uid: &str) {
+    use std::sync::atomic::Ordering;
+    let mine = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock().unwrap();
+        db::this_device_uid(&conn).map(|me| me == device_uid).unwrap_or(false)
+    };
+    let mark = SCOPE_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(SCOPE_SETTLE_MS));
+        // Entró otro click mientras esto dormía: que lo haga el último, una vez.
+        if SCOPE_GEN.load(Ordering::SeqCst) != mark {
+            return;
+        }
+        if mine {
+            // El rescate primero: toma el lock y puede hashear. Emitir antes
+            // largaba a la UI a pedir la biblioteca entera justo contra ese
+            // lock, y las dos cosas se esperaban entre sí.
+            timed("restore_local", || pairing::restore_local(&app));
+            // Marcar o desmarcar cambia qué se ve —qué playlists están en el
+            // árbol, qué temas se muestran y cuáles quedan apagados— y eso sale
+            // de `list_playlists` / `list_tracks`, que la UI no vuelve a pedir
+            // sola. Sin este evento el cambio no se notaba hasta reiniciar.
+            let _ = app.emit("library-changed", ());
+        }
+        autosync::note_change(&app);
+    });
+}
+
+#[tauri::command]
+fn set_scope_playlist(
+    app: AppHandle,
+    state: State<AppState>,
+    device_uid: String,
+    playlist_uid: String,
+    selected: bool,
+) -> Result<(), String> {
+    {
+        let conn = state.db.lock().unwrap();
+        scope::set_playlist(&conn, &device_uid, &playlist_uid, selected)
+            .map_err(|e| e.to_string())?;
+    }
+    after_scope_change(&app, &device_uid);
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScopeChange {
+    uid: String,
+    on: bool,
+}
+
+/// Varias filas de scope de una sola vez.
+///
+/// Marcar una carpeta cambia una fila por playlist de adentro. Mandarlas de a
+/// una era un round trip de IPC, una transacción implícita (o sea un fsync) y
+/// un `after_scope_change` por cada una: con una carpeta grande, el tilde
+/// tardaba en soltar y el siguiente click quedaba esperando. Acá es un viaje,
+/// un commit y un solo after.
+#[tauri::command]
+fn set_scope_playlists(
+    app: AppHandle,
+    state: State<AppState>,
+    device_uid: String,
+    changes: Vec<ScopeChange>,
+) -> Result<(), String> {
+    {
+        let mut conn = state.db.lock().unwrap();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        for c in &changes {
+            scope::set_playlist(&tx, &device_uid, &c.uid, c.on).map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+    }
+    after_scope_change(&app, &device_uid);
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageView {
+    /// Bytes de los archivos que están en este dispositivo.
+    library_bytes: i64,
+    tracks_present: i64,
+    /// Filas cuyo archivo ya no está acá (evacuadas por sync selectiva).
+    tracks_absent: i64,
+    /// Lo que se puede liberar ahora mismo sin arriesgar nada: fuera de scope
+    /// y con copia confirmada en otro dispositivo vinculado.
+    freeable_count: i64,
+    freeable_bytes: i64,
+}
+
+#[tauri::command]
+fn storage_status(state: State<AppState>) -> Result<StorageView, String> {
+    let conn = state.db.lock().unwrap();
+    let (library_bytes, tracks_present): (i64, i64) = conn
+        .query_row(
+            "SELECT COALESCE(SUM(size_bytes), 0), COUNT(*) FROM tracks
+             WHERE local_state = 'present'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    let tracks_absent: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM tracks WHERE local_state <> 'present'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let items = timed("storage_status/evictable", || {
+        scope::evictable(&conn, &state.music_dir)
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(StorageView {
+        library_bytes,
+        tracks_present,
+        tracks_absent,
+        freeable_count: items.len() as i64,
+        freeable_bytes: items.iter().map(|i| i.size).sum(),
+    })
+}
+
+/// Libera espacio: los archivos fuera de scope se van a la papelera de la
+/// biblioteca (30 días) y sus filas quedan en `absent`. Nada se borra de la
+/// biblioteca — los tracks se siguen viendo, en gris, y re-marcar su playlist
+/// los baja de nuevo.
+#[tauri::command]
+fn free_space(app: AppHandle, state: State<AppState>) -> Result<(i64, i64), String> {
+    let (n, bytes) = {
+        let conn = state.db.lock().unwrap();
+        let items = scope::evictable(&conn, &state.music_dir).map_err(|e| e.to_string())?;
+        scope::evict(&conn, &state.music_dir, &items).map_err(|e| e.to_string())?
+    };
+    if n > 0 {
+        let _ = app.emit("library-changed", ());
+    }
+    Ok((n as i64, bytes))
+}
+
+/// Cola de borrados esperando confirmación (política `deletes = 'ask'`).
+#[tauri::command]
+fn list_pending_deletes(state: State<AppState>) -> Result<Vec<merge::PendingDelete>, String> {
+    let conn = state.db.lock().unwrap();
+    merge::pending_deletes(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn resolve_pending_delete(
+    app: AppHandle,
+    state: State<AppState>,
+    id: i64,
+    accept: bool,
+) -> Result<(), String> {
+    {
+        let conn = state.db.lock().unwrap();
+        merge::resolve_pending_delete(&conn, &state.music_dir, id, accept)
+            .map_err(|e| e.to_string())?;
+    }
+    let _ = app.emit("library-changed", ());
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogEntry {
+    ts: i64,
+    kind: String,
+    detail: String,
+}
+
+/// Historial de un dispositivo (vinculación, syncs, conflictos).
+#[tauri::command]
+fn sync_history(state: State<AppState>, uid: String, limit: i64) -> Result<Vec<LogEntry>, String> {
+    let conn = state.db.lock().unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT ts, kind, detail FROM sync_log WHERE peer = ?1
+             ORDER BY ts DESC LIMIT ?2",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![uid, limit], |r| {
+            Ok(LogEntry { ts: r.get(0)?, kind: r.get(1)?, detail: r.get(2)? })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
 /// "Sync now" manual: escribe el XML sin importar el estado del toggle.
@@ -860,7 +1229,19 @@ pub fn run() {
             preview_sync,
             sync_files,
             confirm_pairing,
-            unpair_device
+            unpair_device,
+            get_delete_policy,
+            set_delete_policy,
+            get_scope,
+            set_scope_mode,
+            set_scope_direction,
+            set_scope_playlist,
+            set_scope_playlists,
+            storage_status,
+            free_space,
+            list_pending_deletes,
+            resolve_pending_delete,
+            sync_history
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

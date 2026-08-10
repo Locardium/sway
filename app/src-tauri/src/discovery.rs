@@ -67,6 +67,20 @@ pub struct Peers {
     fullname_to_uid: Mutex<HashMap<String, String>>,
 }
 
+/// Qué pasó al anotar un anuncio de mDNS.
+struct Seen {
+    /// Cambió algo que el usuario vería distinto: hay que re-renderizar.
+    changed: bool,
+    /// No estaba en la lista: acaba de aparecer en la red.
+    ///
+    /// Se distingue de `changed` porque el sondeo TCP **no** puede detectar
+    /// esto: un peer descubierto nace `online: true`, así que el primer
+    /// `set_online(uid, true)` no ve ninguna transición y el sync de puesta al
+    /// día nunca salía. Justo el caso más común: abrir la app con el otro
+    /// dispositivo ya encendido.
+    first_time: bool,
+}
+
 impl Peers {
     /// Peers presentes en la red, ordenados por nombre. Uno sale de aca solo
     /// cuando mDNS avisa que se fue (ver la nota sobre el vencimiento arriba).
@@ -113,7 +127,7 @@ impl Peers {
         out
     }
 
-    fn upsert(&self, fullname: String, peer: Peer) -> bool {
+    fn upsert(&self, fullname: String, peer: Peer) -> Seen {
         self.fullname_to_uid
             .lock()
             .unwrap()
@@ -122,14 +136,17 @@ impl Peers {
         // "Cambio" = algo que el usuario veria distinto. Un refresh de
         // last_seen solo no vale la pena emitirlo: mDNS repregunta seguido y
         // haria re-renderizar la lista todo el tiempo.
-        let changed = match map.get(&peer.uid) {
-            Some(old) => {
-                old.name != peer.name || old.addrs != peer.addrs || old.port != peer.port
-            }
-            None => true,
+        let seen = match map.get(&peer.uid) {
+            Some(old) => Seen {
+                changed: old.name != peer.name
+                    || old.addrs != peer.addrs
+                    || old.port != peer.port,
+                first_time: false,
+            },
+            None => Seen { changed: true, first_time: true },
         };
         map.insert(peer.uid.clone(), peer);
-        changed
+        seen
     }
 
     /// `(uid, ip, port)` de cada peer con dirección conocida, para sondear.
@@ -277,9 +294,17 @@ fn spawn_browse_loop(handle: AppHandle, receiver: mdns_sd::Receiver<ServiceEvent
                         online: true,
                     };
                     let state = handle.state::<crate::AppState>();
-                    if state.peers.upsert(info.fullname.clone(), peer) {
+                    let seen = state.peers.upsert(info.fullname.clone(), peer);
+                    if seen.changed {
                         log::info!("[mdns] peer visible: {}", info.fullname);
                         let _ = handle.emit("peers-changed", ());
+                    }
+                    // Apareció en la red: ponerse al día ya. Sin esto había que
+                    // esperar a que cambiara algo acá o a la red de contención
+                    // de 10 minutos, y en la práctica se terminaba tocando
+                    // "sincronizar" a mano al abrir la app.
+                    if seen.first_time {
+                        crate::autosync::peer_came_online(&handle, &peer_uid);
                     }
                 }
                 ServiceEvent::ServiceRemoved(_, fullname) => {
@@ -351,20 +376,10 @@ pub fn probe_once(handle: &AppHandle) {
         let _ = handle.emit("peers-changed", ());
     }
     // Volvió a estar disponible: ponerse al día sin esperar a que cambie algo.
-    // El celular puede haber estado sin wifi toda la tarde.
+    // El celular puede haber estado sin wifi toda la tarde. (Que esté vinculado
+    // lo filtra `peer_came_online`.)
     for uid in came_online {
-        let paired = {
-            let guard = state.db.lock();
-            match guard {
-                Ok(conn) => conn
-                    .query_row("SELECT 1 FROM devices WHERE uid = ?1", [&uid], |_| Ok(()))
-                    .is_ok(),
-                Err(_) => false,
-            }
-        };
-        if paired {
-            crate::autosync::peer_came_online(handle, &uid);
-        }
+        crate::autosync::peer_came_online(handle, &uid);
     }
 }
 
@@ -397,7 +412,7 @@ fn is_link_local(ip: &mdns_sd::ScopedIp) -> bool {
 mod tests {
     use super::*;
 
-    fn seen(peers: &Peers, uid: &str, name: &str) {
+    fn seen(peers: &Peers, uid: &str, name: &str) -> Seen {
         peers.upsert(
             format!("{uid}._sway._tcp.local."),
             Peer {
@@ -411,7 +426,7 @@ mod tests {
                 paired: false,
                 online: true,
             },
-        );
+        )
     }
 
     fn db_with_device(uid: &str, name: &str) -> rusqlite::Connection {
@@ -497,6 +512,32 @@ mod tests {
         // Y vuelve solo cuando responde de nuevo.
         assert!(peers.set_online("peer-1", true));
         assert!(peers.merged_list(&conn)[0].online);
+    }
+
+    /// Un peer descubierto nace `online`, así que el sondeo TCP no ve ninguna
+    /// transición y no dispara la puesta al día. Abrir la app con el otro
+    /// dispositivo ya encendido — el caso más común — quedaba sin sincronizar
+    /// hasta que cambiara algo o pasaran los 10 minutos de la red de
+    /// contención, y en la práctica se terminaba sincronizando a mano.
+    #[test]
+    fn a_peer_that_appears_for_the_first_time_is_a_catch_up_trigger() {
+        let peers = Peers::default();
+        assert!(seen(&peers, "peer-1", "Celu").first_time);
+
+        // mDNS re-anuncia seguido y `refresh` vuelve a preguntar cada minuto:
+        // eso no puede contar como aparición o sincronizaría en loop.
+        let again = seen(&peers, "peer-1", "Celu");
+        assert!(!again.first_time);
+        assert!(!again.changed, "un re-anuncio idéntico no re-renderiza");
+
+        // Renombrarlo sí se ve, pero sigue siendo el mismo peer presente.
+        let renamed = seen(&peers, "peer-1", "Celu de Guille");
+        assert!(renamed.changed);
+        assert!(!renamed.first_time);
+
+        // Se fue de la red y volvió: ahí sí hay que ponerse al día otra vez.
+        assert!(peers.remove_by_fullname("peer-1._sway._tcp.local."));
+        assert!(seen(&peers, "peer-1", "Celu").first_time);
     }
 
     #[test]

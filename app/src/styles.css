@@ -161,6 +161,9 @@ button.danger-btn {
   padding: 2px 6px; font-size: 13px; outline: none;
 }
 
+/* Desmarcada para este dispositivo pero todavia ocupando lugar. Desaparece del
+   arbol al liberar el espacio; hasta entonces se ve que esta de salida. */
+.tree-row.out-scope { opacity: 0.45; }
 .tree-row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
 .tree-row.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
 .tree-row.drop-into { background: var(--accent-soft); outline: 1px dashed var(--accent-dim); }
@@ -249,6 +252,12 @@ table.tracks tbody tr:hover { background: var(--panel); }
 table.tracks tbody tr.selected { background: var(--accent-soft); }
 table.tracks tbody tr.selected td { border-bottom-color: transparent; }
 table.tracks tbody tr.playing .t-title { color: var(--accent); }
+/* Sin archivo en este dispositivo (sync selectiva): sigue en la biblioteca y
+   se puede organizar, pero no suena. */
+table.tracks tbody tr.absent { opacity: 0.45; }
+/* En la biblioteca y con archivo, pero fuera de la seleccion de este
+   dispositivo: se ve que ya no participa del sync antes de liberar nada. */
+table.tracks tbody tr.out-scope td { opacity: 0.6; }
 
 /* Linea de insercion del drag: box-shadow inset sobre las celdas (la barra
    sobre <tr> no se renderiza confiablemente). */
@@ -729,6 +738,45 @@ table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
   height: 100%; background: var(--accent);
   transition: width 120ms linear;
 }
+
+/* Pantalla de Sync (Fase 5.7) */
+.sync-back {
+  align-self: flex-start; display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 9px 4px 6px; font-size: 12px; color: var(--muted);
+}
+.sync-back:hover { color: var(--text); }
+.settings .set-control button { display: inline-flex; align-items: center; gap: 3px; }
+
+/* Arbol de seleccion: que playlists viven en cada dispositivo */
+.scope-tree {
+  margin: 4px 0 2px; padding: 6px 4px; max-height: 220px; overflow-y: auto;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2);
+}
+.scope-node {
+  display: flex; align-items: center; gap: 8px;
+  padding: 3px 6px; border-radius: 5px; font-size: 12.5px; cursor: pointer;
+}
+.scope-node:hover { background: var(--panel); }
+.scope-node input { accent-color: var(--accent); }
+/* Marcado por herencia (cuelga de una carpeta marcada): no se puede desmarcar
+   suelto, se desmarca la carpeta. */
+.scope-node input:disabled { opacity: 0.55; cursor: default; }
+.scope-node small { margin-left: auto; color: var(--muted); font-size: 11px; }
+
+/* Cola de borrados esperando confirmacion (politica `ask`) */
+.pending-list { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.pending-list li {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--panel-2);
+}
+
+/* Historial por dispositivo */
+.hist { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.hist li { display: flex; align-items: baseline; gap: 8px; font-size: 12px; color: var(--muted); }
+.hist li span { color: var(--text); }
+.hist li small { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hist li time { flex: none; font-variant-numeric: tabular-nums; }
 
 /* Codigo de verificacion del pairing */
 .pair-dialog { display: flex; flex-direction: column; gap: 14px; }

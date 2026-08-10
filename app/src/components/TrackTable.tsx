@@ -277,6 +277,12 @@ function TrackTable({
               className={[
                 t.id === currentId ? 'playing' : '',
                 selected.has(t.id) ? 'selected' : '',
+                // Sin archivo en este dispositivo (sync selectiva): se sigue
+                // viendo y se puede organizar, pero no suena.
+                t.present === false ? 'absent' : '',
+                // Su playlist no esta marcada para este dispositivo: el
+                // archivo que ya esta no se toca, pero no se sincroniza mas.
+                t.inScope === false ? 'out-scope' : '',
                 dropInsertIndex === idx ? 'drop-before' : '',
                 dropInsertIndex === idx + 1 && idx === tracks.length - 1 ? 'drop-after' : '',
               ].join(' ')}

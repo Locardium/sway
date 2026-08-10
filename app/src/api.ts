@@ -11,17 +11,44 @@ export interface Track {
   genre: string;
   durationMs: number;
   bpm: number | null;
+  /// El archivo está en este dispositivo. `false` = la fila quedó pero el
+  /// audio se liberó por sync selectiva, o todavía no se bajó.
+  present: boolean;
+  /// Entra en lo que este dispositivo sincroniza. `false` = ninguna de sus
+  /// playlists está marcada; el archivo que ya está no se toca, pero no se va
+  /// a bajar ni a actualizar.
+  ///
+  /// Con `present` decide cómo se ve: fuera de scope y con archivo se muestra
+  /// apagado y no suena; fuera de scope y sin archivo se esconde de la vista
+  /// principal.
+  inScope: boolean;
+  uid: string | null;
 }
 
 export type NodeKind = 'folder' | 'playlist';
 
 export interface PlaylistNode {
   id: number;
+  /// Identidad compartida entre dispositivos (la usa el editor de scope).
+  uid: string | null;
   name: string;
   kind: NodeKind;
   parentId: number | null;
   position: number;
   trackCount: number;
+  /// De cuántos de esos tracks hay archivo acá. Es lo que se ve al abrir una
+  /// playlist desmarcada.
+  presentCount: number;
+  /// Cuántos de esos tracks siguen ocupando lugar **por esta playlist**: hay
+  /// archivo acá y no entran en el scope. Un tema que además está en una
+  /// playlist marcada se ve igual, pero no cuenta acá — su archivo lo sostiene
+  /// la otra, así que ésta no lo va a soltar nunca. Decide si la playlist
+  /// sigue en el árbol, no qué se muestra adentro.
+  strandedCount: number;
+  /// Entra en lo que este dispositivo sincroniza. `false` = desmarcada: se ve
+  /// apagada mientras siga ocupando lugar y desaparece de la vista principal
+  /// cuando se liberó. En el editor de scope se ve siempre.
+  inScope: boolean;
 }
 
 // Playlists / folders (jerarquia virtual).
@@ -170,6 +197,10 @@ export interface SyncPlan {
   deletesOut: number;
   /// Tracks locales que todavía no tienen hash: no participan del plan.
   unhashed: number;
+  /// Archivos que no se traen / no se mandan porque quedaron fuera del scope
+  /// selectivo. No son trabajo pendiente: es la sync selectiva funcionando.
+  outOfScopeIn: number;
+  outOfScopeOut: number;
 }
 
 export interface SyncPlanEvent {
@@ -205,10 +236,81 @@ export interface SyncDone {
   bytes: number;
   /// Registros de organización aplicados (metadata, playlists, membresías).
   organized: number;
+  /// Borrados entrantes que quedaron esperando confirmación (política `ask`).
+  queued: number;
   /// Lo disparó el sync automático, no el usuario.
   auto: boolean;
   error: string | null;
 }
+
+// --- Políticas, scope selectivo y espacio (Fase 5.7) ------------------------
+
+/// Qué hago con los borrados que manda ese dispositivo (`propagate | ask |
+/// ignore`). Es lo único de a pares y LOCAL: protege esta biblioteca, así que
+/// sólo se edita acá. La dirección, en cambio, es del dispositivo y se replica.
+export const getDeletePolicy = (uid: string) => invoke<string>('get_delete_policy', { uid });
+export const setDeletePolicy = (uid: string, deletes: string) =>
+  invoke<void>('set_delete_policy', { uid, deletes });
+
+export interface Scope {
+  /// all | selected
+  mode: string;
+  /// Qué hace ESE dispositivo: `both | send | receive | off`. Entre dos, algo
+  /// se mueve sólo si uno manda y el otro recibe.
+  direction: string;
+  /// Uids marcados a mano. Lo que cuelga de una carpeta marcada entra sin
+  /// figurar acá — el árbol lo resuelve el backend.
+  selected: string[];
+}
+
+export const getScope = (deviceUid: string) => invoke<Scope>('get_scope', { deviceUid });
+export const setScopeMode = (deviceUid: string, mode: string) =>
+  invoke<void>('set_scope_mode', { deviceUid, mode });
+export const setScopeDirection = (deviceUid: string, direction: string) =>
+  invoke<void>('set_scope_direction', { deviceUid, direction });
+export const setScopePlaylist = (deviceUid: string, playlistUid: string, selected: boolean) =>
+  invoke<void>('set_scope_playlist', { deviceUid, playlistUid, selected });
+/// Varias filas de una: marcar una carpeta cambia todas las playlists de
+/// adentro, y de a una son N viajes y N commits.
+export const setScopePlaylists = (deviceUid: string, changes: { uid: string; on: boolean }[]) =>
+  invoke<void>('set_scope_playlists', { deviceUid, changes });
+
+export interface Storage {
+  libraryBytes: number;
+  tracksPresent: number;
+  tracksAbsent: number;
+  /// Lo que se puede liberar ahora sin arriesgar nada: fuera de scope y con
+  /// copia confirmada en otro dispositivo vinculado.
+  freeableCount: number;
+  freeableBytes: number;
+}
+
+export const storageStatus = () => invoke<Storage>('storage_status');
+/// Manda a la papelera (30 días) los archivos fuera de scope. Devuelve
+/// [cuántos, bytes]. No borra nada de la biblioteca: las filas quedan.
+export const freeSpace = () => invoke<[number, number]>('free_space');
+
+export interface PendingDelete {
+  id: number;
+  entity: string;
+  uid: string;
+  peerUid: string;
+  label: string;
+  deletedAt: number;
+}
+
+export const listPendingDeletes = () => invoke<PendingDelete[]>('list_pending_deletes');
+export const resolvePendingDelete = (id: number, accept: boolean) =>
+  invoke<void>('resolve_pending_delete', { id, accept });
+
+export interface LogEntry {
+  ts: number;
+  kind: string;
+  detail: string;
+}
+
+export const syncHistory = (uid: string, limit = 20) =>
+  invoke<LogEntry[]>('sync_history', { uid, limit });
 
 /// Sync automático: al cambiar algo acá, cuando aparece un dispositivo, y
 /// cada tanto como red de contención.
