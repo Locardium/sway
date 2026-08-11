@@ -823,12 +823,26 @@ fn set_scope_playlists(
     changes: Vec<ScopeChange>,
 ) -> Result<(), String> {
     {
+        // TEMPORAL — diagnóstico. Es el camino que dispara el click, y el único
+        // que todavía toma el lock de escritura: interesa separar la espera del
+        // commit.
+        let t0 = std::time::Instant::now();
         let mut conn = state.db.lock().unwrap();
+        let lock_ms = t0.elapsed().as_millis();
+        let t1 = std::time::Instant::now();
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         for c in &changes {
             scope::set_playlist(&tx, &device_uid, &c.uid, c.on).map_err(|e| e.to_string())?;
         }
+        let t2 = std::time::Instant::now();
         tx.commit().map_err(|e| e.to_string())?;
+        let (write_ms, commit_ms) = (t1.elapsed().as_millis(), t2.elapsed().as_millis());
+        if lock_ms + write_ms + commit_ms >= 30 {
+            perf_line(&format!(
+                "set_scope_playlists: lock {lock_ms} ms, escritura {write_ms} ms, commit {commit_ms} ms, {} fila(s)",
+                changes.len()
+            ));
+        }
     }
     after_scope_change(&app, &device_uid);
     Ok(())
@@ -1164,6 +1178,8 @@ pub fn run() {
             let _ = PERF_FILE.set(perf);
             eprintln!("[db] archivo: {}", db_file.display());
             let conn = db::open(&db_file).expect("db open");
+            // El WAL se consolida aparte: ver `db::open`, ningún click paga eso.
+            db::spawn_checkpointer(&db_file);
             let n: i64 = conn
                 .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
                 .unwrap_or(-1);

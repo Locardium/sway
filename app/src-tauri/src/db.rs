@@ -231,6 +231,22 @@ CREATE TABLE IF NOT EXISTS sync_log (
 );
 ";
 
+/// Consolida el WAL cada tanto, desde una conexión propia y en su propio hilo.
+///
+/// `PASSIVE` es la clave: hace lo que puede sin bloquear a nadie y se retira si
+/// hay alguien escribiendo o leyendo. Así el WAL no crece sin límite y ningún
+/// click paga la consolidación.
+pub fn spawn_checkpointer(path: &Path) {
+    let path = path.to_path_buf();
+    std::thread::spawn(move || {
+        let Ok(conn) = Connection::open(&path) else { return };
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(20));
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);");
+        }
+    });
+}
+
 /// Conexión aparte, sólo para leer lo que muestra la pantalla.
 ///
 /// En WAL un lector no espera al escritor: ve el último estado consolidado
@@ -264,8 +280,14 @@ pub fn open(path: &Path) -> Result<Connection> {
     // en el -wal; si un arranque no lo aplica, la biblioteca "aparece vacia".
     // TRUNCATE consolida y achica el -wal a cero.
     let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
-    // Checkpoint automatico agresivo: no dejar crecer el -wal sin consolidar.
-    conn.execute_batch("PRAGMA wal_autocheckpoint=256;")?;
+    // El checkpoint automático lo paga el commit que cruza el umbral: la
+    // mayoría son baratos y cada tanto uno consolida el WAL entero, con fsync,
+    // justo en el que disparó un click. Ese "cada un tiempo se traba" es esto.
+    //
+    // Acá se apaga y lo hace `spawn_checkpointer` desde su propia conexión, sin
+    // pisar a nadie. El `wal_checkpoint(TRUNCATE)` del arranque sigue cubriendo
+    // el cierre sucio, así que el -wal nunca queda sin aplicar.
+    conn.execute_batch("PRAGMA wal_autocheckpoint=0;")?;
     init_schema(&conn)?;
     Ok(conn)
 }
