@@ -99,8 +99,63 @@ fn flatten_legacy_subdir(_conn: &Connection, _music_dir: &std::path::Path) -> an
     Ok(())
 }
 
+/// TEMPORAL — diagnóstico.
+///
+/// Medir la ESPERA ya se hizo y dio ~700 ms con escritura y commit en 0 ms, o
+/// sea que el costo no está en quien escribe sino en quien tenía el lock. Esto
+/// envuelve el mutex para que cada retención larga se anote sola con el archivo
+/// y la línea de quien lo tomó — sin tener que etiquetar a mano los veintipico
+/// de lugares que lo usan.
+pub struct TrackedDb(Mutex<Connection>);
+
+#[derive(Debug)]
+pub struct Poisoned;
+
+impl TrackedDb {
+    fn new(c: Connection) -> Self {
+        Self(Mutex::new(c))
+    }
+    /// Misma forma que `Mutex::lock` para que los llamadores no cambien.
+    #[track_caller]
+    pub fn lock(&self) -> Result<TrackedGuard<'_>, Poisoned> {
+        let caller = std::panic::Location::caller();
+        let g = self.0.lock().map_err(|_| Poisoned)?;
+        Ok(TrackedGuard { g, since: std::time::Instant::now(), caller })
+    }
+}
+
+pub struct TrackedGuard<'a> {
+    g: std::sync::MutexGuard<'a, Connection>,
+    since: std::time::Instant,
+    caller: &'static std::panic::Location<'static>,
+}
+
+impl std::ops::Deref for TrackedGuard<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.g
+    }
+}
+impl std::ops::DerefMut for TrackedGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Connection {
+        &mut self.g
+    }
+}
+impl Drop for TrackedGuard<'_> {
+    fn drop(&mut self) {
+        let held = self.since.elapsed().as_millis();
+        if held >= 100 {
+            perf_line(&format!(
+                "LOCK sostenido {held} ms por {}:{}",
+                self.caller.file(),
+                self.caller.line()
+            ));
+        }
+    }
+}
+
 pub struct AppState {
-    db: Mutex<Connection>,
+    db: TrackedDb,
     /// Sólo lectura, para lo que dibuja la pantalla. Ver `db::open_read`: es lo
     /// que evita que abrir una playlist espere a que el sync suelte el lock.
     db_read: Mutex<Connection>,
@@ -1222,7 +1277,7 @@ pub fn run() {
                 .unwrap_or(0);
 
             app.manage(AppState {
-                db: Mutex::new(conn),
+                db: TrackedDb::new(conn),
                 db_read: Mutex::new(db::open_read(&db_file).expect("db open (lectura)")),
                 player: Player::new(),
                 covers: Mutex::new(HashMap::new()),
