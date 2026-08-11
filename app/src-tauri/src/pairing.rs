@@ -1225,13 +1225,17 @@ fn sync_inner(handle: &AppHandle, uid: &str) -> Result<SyncResult> {
 
     let _ = sess.send(&Msg::Bye);
     let total = started.elapsed();
-    log::info!(
+    let tiempos = format!(
         "[sync] tiempos: inventario {} ms, {total_files} archivo(s) {} ms, organización {} ms, total {} ms",
         after_plan.as_millis(),
         (after_files - after_plan).as_millis(),
         (total - after_files).as_millis(),
         total.as_millis()
     );
+    log::info!("{tiempos}");
+    // TEMPORAL — al archivo también: en Android con logcat apagado esta línea
+    // es la única forma de ver cuánto bloquea un sync.
+    crate::perf_line(&tiempos);
 
     // Historial legible por dispositivo (lo muestra la pantalla de Sync). Sólo
     // las corridas que hicieron algo: una línea por sync automático vacío cada

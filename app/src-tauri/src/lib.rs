@@ -172,10 +172,29 @@ fn timed<T>(what: &str, f: impl FnOnce() -> T) -> T {
     let t0 = std::time::Instant::now();
     let out = f();
     let ms = t0.elapsed().as_millis();
-    if ms >= 120 {
+    if ms >= 30 {
         log::info!("[perf] {what}: {ms} ms");
+        perf_line(&format!("{what}: {ms} ms"));
     }
     out
+}
+
+/// Dónde se dejan los tiempos, además del log. Lo setea el `setup`.
+static PERF_FILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// TEMPORAL — diagnóstico.
+///
+/// En Android los `log::*` van a logcat, pero hay dispositivos que lo traen
+/// apagado a nivel sistema (`live.logcat=disable`, que ni el shell de adb puede
+/// cambiar): ahí el buffer entero devuelve cero líneas y no hay forma de ver un
+/// tiempo. Un archivo al lado de la DB se puede sacar con `run-as` sin tocar
+/// ninguna configuración del teléfono.
+pub fn perf_line(line: &str) {
+    use std::io::Write;
+    let Some(path) = PERF_FILE.get() else { return };
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{} {line}", db::now_ms());
+    }
 }
 
 #[tauri::command]
@@ -703,7 +722,22 @@ fn set_scope_mode(
 /// alargarla sólo demora el refresco de la biblioteca de atrás sin ahorrar
 /// nada. Lo justo para que dos tildes seguidos se junten en un solo refresco.
 const SCOPE_SETTLE_MS: u64 = 400;
+/// Cuánto espera el SYNC después de un cambio de scope. Mucho más que el
+/// refresco de la pantalla, y a propósito.
+///
+/// `note_change` despierta al autosync, y un sync no es barato: arma el
+/// manifest con el lock tomado, habla por red, aplica el merge con el lock
+/// tomado y al terminar emite `library-changed`, que fuerza a la UI a recargar
+/// todo. Medido en escritorio da alrededor de un segundo; en el celular, más.
+/// Encadenado a cada tilde, eso era el freeze: no las consultas, el sync.
+///
+/// Marcar playlists es una ráfaga —se abre el panel, se tildan varias, se
+/// cierra—, así que esperar a que la persona termine no atrasa nada que se
+/// note. Lo único que se demora es que el otro dispositivo se entere, y eso
+/// nadie lo está mirando.
+const SCOPE_SYNC_SETTLE_MS: u64 = 6000;
 static SCOPE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SCOPE_SYNC_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn after_scope_change(app: &AppHandle, device_uid: &str) {
     use std::sync::atomic::Ordering;
@@ -712,15 +746,17 @@ fn after_scope_change(app: &AppHandle, device_uid: &str) {
         let conn = state.db.lock().unwrap();
         db::this_device_uid(&conn).map(|me| me == device_uid).unwrap_or(false)
     };
-    let mark = SCOPE_GEN.fetch_add(1, Ordering::SeqCst) + 1;
-    let app = app.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(SCOPE_SETTLE_MS));
-        // Entró otro click mientras esto dormía: que lo haga el último, una vez.
-        if SCOPE_GEN.load(Ordering::SeqCst) != mark {
-            return;
-        }
-        if mine {
+
+    // Refrescar la pantalla: corto, es lo único que la persona está esperando.
+    if mine {
+        let mark = SCOPE_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+        let app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(SCOPE_SETTLE_MS));
+            // Entró otro click mientras dormía: que lo haga el último, una vez.
+            if SCOPE_GEN.load(Ordering::SeqCst) != mark {
+                return;
+            }
             // El rescate primero: toma el lock y puede hashear. Emitir antes
             // largaba a la UI a pedir la biblioteca entera justo contra ese
             // lock, y las dos cosas se esperaban entre sí.
@@ -730,6 +766,16 @@ fn after_scope_change(app: &AppHandle, device_uid: &str) {
             // de `list_playlists` / `list_tracks`, que la UI no vuelve a pedir
             // sola. Sin este evento el cambio no se notaba hasta reiniciar.
             let _ = app.emit("library-changed", ());
+        });
+    }
+
+    // Propagar al otro dispositivo: largo, no lo está esperando nadie.
+    let mark = SCOPE_SYNC_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(SCOPE_SYNC_SETTLE_MS));
+        if SCOPE_SYNC_GEN.load(Ordering::SeqCst) != mark {
+            return;
         }
         autosync::note_change(&app);
     });
@@ -1108,6 +1154,11 @@ pub fn run() {
             let dir = app.path().app_data_dir().expect("app data dir");
             std::fs::create_dir_all(&dir).ok();
             let db_file = dir.join("sway.sqlite");
+            // TEMPORAL — ver `perf_line`. Se trunca en cada arranque para que
+            // lo que se lea sea siempre de la corrida actual.
+            let perf = dir.join("perf.log");
+            std::fs::write(&perf, "").ok();
+            let _ = PERF_FILE.set(perf);
             eprintln!("[db] archivo: {}", db_file.display());
             let conn = db::open(&db_file).expect("db open");
             let n: i64 = conn

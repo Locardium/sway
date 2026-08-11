@@ -724,20 +724,18 @@ pub fn find_in_trash(
     let Ok(entries) = std::fs::read_dir(&trash) else {
         return Vec::new();
     };
-    // tamaño -> archivos de la papelera con ese tamaño.
-    let mut by_size: HashMap<u64, Vec<std::path::PathBuf>> = HashMap::new();
+    // tamaño -> archivos de la papelera con ese tamaño, con su marca de tiempo.
+    let mut by_size: HashMap<u64, Vec<(std::path::PathBuf, i64)>> = HashMap::new();
     for e in entries.flatten() {
         let Ok(md) = e.metadata() else { continue };
         if md.is_file() {
-            by_size.entry(md.len()).or_default().push(e.path());
+            by_size.entry(md.len()).or_default().push((e.path(), mtime_of(&md)));
         }
     }
     if by_size.is_empty() {
         return Vec::new();
     }
 
-    // El hash de cada archivo de la papelera se calcula a lo sumo una vez.
-    let mut hashed: HashMap<std::path::PathBuf, String> = HashMap::new();
     let mut out = Vec::new();
     for c in candidates {
         let Some(same_size) = by_size.get(&(c.size as u64)) else {
@@ -747,17 +745,10 @@ pub fn find_in_trash(
         let preferred = trash.join(&c.rel_path);
         let order = same_size
             .iter()
-            .filter(|p| **p == preferred)
-            .chain(same_size.iter().filter(|p| **p != preferred));
-        for p in order {
-            let h = match hashed.get(p) {
-                Some(h) => h.clone(),
-                None => {
-                    let Ok(h) = crate::hashing::hash_file(p) else { continue };
-                    hashed.insert(p.clone(), h.clone());
-                    h
-                }
-            };
+            .filter(|(p, _)| *p == preferred)
+            .chain(same_size.iter().filter(|(p, _)| *p != preferred));
+        for (p, mtime) in order {
+            let Some(h) = trash_hash(p, c.size as u64, *mtime) else { continue };
             if h == c.hash {
                 out.push((c.clone(), p.clone()));
                 break;
@@ -765,6 +756,47 @@ pub fn find_in_trash(
         }
     }
     out
+}
+
+fn mtime_of(md: &std::fs::Metadata) -> i64 {
+    md.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Hashes de archivos de la papelera que ya se calcularon, entre llamadas.
+///
+/// Esto es lo caro de toda la fase, y corre en CADA cambio de scope: marcar una
+/// playlist tiene que poder recuperar de la papelera lo que ya está ahí. Con el
+/// caché adentro de la llamada, cada tilde volvía a hashear la papelera entera
+/// —que después de liberar espacio un par de veces son cientos de megas— y en
+/// un build sin optimizar eso son segundos de CPU por click.
+///
+/// Peor: los candidatos que NO están en la papelera (un tema en scope que nunca
+/// se bajó) no se resuelven nunca, así que el mismo trabajo se repetía en cada
+/// click para siempre.
+///
+/// La clave lleva tamaño y fecha: si el archivo cambió, se rehashea.
+static TRASH_HASHES: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<std::path::PathBuf, (u64, i64, String)>>,
+> = std::sync::OnceLock::new();
+
+fn trash_hash(path: &std::path::Path, len: u64, mtime: i64) -> Option<String> {
+    let cache = TRASH_HASHES.get_or_init(Default::default);
+    if let Ok(map) = cache.lock() {
+        if let Some((l, m, h)) = map.get(path) {
+            if *l == len && *m == mtime {
+                return Some(h.clone());
+            }
+        }
+    }
+    let h = crate::hashing::hash_file(path).ok()?;
+    if let Ok(mut map) = cache.lock() {
+        map.insert(path.to_path_buf(), (len, mtime, h.clone()));
+    }
+    Some(h)
 }
 
 /// Mueve lo encontrado de vuelta a la biblioteca y actualiza las filas.
@@ -1219,6 +1251,34 @@ mod tests {
         select_new_local(&otra, id).unwrap();
         assert!(entries(&otra).unwrap().is_empty());
         assert!(scope_playlists(&otra, &yo).unwrap().is_none());
+    }
+
+    /// Hashear la papelera es lo más caro que hay acá y corre en cada cambio de
+    /// scope. El caché tiene que sobrevivir entre llamadas, y tiene que soltar
+    /// el hash viejo si el archivo cambió.
+    #[test]
+    fn trash_hashes_survive_between_calls_but_not_a_changed_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "sway-trash-cache-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("tema.mp3");
+        std::fs::write(&f, b"unos bytes").unwrap();
+        let real = crate::hashing::hash_file(&f).unwrap();
+
+        let h1 = trash_hash(&f, 10, 111).unwrap();
+        assert_eq!(h1, real);
+
+        // Segunda vuelta con la misma clave: sale del caché. Se borra el archivo
+        // para probarlo — si lo rehasheara, no habría qué hashear.
+        std::fs::remove_file(&f).unwrap();
+        assert_eq!(trash_hash(&f, 10, 111).as_deref(), Some(real.as_str()));
+
+        // Otra fecha es otro archivo: el caché no aplica y no hay nada que leer.
+        assert!(trash_hash(&f, 10, 222).is_none());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// El requisito duro de toda la fase: liberar espacio no puede destruir la
