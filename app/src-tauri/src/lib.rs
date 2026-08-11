@@ -1170,6 +1170,30 @@ fn spawn_folder_watch(handle: AppHandle, dir: PathBuf) {
             if paths.is_empty() {
                 continue;
             }
+            // Un archivo que ya está en la biblioteca no tiene nada que
+            // importar, y averiguarlo es una consulta por path.
+            //
+            // Sin esto, cada evento del watcher entraba al lock de ESCRITURA y
+            // leía los tags de todo lo que venía en la tanda. En Android la
+            // carpeta gestionada vive en almacenamiento emulado y el watcher
+            // dispara sin parar sobre los mismos archivos: medido en el
+            // dispositivo, retenciones de 200 a 1500 ms encadenadas, para no
+            // importar nada. Todo lo demás —abrir una playlist, marcar en el
+            // scope— hacía cola detrás de eso.
+            let paths: Vec<String> = {
+                let conn = state.db_read.lock().unwrap();
+                let mut stmt = match conn.prepare_cached("SELECT 1 FROM tracks WHERE path = ?1") {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                paths
+                    .into_iter()
+                    .filter(|p| !stmt.exists([p]).unwrap_or(false))
+                    .collect()
+            };
+            if paths.is_empty() {
+                continue;
+            }
             let changed = {
                 let conn = state.db.lock().unwrap();
                 let before: i64 = conn
