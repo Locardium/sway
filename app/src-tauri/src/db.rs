@@ -231,9 +231,34 @@ CREATE TABLE IF NOT EXISTS sync_log (
 );
 ";
 
+/// Conexión aparte, sólo para leer lo que muestra la pantalla.
+///
+/// En WAL un lector no espera al escritor: ve el último estado consolidado
+/// mientras el otro escribe. Con una sola conexión detrás de un mutex eso se
+/// pierde, y abrir una playlist queda encolado detrás de lo que esté haciendo
+/// el sync — que son ráfagas de SQL entre viajes de red.
+///
+/// `query_only` es para que la separación no dependa de acordarse: por acá no
+/// se puede escribir aunque alguien lo intente.
+pub fn open_read(path: &Path) -> Result<Connection> {
+    let conn = Connection::open(path)?;
+    conn.execute_batch("PRAGMA query_only=ON; PRAGMA foreign_keys=ON;")?;
+    Ok(conn)
+}
+
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+    // `synchronous` por default es FULL: cada commit hace fsync del WAL. En la
+    // flash de un teléfono eso son cientos de milisegundos, y como hay un solo
+    // mutex de conexión para toda la app, ese fsync no lo paga sólo quien
+    // escribe — encola a todo lo demás. Marcar una playlist es un commit.
+    //
+    // Con WAL, NORMAL sigue siendo seguro ante un cierre sucio o un crash de la
+    // app: lo que se pierde es a lo sumo el último commit ante un corte de luz,
+    // y la base no se corrompe. Es lo que usa el propio SQLiteDatabase de
+    // Android por la misma razón.
+    conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
     // Foldea el WAL de la sesion anterior al archivo principal en cada arranque.
     // Sin esto, un cierre sucio (force-kill en dev, cuelgue) deja todo el estado
     // en el -wal; si un arranque no lo aplica, la biblioteca "aparece vacia".

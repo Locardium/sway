@@ -101,6 +101,9 @@ fn flatten_legacy_subdir(_conn: &Connection, _music_dir: &std::path::Path) -> an
 
 pub struct AppState {
     db: Mutex<Connection>,
+    /// Sólo lectura, para lo que dibuja la pantalla. Ver `db::open_read`: es lo
+    /// que evita que abrir una playlist espere a que el sync suelte el lock.
+    db_read: Mutex<Connection>,
     player: Player,
     covers: Mutex<HashMap<i64, Option<String>>>,
     /// Carpeta gestionada (<Música>/Sway): todo lo importado se copia acá.
@@ -199,7 +202,7 @@ pub fn perf_line(line: &str) {
 
 #[tauri::command]
 fn list_tracks(state: State<AppState>) -> Result<Vec<db::Track>, String> {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db_read.lock().unwrap();
     timed("list_tracks", || {
         let mut tracks = db::list_tracks(&conn).map_err(|e| e.to_string())?;
         timed("  mark_scope", || mark_scope(&conn, &mut tracks));
@@ -267,7 +270,7 @@ fn import_from_uri(app: AppHandle, state: State<AppState>, uri: String, name: St
 
 #[tauri::command]
 fn track_playlists(state: State<AppState>, id: i64) -> Result<Vec<i64>, String> {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db_read.lock().unwrap();
     db::track_playlists(&conn, id).map_err(|e| e.to_string())
 }
 
@@ -339,7 +342,7 @@ fn reveal_track(state: State<AppState>, id: i64) -> Result<(), String> {
 
 #[tauri::command]
 fn list_playlists(state: State<AppState>) -> Result<Vec<db::PlaylistNode>, String> {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db_read.lock().unwrap();
     timed("list_playlists", || {
         let mut nodes = db::list_playlists(&conn).map_err(|e| e.to_string())?;
         timed("  mark_playlist_scope", || mark_playlist_scope(&conn, &mut nodes));
@@ -423,7 +426,7 @@ fn move_playlist(
 
 #[tauri::command]
 fn playlist_tracks(state: State<AppState>, playlist_id: i64) -> Result<Vec<db::Track>, String> {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db_read.lock().unwrap();
     timed("playlist_tracks", || {
         let mut tracks = db::playlist_tracks(&conn, playlist_id).map_err(|e| e.to_string())?;
         // Acotado a esta playlist: marcar veinte filas no puede costar lo mismo
@@ -847,7 +850,7 @@ struct StorageView {
 
 #[tauri::command]
 fn storage_status(state: State<AppState>) -> Result<StorageView, String> {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db_read.lock().unwrap();
     let (library_bytes, tracks_present): (i64, i64) = conn
         .query_row(
             "SELECT COALESCE(SUM(size_bytes), 0), COUNT(*) FROM tracks
@@ -1204,6 +1207,7 @@ pub fn run() {
 
             app.manage(AppState {
                 db: Mutex::new(conn),
+                db_read: Mutex::new(db::open_read(&db_file).expect("db open (lectura)")),
                 player: Player::new(),
                 covers: Mutex::new(HashMap::new()),
                 music_dir: music_dir.clone(),

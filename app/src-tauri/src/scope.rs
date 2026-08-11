@@ -725,17 +725,28 @@ pub fn find_in_trash(
         return Vec::new();
     };
     // tamaño -> archivos de la papelera con ese tamaño, con su marca de tiempo.
+    let t_scan = std::time::Instant::now();
     let mut by_size: HashMap<u64, Vec<(std::path::PathBuf, i64)>> = HashMap::new();
+    let mut n_files = 0;
     for e in entries.flatten() {
         let Ok(md) = e.metadata() else { continue };
         if md.is_file() {
+            n_files += 1;
             by_size.entry(md.len()).or_default().push((e.path(), mtime_of(&md)));
         }
     }
+    // TEMPORAL — un `stat` por archivo, y en Android la carpeta de música vive
+    // en almacenamiento emulado (FUSE), donde eso no es gratis.
+    crate::perf_line(&format!(
+        "    find_in_trash: escaneo {} ms, {n_files} archivo(s)",
+        t_scan.elapsed().as_millis()
+    ));
     if by_size.is_empty() {
         return Vec::new();
     }
 
+    let t_hash = std::time::Instant::now();
+    let mut hashed = 0;
     let mut out = Vec::new();
     for c in candidates {
         let Some(same_size) = by_size.get(&(c.size as u64)) else {
@@ -748,6 +759,7 @@ pub fn find_in_trash(
             .filter(|(p, _)| *p == preferred)
             .chain(same_size.iter().filter(|(p, _)| *p != preferred));
         for (p, mtime) in order {
+            hashed += 1;
             let Some(h) = trash_hash(p, c.size as u64, *mtime) else { continue };
             if h == c.hash {
                 out.push((c.clone(), p.clone()));
@@ -755,6 +767,10 @@ pub fn find_in_trash(
             }
         }
     }
+    crate::perf_line(&format!(
+        "    find_in_trash: hashes {} ms, {hashed} consulta(s) al caché",
+        t_hash.elapsed().as_millis()
+    ));
     out
 }
 

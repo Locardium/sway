@@ -1329,10 +1329,26 @@ pub fn restore_local(handle: &AppHandle) -> usize {
     let state = handle.state::<AppState>();
     let music_dir = state.music_dir.clone();
 
+    // TEMPORAL — diagnóstico. `timed` de afuera mide todo junto, incluida la
+    // espera por el lock, y así no se distingue "tarda" de "esperó a otro".
+    let t0 = std::time::Instant::now();
+    // Averiguar si hay algo que recuperar es una lectura, y casi siempre da
+    // cero. Por la conexión de escritura, ese "no hay nada" quedaba encolado
+    // detrás del sync: medido en Android, hasta 1255 ms de espera para no hacer
+    // nada. El lock de escritura se toma más abajo, y sólo si hay qué mover.
     let candidates = {
-        let db = state.db.lock();
+        let db = state.db_read.lock();
+        let lock_ms = t0.elapsed().as_millis();
         let Ok(conn) = db else { return 0 };
-        match crate::scope::restorable(&conn) {
+        let t1 = std::time::Instant::now();
+        let r = crate::scope::restorable(&conn);
+        crate::perf_line(&format!(
+            "  restore_local: lock {} ms, restorable {} ms, {} candidato(s)",
+            lock_ms,
+            t1.elapsed().as_millis(),
+            r.as_ref().map(|c| c.len()).unwrap_or(0)
+        ));
+        match r {
             Ok(c) => c,
             Err(e) => {
                 log::warn!("[scope] no se pudo listar lo recuperable: {e}");
@@ -1344,7 +1360,13 @@ pub fn restore_local(handle: &AppHandle) -> usize {
         return 0;
     }
 
+    let t2 = std::time::Instant::now();
     let found = crate::scope::find_in_trash(&music_dir, &candidates);
+    crate::perf_line(&format!(
+        "  restore_local: find_in_trash {} ms, {} encontrado(s)",
+        t2.elapsed().as_millis(),
+        found.len()
+    ));
     if found.is_empty() {
         return 0;
     }
