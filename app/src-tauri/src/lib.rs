@@ -775,11 +775,13 @@ fn set_scope_mode(
 /// fila significaba varias recargas completas y varios escaneos peleando por el
 /// mismo lock de SQLite — la pantalla se trababa en cada tilde.
 ///
-/// Corto a propósito. La espera larga tenía sentido cuando esto era caro y se
-/// pagaba por fila; ahora un click es una transacción y un after, así que
-/// alargarla sólo demora el refresco de la biblioteca de atrás sin ahorrar
-/// nada. Lo justo para que dos tildes seguidos se junten en un solo refresco.
-const SCOPE_SETTLE_MS: u64 = 400;
+/// Corto a propósito, y existe sólo para juntar una ráfaga de clicks en un
+/// refresco. Llegó a 400 ms cuando cada cambio arrastraba trabajo caro y se
+/// pagaba por fila; ese trabajo ya no está —lo que corre ahora son un par de
+/// consultas de menos de un milisegundo— así que alargar la espera sólo demora
+/// el refresco de la biblioteca de atrás sin ahorrar nada. Lo justo para que
+/// dos tildes seguidos se junten en un solo refresco.
+const SCOPE_SETTLE_MS: u64 = 120;
 /// Cuánto espera el SYNC después de un cambio de scope. Mucho más que el
 /// refresco de la pantalla, y a propósito.
 ///
