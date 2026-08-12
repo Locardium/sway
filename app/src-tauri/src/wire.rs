@@ -155,6 +155,7 @@ pub struct Session {
 impl Session {
     /// Lado que llama.
     pub fn connect(stream: TcpStream, private_key: &[u8]) -> Result<Self> {
+        tune(&stream);
         let mut hs = Builder::new(PARAMS.parse()?)
             .local_private_key(private_key)?
             .build_initiator()?;
@@ -173,6 +174,7 @@ impl Session {
 
     /// Lado que acepta.
     pub fn accept(stream: TcpStream, private_key: &[u8]) -> Result<Self> {
+        tune(&stream);
         let mut hs = Builder::new(PARAMS.parse()?)
             .local_private_key(private_key)?
             .build_responder()?;
@@ -226,7 +228,9 @@ impl Session {
             let n = self.noise.write_message(chunk, &mut buf)?;
             write_frame(&self.stream, &buf[..n])?;
         }
-        self.stream.flush()?;
+        // Sin `flush`: sobre un `TcpStream` crudo es un no-op, y tenerlo acá
+        // hacía creer que había un buffer nuestro pendiente de vaciar. No lo
+        // hay — cada frame ya salió con su `write_all`.
         Ok(())
     }
 
@@ -259,10 +263,38 @@ impl Session {
 // Framing en el socket: [u32 largo][bytes]
 // ---------------------------------------------------------------------------
 
+/// Cabecera y cuerpo en **una** escritura.
+///
+/// En dos, los 4 bytes de la cabecera salen como su propio paquete y quedan
+/// expuestos a la espera de Nagle. Un track son cientos de frames, así que
+/// conviene no pagarlo. Copiar 64 KiB a un buffer cuesta microsegundos.
+///
+/// Ojo con la tentación de darle el crédito de más: esto NO fue lo que arregló
+/// las transferencias de 12 s (eso era `opt-level = 0` sobre ChaCha20-Poly1305,
+/// ver el `Cargo.toml`). Con el canal ya rápido la diferencia acá es chica.
 fn write_frame(mut stream: &TcpStream, data: &[u8]) -> Result<()> {
-    stream.write_all(&(data.len() as u32).to_be_bytes())?;
-    stream.write_all(data)?;
+    let mut out = Vec::with_capacity(4 + data.len());
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(data);
+    stream.write_all(&out)?;
     Ok(())
+}
+
+/// Ajustes del socket, iguales para las dos puntas.
+///
+/// Se aplican antes del handshake a propósito: XX son tres mensajes chicos con
+/// ida y vuelta, o sea justo el patrón que Nagle penaliza. Lo mismo los
+/// mensajes de control (`BlobReq`, `MetaAck`, `Bye`): cortos y estrictamente
+/// secuenciales, cada uno esperando la respuesta del otro antes de seguir.
+///
+/// Es una mejora de latencia en los mensajes chicos, no de throughput en los
+/// archivos: lo de los archivos era el cifrado sin optimizar.
+fn tune(stream: &TcpStream) {
+    // Que falle no es motivo para tirar la conexión: sin esto anda, sólo que
+    // lento.
+    if let Err(e) = stream.set_nodelay(true) {
+        log::debug!("[wire] no se pudo desactivar Nagle: {e}");
+    }
 }
 
 fn read_frame(mut stream: &TcpStream) -> Result<Vec<u8>> {
@@ -294,6 +326,38 @@ mod tests {
         });
         let client = Session::connect(TcpStream::connect(addr).unwrap(), &a_priv).unwrap();
         (client, server.join().unwrap())
+    }
+
+    /// Cuánto da el canal sobre loopback, donde no hay red que culpar. Mide
+    /// techo real de cifrado + framing. `#[ignore]` porque es una medición, no
+    /// una aserción: correr con
+    /// `cargo test --release -- --ignored --nocapture channel_throughput`.
+    #[test]
+    #[ignore]
+    fn channel_throughput() {
+        const MB: usize = 40;
+        let data = vec![7u8; MB * 1024 * 1024];
+        let (mut a, mut b) = pair();
+
+        let drain = std::thread::spawn(move || {
+            let t = std::time::Instant::now();
+            let got = b.recv_bytes().unwrap();
+            (got.len(), t.elapsed())
+        });
+
+        let t = std::time::Instant::now();
+        a.send_bytes(&data).unwrap();
+        let send = t.elapsed();
+        let (got, recv) = drain.join().unwrap();
+
+        assert_eq!(got, data.len());
+        println!(
+            "{MB} MB | envio {:?} ({:.1} MB/s) | recepcion {:?} ({:.1} MB/s)",
+            send,
+            MB as f64 / send.as_secs_f64(),
+            recv,
+            MB as f64 / recv.as_secs_f64()
+        );
     }
 
     #[test]
