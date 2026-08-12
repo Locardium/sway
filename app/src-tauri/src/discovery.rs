@@ -35,7 +35,9 @@ const REBROWSE_EVERY: u32 = 6;
 
 // Nota: no hay vencimiento por tiempo de este lado. Lo maneja mdns-sd, que
 // refresca los registros antes de que expiren y emite `ServiceRemoved` cuando
-// uno vence de verdad. Un filtro propio por "hace cuánto lo vi" es un bug
+// uno vence de verdad — lo que NO significa que el dispositivo se haya ido,
+// sólo que dejaron de llegar sus anuncios; quién está disponible lo decide el
+// sondeo TCP de más abajo. Un filtro propio por "hace cuánto lo vi" es un bug
 // esperando: `ServiceResolved` llega cuando algo CAMBIA, no en cada refresco,
 // asi que un peer presente y estable deja de emitir eventos y desapareceria
 // de la lista estando ahi.
@@ -82,8 +84,10 @@ struct Seen {
 }
 
 impl Peers {
-    /// Peers presentes en la red, ordenados por nombre. Uno sale de aca solo
-    /// cuando mDNS avisa que se fue (ver la nota sobre el vencimiento arriba).
+    /// Peers conocidos, ordenados por nombre. Estar en esta lista no es estar
+    /// disponible: eso lo dice `online`, y lo decide el sondeo TCP. Los
+    /// vinculados se quedan aunque mDNS deje de anunciarlos (ver
+    /// `mark_gone_by_fullname`); los desconocidos sí se van.
     pub fn list(&self) -> Vec<Peer> {
         let mut v: Vec<Peer> = self.by_uid.lock().unwrap().values().cloned().collect();
         v.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -140,8 +144,14 @@ impl Peers {
             Some(old) => Seen {
                 changed: old.name != peer.name
                     || old.addrs != peer.addrs
-                    || old.port != peer.port,
-                first_time: false,
+                    || old.port != peer.port
+                    // Estaba gris: volver a verde sí se ve.
+                    || !old.online,
+                // Volvió a anunciarse después de estar gris. Para el sync eso
+                // es lo mismo que aparecer por primera vez — pudo haber estado
+                // apagado horas. Antes esto lo cubría el borrado del peer, que
+                // hacía que cualquier reaparición entrara por la rama `None`.
+                first_time: !old.online,
             },
             None => Seen { changed: true, first_time: true },
         };
@@ -184,6 +194,31 @@ impl Peers {
         let uid = self.fullname_to_uid.lock().unwrap().remove(fullname);
         match uid {
             Some(uid) => self.by_uid.lock().unwrap().remove(&uid).is_some(),
+            None => false,
+        }
+    }
+
+    fn uid_of(&self, fullname: &str) -> Option<String> {
+        self.fullname_to_uid.lock().unwrap().get(fullname).cloned()
+    }
+
+    /// Dejar de anunciarse pasa el peer a gris, pero **no** lo saca de la
+    /// lista: así el sondeo TCP lo sigue probando y puede devolverlo a verde.
+    ///
+    /// Borrarlo era un callejón sin salida. `probe_targets` recorre este mismo
+    /// mapa, o sea que un peer borrado no se sondea nunca más: el mecanismo
+    /// honesto para saber si sigue ahí no podía contradecir al que se había
+    /// equivocado. Y equivocarse es común — los registros SRV/A viven 120 s y
+    /// se refrescan por multicast, que se pierde por cualquier motivo que no
+    /// tiene nada que ver con que el dispositivo se haya ido: ahorro de
+    /// energía de la placa Wi-Fi, el `MulticastLock` de Android, saltar de
+    /// banda, un router que filtra. En todos esos casos el TCP sigue abierto.
+    ///
+    /// Se conserva el `fullname_to_uid` para poder resolver una baja posterior
+    /// del mismo peer.
+    fn mark_gone_by_fullname(&self, fullname: &str) -> bool {
+        match self.uid_of(fullname) {
+            Some(uid) => self.set_online(&uid, false),
             None => false,
         }
     }
@@ -309,7 +344,20 @@ fn spawn_browse_loop(handle: AppHandle, receiver: mdns_sd::Receiver<ServiceEvent
                 }
                 ServiceEvent::ServiceRemoved(_, fullname) => {
                     let state = handle.state::<crate::AppState>();
-                    if state.peers.remove_by_fullname(&fullname) {
+                    // Con los nuestros, mDNS opina y el sondeo decide: se
+                    // ponen grises y siguen sondeándose. Con un desconocido no
+                    // hay nada que rescatar — nadie va a sincronizar con él —
+                    // y dejarlo gris para siempre sería basura en la lista.
+                    let ours = match state.peers.uid_of(&fullname) {
+                        Some(uid) => is_paired(&handle, &uid),
+                        None => false,
+                    };
+                    if ours {
+                        if state.peers.mark_gone_by_fullname(&fullname) {
+                            log::info!("[mdns] {fullname} dejó de anunciarse: gris hasta que el sondeo diga");
+                            let _ = handle.emit("peers-changed", ());
+                        }
+                    } else if state.peers.remove_by_fullname(&fullname) {
                         log::info!("[mdns] peer se fue: {fullname}");
                         let _ = handle.emit("peers-changed", ());
                     }
@@ -324,12 +372,14 @@ fn spawn_browse_loop(handle: AppHandle, receiver: mdns_sd::Receiver<ServiceEvent
 /// Sondeo de alcanzabilidad: abre un TCP al puerto de sync de cada peer y lo
 /// cierra enseguida.
 ///
-/// Hace falta porque mDNS no sirve para saber si alguien SIGUE ahí: el TTL de
-/// los registros PTR/TXT es de 4500 s (75 minutos) y `mdns-sd` 0.20 no expone
-/// cómo bajarlo, así que un dispositivo que se va sin avisar queda en el
-/// cache más de una hora. Peor: "anunciado" y "alcanzable" no son lo mismo —
-/// el celular puede seguir en el cache con la app cerrada, y ahí Ping se come
-/// el timeout. Un connect es la única respuesta honesta a "¿puedo
+/// Hace falta porque mDNS no sirve para saber si alguien SIGUE ahí, y falla
+/// para los dos lados. Se queda largo: el TTL de los registros PTR/TXT es de
+/// 4500 s (75 minutos) y `mdns-sd` 0.20 no expone cómo bajarlo, así que un
+/// dispositivo que se va sin avisar queda en el cache más de una hora. Y se va
+/// corto: los SRV/A/AAAA viven 120 s (RFC 6762 §10) y se refrescan por
+/// multicast, que se pierde solo. Peor: "anunciado" y "alcanzable" no son lo
+/// mismo — el celular puede seguir en el cache con la app cerrada, y ahí Ping
+/// se come el timeout. Un connect es la única respuesta honesta a "¿puedo
 /// sincronizar con esto ahora?".
 ///
 /// Del otro lado esto entra al accept loop y corta sin mandar nada: `serve`
@@ -381,6 +431,17 @@ pub fn probe_once(handle: &AppHandle) {
     for uid in came_online {
         crate::autosync::peer_came_online(handle, &uid);
     }
+}
+
+/// ¿Está vinculado? Consulta corta y en su propio scope: la corre el hilo de
+/// mDNS, que no tiene por qué retener el lock de la DB mientras un sync anda.
+fn is_paired(handle: &AppHandle, uid: &str) -> bool {
+    let state = handle.state::<crate::AppState>();
+    let Ok(conn) = state.db.lock() else {
+        return false;
+    };
+    conn.query_row("SELECT 1 FROM devices WHERE uid = ?1", [uid], |_| Ok(()))
+        .is_ok()
 }
 
 /// `(uid, name, platform, last_seen)` de los dispositivos ya pareados.
@@ -546,6 +607,53 @@ mod tests {
         seen(&peers, "peer-1", "Celu");
         assert!(peers.remove_by_fullname("peer-1._sway._tcp.local."));
         assert!(peers.list().is_empty());
+    }
+
+    /// Que mDNS deje de anunciar un dispositivo vinculado no puede sacarlo de
+    /// la lista: `probe_targets` recorre ese mismo mapa, así que borrarlo lo
+    /// dejaba fuera del sondeo TCP para siempre. En la práctica eran minutos
+    /// de "ningún dispositivo disponible" con el celular ahí al lado,
+    /// alcanzable, esperando.
+    #[test]
+    fn a_peer_that_stops_announcing_goes_grey_but_stays_probed() {
+        let peers = Peers::default();
+        seen(&peers, "peer-1", "Celu");
+
+        assert!(peers.mark_gone_by_fullname("peer-1._sway._tcp.local."));
+        let list = peers.list();
+        assert_eq!(list.len(), 1, "sigue en la lista");
+        assert!(!list[0].online, "pero gris");
+        assert_eq!(
+            peers.probe_targets().len(),
+            1,
+            "y sobre todo: se lo sigue sondeando"
+        );
+
+        // El sondeo lo encuentra: vuelve a verde sin que mDNS diga nada.
+        assert!(peers.set_online("peer-1", true));
+
+        // Segunda baja seguida no re-emite: ya estaba gris.
+        assert!(peers.mark_gone_by_fullname("peer-1._sway._tcp.local."));
+        assert!(!peers.mark_gone_by_fullname("peer-1._sway._tcp.local."));
+    }
+
+    /// El peer gris que se re-anuncia tiene que valer como puesta al día. Antes
+    /// lo cubría el borrado: al volver entraba como desconocido. Ahora sigue en
+    /// el mapa, así que la transición hay que verla en `online`.
+    #[test]
+    fn a_grey_peer_that_comes_back_is_a_catch_up_trigger() {
+        let peers = Peers::default();
+        seen(&peers, "peer-1", "Celu");
+        peers.mark_gone_by_fullname("peer-1._sway._tcp.local.");
+
+        let back = seen(&peers, "peer-1", "Celu");
+        assert!(back.first_time, "estuvo gris: puede haber estado horas");
+        assert!(back.changed, "y la UI tiene que pintarlo verde");
+
+        // Estando verde, un re-anuncio idéntico sigue sin ser nada.
+        let again = seen(&peers, "peer-1", "Celu");
+        assert!(!again.first_time);
+        assert!(!again.changed);
     }
 
     /// Los que están en la red van arriba; el resto, alfabético.
