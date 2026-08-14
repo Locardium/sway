@@ -3,6 +3,7 @@ mod cover;
 mod db;
 mod device_info;
 mod discovery;
+mod engine;
 mod export_xml;
 mod hashing;
 mod id3_sanitize;
@@ -206,6 +207,73 @@ impl AppState {
             Some(ts) => now - *ts < EXPECTED_PATH_TTL_MS,
             None => false,
         }
+    }
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncProgressEvent {
+    uid: String,
+    /// Índice del archivo actual y total de archivos de esta corrida.
+    file_index: usize,
+    file_total: usize,
+    filename: String,
+    /// Bytes del archivo actual.
+    done: u64,
+    total: u64,
+    sending: bool,
+}
+
+/// El motor de sync corriendo dentro de la app: la base es la de `AppState` y
+/// los avisos salen como eventos de ventana. La otra implementación de `Host`
+/// vive en la suite de integridad (`engine.rs`), que hace correr este mismo
+/// motor contra un directorio temporal.
+impl engine::Host for AppHandle {
+    fn with_db<T>(&self, f: impl FnOnce(&Connection) -> anyhow::Result<T>) -> anyhow::Result<T> {
+        let state = self.state::<AppState>();
+        let conn = state
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("db lock envenenado"))?;
+        f(&conn)
+    }
+
+    /// Lo que casi siempre da cero no puede quedar encolado detrás de un sync:
+    /// ver `db::open_read`.
+    fn with_db_read<T>(&self, f: impl FnOnce(&Connection) -> anyhow::Result<T>) -> anyhow::Result<T> {
+        let state = self.state::<AppState>();
+        let conn = state
+            .db_read
+            .lock()
+            .map_err(|_| anyhow::anyhow!("db lock envenenado"))?;
+        f(&conn)
+    }
+
+    fn music_dir(&self) -> PathBuf {
+        self.state::<AppState>().music_dir.clone()
+    }
+
+    fn expect_path(&self, dest: &std::path::Path) {
+        self.state::<AppState>().expect_path(dest);
+    }
+
+    fn progress(&self, p: &engine::Progress) {
+        let _ = self.emit(
+            "sync-progress",
+            SyncProgressEvent {
+                uid: p.peer_uid.to_string(),
+                file_index: p.index,
+                file_total: p.total_files,
+                filename: p.filename.to_string(),
+                done: p.done,
+                total: p.total,
+                sending: p.sending,
+            },
+        );
+    }
+
+    fn library_changed(&self, force: bool) {
+        pairing::emit_library_changed(self, force);
     }
 }
 
@@ -820,7 +888,7 @@ fn after_scope_change(app: &AppHandle, device_uid: &str) {
             // El rescate primero: toma el lock y puede hashear. Emitir antes
             // largaba a la UI a pedir la biblioteca entera justo contra ese
             // lock, y las dos cosas se esperaban entre sí.
-            timed("restore_local", || pairing::restore_local(&app));
+            timed("restore_local", || engine::restore(&app));
             // Marcar o desmarcar cambia qué se ve —qué playlists están en el
             // árbol, qué temas se muestran y cuáles quedan apagados— y eso sale
             // de `list_playlists` / `list_tracks`, que la UI no vuelve a pedir
