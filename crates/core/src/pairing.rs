@@ -110,6 +110,35 @@ pub fn store_device(
     Ok(())
 }
 
+/// Dirección fija de un dispositivo que no se descubre solo (el server).
+///
+/// Va aparte del alta porque el alta la comparten los dos caminos y sólo uno
+/// de los dos tiene una dirección que valga guardar: la de un peer de la LAN
+/// cambia con el DHCP, y la que vale es la que anuncia por mDNS.
+pub fn set_device_address(conn: &Connection, uid: &str, address: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE devices SET address = ?1 WHERE uid = ?2",
+        rusqlite::params![address, uid],
+    )?;
+    Ok(())
+}
+
+/// Los que tienen dirección fija: `(uid, name, platform, address)`.
+pub fn devices_with_address(conn: &Connection) -> Vec<(String, String, String, String)> {
+    let mut stmt = match conn.prepare(
+        "SELECT uid, name, platform, address FROM devices
+         WHERE address IS NOT NULL AND address <> ''",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)));
+    match rows {
+        Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 pub fn forget_device(conn: &Connection, uid: &str) -> Result<()> {
     conn.execute("DELETE FROM devices WHERE uid = ?1", [uid])?;
     Ok(())
@@ -268,6 +297,29 @@ mod tests {
             )
             .unwrap();
         assert_eq!(logged, 1);
+    }
+
+    #[test]
+    fn la_direccion_fija_se_guarda_y_se_recupera() {
+        let conn = db();
+        store_device(&conn, "srv-1", "Server", PLATFORM_SERVER, b"k").unwrap();
+        store_device(&conn, "celu", "Celu", "android", b"k2").unwrap();
+        assert!(devices_with_address(&conn).is_empty());
+
+        set_device_address(&conn, "srv-1", "casa.ejemplo:7420").unwrap();
+        let listed = devices_with_address(&conn);
+        assert_eq!(listed.len(), 1, "el peer de la LAN no tiene que tener dirección");
+        assert_eq!(listed[0].0, "srv-1");
+        assert_eq!(listed[0].3, "casa.ejemplo:7420");
+    }
+
+    #[test]
+    fn desvincular_el_server_se_lleva_su_direccion() {
+        let conn = db();
+        store_device(&conn, "srv-1", "Server", PLATFORM_SERVER, b"k").unwrap();
+        set_device_address(&conn, "srv-1", "casa.ejemplo:7420").unwrap();
+        forget_device(&conn, "srv-1").unwrap();
+        assert!(devices_with_address(&conn).is_empty());
     }
 
     #[test]

@@ -165,6 +165,16 @@ export const confirmPairing = (uid: string, accept: boolean) =>
   invoke<boolean>('confirm_pairing', { uid, accept });
 export const unpairDevice = (uid: string) => invoke<void>('unpair_device', { uid });
 
+/// Vincula con un server de archivo, que vive fuera de la red local y por eso
+/// no aparece solo. Esta sí contesta en la misma llamada —del otro lado no hay
+/// nadie que tarde en decidir— y devuelve el nombre que declaró el server.
+export const pairWithServer = (host: string, port: number, token: string) =>
+  invoke<string>('pair_with_server', { host, port, token });
+
+/// Plataforma que declara el server. La lista de dispositivos la usa para no
+/// mostrarlo como algo que debería aparecer en la red.
+export const PLATFORM_SERVER = 'server';
+
 /// Payload del evento `pairing-request`: hay que mostrar `code` y esperar que
 /// el usuario confirme. El mismo código aparece en las dos pantallas.
 export interface PairingRequest {

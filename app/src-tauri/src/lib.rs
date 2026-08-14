@@ -713,6 +713,16 @@ fn confirm_pairing(app: AppHandle, uid: String, accept: bool) -> bool {
     pairing::resolve_decision(&app, &uid, accept)
 }
 
+/// Vincula con un server de archivo por dirección (Fase 6.3).
+///
+/// A diferencia del resto del pairing, esto contesta en la misma llamada: del
+/// otro lado no hay nadie que tarde en decidir, así que no hace falta que la
+/// UI espere un evento. Devuelve el nombre que declaró el server.
+#[tauri::command]
+fn pair_with_server(app: AppHandle, host: String, port: u16, token: String) -> Result<String, String> {
+    pairing::pair_with_server(&app, host.trim(), port, token.trim()).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn unpair_device(app: AppHandle, uid: String) -> Result<(), String> {
     pairing::unpair(&app, &uid).map_err(|e| e.to_string())?;
@@ -1368,6 +1378,11 @@ pub fn run() {
                 autosync: autosync::AutoSync::default(),
             });
 
+            // Los dispositivos con dirección fija (el server de archivo) van
+            // antes del sondeo: a esos no los anuncia nadie, así que si no se
+            // reponen acá desaparecen en cada arranque.
+            pairing::restore_manual_peers(app.handle());
+
             if let Some(listener) = listener {
                 pairing::spawn_server(app.handle().clone(), listener);
                 discovery::spawn_prober(app.handle().clone());
@@ -1448,6 +1463,7 @@ pub fn run() {
             preview_sync,
             sync_files,
             confirm_pairing,
+            pair_with_server,
             unpair_device,
             get_delete_policy,
             set_delete_policy,

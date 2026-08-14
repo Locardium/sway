@@ -175,6 +175,36 @@ impl Peers {
         self.set_online(uid, false)
     }
 
+    /// Un dispositivo con dirección fija, que nadie va a descubrir (Fase 6.3).
+    ///
+    /// Entra a la misma lista que los que anuncia mDNS, y esa es toda la
+    /// gracia: de acá para abajo —el sondeo, el estado online, el sync
+    /// automático cuando vuelve— no hay una sola rama que pregunte de dónde
+    /// salió. La diferencia es de dónde se enteró la app, no qué es.
+    ///
+    /// No se lo puede sacar por `ServiceRemoved`: ese camino busca por
+    /// fullname de mDNS y este peer no tiene ninguno.
+    pub fn add_manual(&self, uid: &str, name: &str, platform: &str, host: &str, port: u16) {
+        let mut map = self.by_uid.lock().unwrap();
+        let entry = map.entry(uid.to_string()).or_insert_with(|| Peer {
+            uid: uid.to_string(),
+            name: name.to_string(),
+            platform: platform.to_string(),
+            proto: PROTO.to_string(),
+            addrs: Vec::new(),
+            port,
+            last_seen: crate::db::now_ms(),
+            paired: true,
+            // Todavía no se sabe: lo dice el sondeo. Nacer en `true` mostraría
+            // un server prendido cuando la conexión ni se intentó.
+            online: false,
+        });
+        entry.addrs = vec![host.to_string()];
+        entry.port = port;
+        entry.name = name.to_string();
+        entry.platform = platform.to_string();
+    }
+
     /// Devuelve `true` si el estado cambió (o sea, si hay algo que mostrar).
     fn set_online(&self, uid: &str, online: bool) -> bool {
         let mut map = self.by_uid.lock().unwrap();
@@ -411,9 +441,9 @@ pub fn probe_once(handle: &AppHandle) {
     let mut changed = false;
     let mut came_online = Vec::new();
     for (uid, ip, port) in state.peers.probe_targets() {
-        let reachable = match format!("{ip}:{port}").parse() {
-            Ok(addr) => std::net::TcpStream::connect_timeout(&addr, PROBE_TIMEOUT).is_ok(),
-            Err(_) => false,
+        let reachable = match resolve(&ip, port) {
+            Some(addr) => std::net::TcpStream::connect_timeout(&addr, PROBE_TIMEOUT).is_ok(),
+            None => false,
         };
         if state.peers.set_online(&uid, reachable) {
             changed = true;
@@ -431,6 +461,17 @@ pub fn probe_once(handle: &AppHandle) {
     for uid in came_online {
         crate::autosync::peer_came_online(handle, &uid);
     }
+}
+
+/// Dirección donde intentar la conexión.
+///
+/// No alcanza con parsear: mDNS anuncia IPs, pero un server puesto a mano es
+/// casi siempre un nombre —una casa no tiene IP fija, y lo que se pone es el
+/// DDNS del router—. `parse::<SocketAddr>` con un nombre falla, y el peer
+/// quedaba gris para siempre sin ningún error a la vista.
+pub fn resolve(host: &str, port: u16) -> Option<std::net::SocketAddr> {
+    use std::net::ToSocketAddrs;
+    (host, port).to_socket_addrs().ok()?.next()
 }
 
 /// ¿Está vinculado? Consulta corta y en su propio scope: la corre el hilo de

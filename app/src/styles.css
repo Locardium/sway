@@ -701,6 +701,10 @@ table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
   transition: border-color 160ms var(--ease);
 }
 .set-input:focus { border-color: var(--accent); }
+.set-input:disabled { opacity: 0.5; }
+/* El host se lleva el ancho; el puerto son cuatro dígitos. */
+.set-row > .set-input:not(.port) { flex: 1; width: auto; }
+.set-input.port { width: 76px; font-variant-numeric: tabular-nums; }
 
 /* Dispositivos vistos en la LAN (Fase 5) */
 .peer-list { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }

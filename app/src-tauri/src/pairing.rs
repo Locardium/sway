@@ -402,9 +402,8 @@ fn peer_addr(handle: &AppHandle, uid: &str) -> Result<SocketAddr> {
         .addrs
         .first()
         .ok_or_else(|| anyhow!("el dispositivo no publicó ninguna dirección"))?;
-    format!("{addr}:{}", peer.port)
-        .parse()
-        .map_err(|e| anyhow!("dirección inválida ({addr}): {e}"))
+    crate::discovery::resolve(addr, peer.port)
+        .ok_or_else(|| anyhow!("no se pudo resolver la dirección ({addr}:{})", peer.port))
 }
 
 fn connect_inner(handle: &AppHandle, uid: &str) -> Result<()> {
@@ -507,6 +506,115 @@ fn connect_inner(handle: &AppHandle, uid: &str) -> Result<()> {
             exchange_hello(handle, &mut sess, uid, &name)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Server de archivo (Fase 6.3)
+// ---------------------------------------------------------------------------
+
+/// Cuánto se espera al server. Los 180 s de `IO_TIMEOUT` son para el otro
+/// caso, donde puede haber una persona decidiendo; acá contesta una máquina, y
+/// esta llamada bloquea la pantalla mientras tanto.
+const SERVER_IO_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Vincula con un server de archivo, que no se descubre solo y no tiene
+/// pantalla donde comparar un código.
+///
+/// Devuelve el nombre que declaró el server. A diferencia del pairing entre
+/// dispositivos, esto NO vuelve enseguida: del otro lado no hay nadie que
+/// tarde en decidir, así que la respuesta llega en el mismo viaje y la UI
+/// puede mostrar el resultado sin esperar un evento.
+pub fn pair_with_server(handle: &AppHandle, host: &str, port: u16, token: &str) -> Result<String> {
+    let addr = crate::discovery::resolve(host, port)
+        .ok_or_else(|| anyhow!("no se pudo resolver {host}:{port}"))?;
+    let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)?;
+    stream.set_read_timeout(Some(SERVER_IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(SERVER_IO_TIMEOUT))?;
+    let private = private_key(handle)?;
+    let mut sess = Session::connect(stream, &private)?;
+
+    let (my_uid, my_name) = me(handle)?;
+    sess.send(&Msg::PairRequest {
+        uid: my_uid,
+        name: my_name,
+        platform: platform(),
+        token: Some(token.to_string()),
+    })?;
+    match sess.recv()? {
+        Msg::PairResponse { accepted: true } => {}
+        Msg::PairResponse { accepted: false } => {
+            return Err(anyhow!("el server rechazó el token"))
+        }
+        Msg::Reject { reason } => return Err(anyhow!(reason)),
+        other => return Err(anyhow!("se esperaba PairResponse, llego {other:?}")),
+    }
+    sess.send(&Msg::PairAck { accepted: true })?;
+
+    // Recién acá se sabe con qué uid se está hablando: a un server se lo llama
+    // por dirección, no por identidad. Por eso la comprobación de clave viene
+    // después y no antes — pero viene, y antes de guardar nada.
+    let (their_uid, their_name, their_platform) = match sess.recv()? {
+        Msg::Hello {
+            uid, name, platform, ..
+        } => (uid, name, platform),
+        Msg::Reject { reason } => return Err(anyhow!(reason)),
+        other => return Err(anyhow!("se esperaba Hello, llego {other:?}")),
+    };
+    if let Known::KeyMismatch = known_state(handle, &their_uid, &sess.peer_pubkey) {
+        warn_key_mismatch(handle, &their_uid, &their_name);
+        return Err(anyhow!(
+            "la clave de {their_name} no coincide con la que tenías guardada"
+        ));
+    }
+
+    let (tracks, playlists) = library_counts(handle);
+    let (my_uid, my_name) = me(handle)?;
+    sess.send(&Msg::Hello {
+        uid: my_uid,
+        name: my_name,
+        platform: platform(),
+        tracks,
+        playlists,
+        clock_ms: db::now_ms(),
+    })?;
+
+    store_device(handle, &their_uid, &their_name, &their_platform, &sess.peer_pubkey)?;
+    {
+        let state = handle.state::<AppState>();
+        let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
+        core_pair::set_device_address(&conn, &their_uid, &format!("{host}:{port}"))?;
+    }
+    // Entra a la misma lista que los peers de mDNS: de acá para abajo es un
+    // dispositivo más.
+    handle
+        .state::<AppState>()
+        .peers
+        .add_manual(&their_uid, &their_name, &their_platform, host, port);
+    let _ = handle.emit("peers-changed", ());
+    log::info!("[pair] server {their_name} vinculado en {host}:{port}");
+    Ok(their_name)
+}
+
+/// Vuelve a poner en la lista los dispositivos con dirección fija. Los de la
+/// LAN los repone mDNS solo; a estos no los anuncia nadie, así que sin esto
+/// desaparecen en cada arranque.
+pub fn restore_manual_peers(handle: &AppHandle) {
+    let state = handle.state::<AppState>();
+    let Ok(conn) = state.db.lock() else { return };
+    for (uid, name, platform, address) in core_pair::devices_with_address(&conn) {
+        let Some((host, port)) = split_addr(&address) else {
+            log::warn!("[pair] dirección guardada inválida para {name}: {address}");
+            continue;
+        };
+        state.peers.add_manual(&uid, &name, &platform, host, port);
+    }
+}
+
+/// `host:puerto`, con el host pudiendo ser un nombre o un IPv6 entre corchetes.
+fn split_addr(address: &str) -> Option<(&str, u16)> {
+    let (host, port) = address.rsplit_once(':')?;
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    Some((host, port.parse().ok()?))
 }
 
 #[derive(Clone, Serialize)]
@@ -852,4 +960,26 @@ fn notify_unpair(handle: &AppHandle, addr: SocketAddr) -> Result<()> {
     let mut sess = Session::connect(stream, &private)?;
     let (my_uid, _) = me(handle)?;
     sess.send(&Msg::Unpair { uid: my_uid })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_addr;
+
+    #[test]
+    fn la_direccion_guardada_se_parte_en_host_y_puerto() {
+        assert_eq!(split_addr("casa.ejemplo:7420"), Some(("casa.ejemplo", 7420)));
+        assert_eq!(split_addr("192.168.0.10:7420"), Some(("192.168.0.10", 7420)));
+        // IPv6: el host va entre corchetes justamente porque adentro hay `:`.
+        assert_eq!(split_addr("[fd00::1]:7420"), Some(("fd00::1", 7420)));
+    }
+
+    #[test]
+    fn una_direccion_sin_puerto_no_se_inventa_uno() {
+        // Vale más quedarse sin el peer que sondear un puerto que nadie eligió.
+        assert_eq!(split_addr("casa.ejemplo"), None);
+        assert_eq!(split_addr("casa.ejemplo:"), None);
+        assert_eq!(split_addr("casa.ejemplo:puerto"), None);
+        assert_eq!(split_addr(""), None);
+    }
 }

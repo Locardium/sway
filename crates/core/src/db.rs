@@ -132,7 +132,12 @@ CREATE TABLE IF NOT EXISTS devices (
     pubkey       BLOB,               -- clave estatica Noise, fijada al parear
     paired_at    INTEGER,
     last_seen    INTEGER,
-    last_sync_at INTEGER             -- corte del manifest incremental
+    last_sync_at INTEGER,            -- corte del manifest incremental
+    -- `host:puerto` de un dispositivo que NO se descubre solo (Fase 6.3): el
+    -- server de archivo, que vive fuera de la LAN y por eso no aparece en
+    -- mDNS. Los dispositivos de la red local lo dejan NULL — su direccion
+    -- cambia con el DHCP, y la que vale es la que anuncian.
+    address      TEXT
 );
 
 -- Lo unico de a pares y local que queda: que hago con los borrados que me
@@ -355,6 +360,8 @@ fn migrate(conn: &Connection) -> Result<()> {
         // la tabla existe con dos columnas y ninguna fila util.
         ("sync_scope", "selected INTEGER NOT NULL DEFAULT 1"),
         ("sync_scope", "updated_at INTEGER NOT NULL DEFAULT 0"),
+        // Fase 6.3: direccion fija de los dispositivos que no se descubren.
+        ("devices", "address TEXT"),
     ];
     for (table, decl) in added {
         // Una tabla que todavia no existe no necesita migracion: la crea

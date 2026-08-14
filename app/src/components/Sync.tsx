@@ -14,6 +14,8 @@ import {
   getScope,
   listPeers,
   listPendingDeletes,
+  pairWithServer,
+  PLATFORM_SERVER,
   previewSync,
   refreshPeers,
   resolvePendingDelete,
@@ -309,6 +311,14 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
   const [myScope, setMyScope] = useState<Scope>({ mode: 'all', direction: 'both', selected: [] });
   const [scanning, setScanning] = useState(false);
   const [freeing, setFreeing] = useState(false);
+
+  // Server de archivo: no se descubre, se escribe. Se acuerda del host entre
+  // intentos (equivocarse en el token es lo más probable) pero nunca del
+  // token.
+  const [serverHost, setServerHost] = useState('');
+  const [serverPort, setServerPort] = useState('7420');
+  const [serverToken, setServerToken] = useState('');
+  const [addingServer, setAddingServer] = useState(false);
 
   /// Resumen por dispositivo para la lista: dirección y selección. La
   /// dirección describe un vínculo, así que no existe para "este dispositivo"
@@ -844,15 +854,22 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
                       <small>
                         {p.paired && summaries[p.uid]
                           ? summaries[p.uid]
-                          : !p.online
-                            ? 'Not on this network'
-                            : `${p.platform} · ${p.addrs[0] ?? 'no address'}:${p.port}`}
+                          : // Un server nunca está "en esta red": vive afuera y
+                            // se lo llama por su dirección, así que decirlo
+                            // sería mentir en los dos estados.
+                            p.platform === PLATFORM_SERVER
+                            ? `Archive server · ${p.addrs[0] ?? '?'}:${p.port}`
+                            : !p.online
+                              ? 'Not on this network'
+                              : `${p.platform} · ${p.addrs[0] ?? 'no address'}:${p.port}`}
                       </small>
                     </div>
                     <div className="set-control">
                       <span className={'peer-badge' + (p.paired && p.online ? ' ok' : '')}>
                         {!p.online
-                          ? 'Offline'
+                          ? p.platform === PLATFORM_SERVER
+                            ? 'Unreachable'
+                            : 'Offline'
                           : incompatible
                             ? 'Other version'
                             : p.paired
@@ -887,6 +904,74 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
           <p className="set-note">
             Sync moves files in both directions, then playlists, folders, order and metadata. Each
             device decides what it keeps; deletions follow the rules you set per device.
+          </p>
+        </section>
+
+        <section>
+          <h4>Archive server</h4>
+          <div className="set-row">
+            <div className="set-label">
+              <span>Add a server</span>
+              <small>
+                A server keeps a copy of everything and stays reachable from outside your home
+                network. It has no screen, so it takes a token instead of a code.
+              </small>
+            </div>
+          </div>
+          <div className="set-row">
+            <input
+              className="set-input"
+              placeholder="host or address"
+              value={serverHost}
+              onChange={(e) => setServerHost(e.target.value)}
+              disabled={addingServer}
+            />
+            <input
+              className="set-input port"
+              placeholder="7420"
+              inputMode="numeric"
+              value={serverPort}
+              onChange={(e) => setServerPort(e.target.value)}
+              disabled={addingServer}
+            />
+          </div>
+          <div className="set-row">
+            <input
+              className="set-input"
+              type="password"
+              placeholder="pairing token"
+              value={serverToken}
+              onChange={(e) => setServerToken(e.target.value)}
+              disabled={addingServer}
+            />
+            <button
+              className="primary"
+              disabled={addingServer || !serverHost.trim() || !serverToken.trim()}
+              onClick={() => {
+                const port = Number(serverPort.trim() || '7420');
+                if (!Number.isInteger(port) || port < 1 || port > 65535) {
+                  onStatus('Port must be a number between 1 and 65535');
+                  return;
+                }
+                setAddingServer(true);
+                pairWithServer(serverHost.trim(), port, serverToken.trim())
+                  .then((name) => {
+                    // El token no se guarda ni se deja escrito: ya cumplió, y
+                    // es una contraseña.
+                    setServerToken('');
+                    onStatus(`${name} paired`);
+                    reloadPeers();
+                  })
+                  .catch((e) => onStatus(String(e)))
+                  .finally(() => setAddingServer(false));
+              }}
+            >
+              {addingServer ? 'Connecting…' : 'Add server'}
+            </button>
+          </div>
+          <p className="set-note">
+            The token is in the server's <code>sway-server.toml</code>. Once paired, the server
+            shows up in the list above like any other device.
           </p>
         </section>
       </div>
