@@ -3961,6 +3961,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "sway-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "log",
+ "serde",
+ "sway-core",
+ "toml 0.8.2",
+ "uuid",
+]
+
+[[package]]
 name = "swift-rs"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

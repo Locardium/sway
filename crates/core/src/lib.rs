@@ -12,6 +12,12 @@
 //! dice al motor cómo llegar a la base, dónde están los archivos y qué hacer
 //! cuando algo cambia.
 
+/// Reexportado para que quien use el crate no tenga que declarar `rusqlite`
+/// por su cuenta: dos versiones distintas de la misma biblioteca en el mismo
+/// binario son dos tipos `Connection` incompatibles, y el error que da no se
+/// parece en nada a la causa.
+pub use rusqlite;
+
 /// Dónde se dejan los tiempos, además del log. Lo setea quien use el crate
 /// (en la app, el `setup` de Tauri).
 static PERF_FILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();

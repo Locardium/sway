@@ -1,0 +1,28 @@
+[package]
+name = "sway-server"
+version = "0.1.0"
+description = "Server de archivo y sync de Sway — sin interfaz, para dejar prendido"
+edition = "2021"
+
+[lib]
+name = "sway_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sway-server"
+path = "src/main.rs"
+
+[dependencies]
+# El mismo motor que corre adentro de la app. Que sea literalmente el mismo
+# codigo es todo el punto: un server con su propia implementacion del
+# protocolo seria una segunda cosa que mantener sincronizada, y la que se
+# quede atras corrompe bibliotecas.
+sway-core = { path = "../core" }
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11.11"
+serde = { version = "1", features = ["derive"] }
+# El archivo de configuracion lo edita una persona en una terminal por SSH.
+toml = "0.8"
+# Token de vinculacion: v4 es aleatorio, que es lo unico que se le pide.
+uuid = { version = "1", features = ["v4"] }

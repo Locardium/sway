@@ -11,7 +11,7 @@
 # sobre el mismo motor.
 [workspace]
 resolver = "2"
-members = ["app/src-tauri", "crates/core"]
+members = ["app/src-tauri", "crates/core", "crates/server"]
 
 # Las dependencias van optimizadas TAMBIEN en debug. Sin esto, el canal
 # cifrado del sync corre sin optimizar y da 3,5 MB/s: mandar un track de
