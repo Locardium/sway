@@ -1,22 +1,19 @@
 mod autosync;
 mod cover;
-mod db;
-mod device_info;
 mod discovery;
-mod engine;
 mod export_xml;
-mod hashing;
-mod id3_sanitize;
-mod import;
-mod manifest;
-mod merge;
 mod pairing;
-mod rank;
-mod scope;
-mod transfer;
-mod trash;
-mod wire;
 mod xml_sync;
+
+// El motor vive en `crates/core` desde la Fase 6.0 — la app y el server
+// headless son dos frentes sobre el mismo código. Se reexporta con los mismos
+// nombres que tenía cuando era todo un crate solo: así los `crate::db::…` de
+// los módulos que quedaron acá siguen resolviendo igual, y la extracción no
+// tuvo que tocar el cuerpo de ningún archivo.
+pub use sway_core::{
+    db, device_info, engine, hashing, id3_sanitize, import, manifest, merge, perf_line, rank, scope,
+    transfer, trash, wire,
+};
 
 // Desktop: Player real (rodio/symphonia, thread propio). Android/iOS: stub
 // con la misma API — la reproduccion ahi va por el plugin nativo desde JS
@@ -228,9 +225,15 @@ struct SyncProgressEvent {
 /// los avisos salen como eventos de ventana. La otra implementación de `Host`
 /// vive en la suite de integridad (`engine.rs`), que hace correr este mismo
 /// motor contra un directorio temporal.
-impl engine::Host for AppHandle {
+///
+/// Es un envoltorio y no un `impl` directo sobre `AppHandle` porque desde la
+/// Fase 6.0 el trait vive en otro crate: implementar un trait ajeno para un
+/// tipo ajeno no se puede. Envuelve prestado, así que no cuesta nada.
+pub struct AppHost<'a>(pub &'a AppHandle);
+
+impl engine::Host for AppHost<'_> {
     fn with_db<T>(&self, f: impl FnOnce(&Connection) -> anyhow::Result<T>) -> anyhow::Result<T> {
-        let state = self.state::<AppState>();
+        let state = self.0.state::<AppState>();
         let conn = state
             .db
             .lock()
@@ -241,7 +244,7 @@ impl engine::Host for AppHandle {
     /// Lo que casi siempre da cero no puede quedar encolado detrás de un sync:
     /// ver `db::open_read`.
     fn with_db_read<T>(&self, f: impl FnOnce(&Connection) -> anyhow::Result<T>) -> anyhow::Result<T> {
-        let state = self.state::<AppState>();
+        let state = self.0.state::<AppState>();
         let conn = state
             .db_read
             .lock()
@@ -250,15 +253,15 @@ impl engine::Host for AppHandle {
     }
 
     fn music_dir(&self) -> PathBuf {
-        self.state::<AppState>().music_dir.clone()
+        self.0.state::<AppState>().music_dir.clone()
     }
 
     fn expect_path(&self, dest: &std::path::Path) {
-        self.state::<AppState>().expect_path(dest);
+        self.0.state::<AppState>().expect_path(dest);
     }
 
     fn progress(&self, p: &engine::Progress) {
-        let _ = self.emit(
+        let _ = self.0.emit(
             "sync-progress",
             SyncProgressEvent {
                 uid: p.peer_uid.to_string(),
@@ -273,7 +276,7 @@ impl engine::Host for AppHandle {
     }
 
     fn library_changed(&self, force: bool) {
-        pairing::emit_library_changed(self, force);
+        pairing::emit_library_changed(self.0, force);
     }
 }
 
@@ -303,24 +306,6 @@ fn timed<T>(what: &str, f: impl FnOnce() -> T) -> T {
         perf_line(&format!("{what}: {ms} ms"));
     }
     out
-}
-
-/// Dónde se dejan los tiempos, además del log. Lo setea el `setup`.
-static PERF_FILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
-
-/// TEMPORAL — diagnóstico.
-///
-/// En Android los `log::*` van a logcat, pero hay dispositivos que lo traen
-/// apagado a nivel sistema (`live.logcat=disable`, que ni el shell de adb puede
-/// cambiar): ahí el buffer entero devuelve cero líneas y no hay forma de ver un
-/// tiempo. Un archivo al lado de la DB se puede sacar con `run-as` sin tocar
-/// ninguna configuración del teléfono.
-pub fn perf_line(line: &str) {
-    use std::io::Write;
-    let Some(path) = PERF_FILE.get() else { return };
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(f, "{} {line}", db::now_ms());
-    }
 }
 
 #[tauri::command]
@@ -888,7 +873,7 @@ fn after_scope_change(app: &AppHandle, device_uid: &str) {
             // El rescate primero: toma el lock y puede hashear. Emitir antes
             // largaba a la UI a pedir la biblioteca entera justo contra ese
             // lock, y las dos cosas se esperaban entre sí.
-            timed("restore_local", || engine::restore(&app));
+            timed("restore_local", || engine::restore(&AppHost(&app)));
             // Marcar o desmarcar cambia qué se ve —qué playlists están en el
             // árbol, qué temas se muestran y cuáles quedan apagados— y eso sale
             // de `list_playlists` / `list_tracks`, que la UI no vuelve a pedir
@@ -1324,7 +1309,7 @@ pub fn run() {
             // lo que se lea sea siempre de la corrida actual.
             let perf = dir.join("perf.log");
             std::fs::write(&perf, "").ok();
-            let _ = PERF_FILE.set(perf);
+            sway_core::set_perf_file(perf);
             eprintln!("[db] archivo: {}", db_file.display());
             let conn = db::open(&db_file).expect("db open");
             // El WAL se consolida aparte: ver `db::open`, ningún click paga eso.

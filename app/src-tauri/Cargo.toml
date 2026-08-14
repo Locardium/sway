@@ -11,22 +11,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
-# Las dependencias van optimizadas TAMBIEN en debug. Sin esto, el canal
-# cifrado del sync corre sin optimizar y da 3,5 MB/s: mandar un track de
-# 40 MB tardaba 12 s en `tauri dev`. Se pierden dias buscando eso en la red
-# — Nagle, wifi, el celu — cuando el cuello es ChaCha20-Poly1305 compilado
-# con opt-level 0. En release el mismo canal da 476 MB/s: 136x.
-#
-# Medirlo de nuevo:
-#   cargo test --release -- --ignored --nocapture channel_throughput
-#
-# Solo las dependencias, no el crate propio: este sigue sin optimizar, que es
-# lo que mantiene util al debugger y corta la recompilacion. blake3 y rusqlite
-# se llevan la misma mejora de arriba.
-[profile.dev.package."*"]
-opt-level = 3
+# El perfil de compilacion vive en el Cargo.toml de la raiz desde la Fase 6.0
+# (cargo ignora `[profile]` en un miembro del workspace).
 
 [dependencies]
+# El motor: biblioteca, identidad de archivos y sync. Sin Tauri adentro, para
+# que el server headless (Fase 6.2) pueda usar exactamente el mismo codigo.
+sway-core = { path = "../../crates/core" }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
@@ -34,41 +25,21 @@ tauri-plugin-os = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Solo para las caratulas (cover.rs); los tags del import los lee sway-core.
 lofty = "0.24"
-walkdir = "2"
 anyhow = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp"] }
 base64 = "0.22"
 notify-debouncer-mini = "0.7.0"
 log = "0.4"
 
-# Fase 5 (sync P2P). blake3 = identidad de los bytes de cada archivo: elegido
-# sobre sha256 por velocidad (importa con bibliotecas de 100+ GB) y porque su
-# arbol interno permite verificar por chunk, no solo al final del archivo.
-# uuid = identidad logica de tracks/playlists, estable entre dispositivos
-# (los `id` INTEGER son locales y no significan nada del otro lado).
-blake3 = "1"
-uuid = { version = "1", features = ["v4"] }
 # Descubrimiento de dispositivos en la LAN (Fase 5.1). Puro Rust, mismo
 # codigo en desktop y Android. OJO Android: sin MulticastLock no recibe NADA
 # y sin error visible (ver MainActivity.kt).
-mdns-sd = "0.20.3"
-# Canal cifrado del sync (Fase 5.2): handshake Noise XX. Sin features por
-# default a proposito — el set completo arrastra `ring` (C/asm, un problema
-# mas en el cross-compile a Android) y AES, que no se usa. Esto deja
-# exactamente lo que pide Noise_XX_25519_ChaChaPoly_BLAKE2s, todo Rust puro.
 #
-# OJO: tampoco va la feature "std". En snow 0.10 esta declarada como
-# `std = [..., "ring/std"]` (sin el `?`), asi que prenderla FUERZA la
-# dependencia opcional `ring` aunque no se use ningun resolver de ring.
-snow = { version = "0.10", default-features = false, features = [
-    "default-resolver",
-    "use-curve25519",
-    "use-chacha20poly1305",
-    "use-blake2",
-    "use-sha2",
-    "use-getrandom",
-] }
+# blake3, uuid, snow y walkdir salieron de aca en la Fase 6.0: viven en
+# sway-core, que es quien los usa.
+mdns-sd = "0.20.3"
 
 # En Android eprintln! no llega a logcat; sin esto no hay forma de ver
 # errores en runtime (nos quemamos con esto: lofty fallaba en silencio en
@@ -76,8 +47,7 @@ snow = { version = "0.10", default-features = false, features = [
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.14"
 
-# Desktop-only: symphonia/rodio decodifican audio; trash no soporta Android
-# (sin papelera de OS ahi, ver db.rs::delete_tracks).
+# Desktop-only: symphonia/rodio decodifican audio.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 # En Android los log::* van a logcat via android_logger; en desktop, sin un
 # logger instalado, NO IMPRIMEN NADA. Todo el modulo de sync usa log::*, asi
@@ -85,7 +55,6 @@ android_logger = "0.14"
 # hacian falta.
 env_logger = "0.11.11"
 rodio = { version = "0.19", features = ["symphonia-all"] }
-trash = "5.2.6"
 
 # Reproduccion mobile: Media3/ExoPlayer via plugin nativo, controlado desde JS
 # (ver app/src/nativeAudio.ts). Validado en Fase 0.5, ver spike-android-audio/.

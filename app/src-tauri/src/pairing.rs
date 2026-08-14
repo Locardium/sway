@@ -401,7 +401,7 @@ fn serve(handle: &AppHandle, stream: TcpStream) -> Result<()> {
                 clock_ms: db::now_ms(),
             })?;
             report_hello(handle, &uid, &name, tracks, playlists, clock_ms);
-            engine::serve_requests(handle, &mut sess, &uid)
+            engine::serve_requests(&crate::AppHost(handle), &mut sess, &uid)
         }
         // El otro lado nos sacó de sus dispositivos. Solo se acepta si su
         // clave es la que teníamos guardada — o sea, si el handshake probó
@@ -653,7 +653,7 @@ fn open_session(handle: &AppHandle, uid: &str) -> Result<Session> {
 
 fn preview_inner(handle: &AppHandle, uid: &str) -> Result<crate::manifest::Plan> {
     let mut sess = open_session(handle, uid)?;
-    let (mut plan, _, dir) = engine::fetch_plan(handle, &mut sess)?;
+    let (mut plan, _, dir) = engine::fetch_plan(&crate::AppHost(handle), &mut sess)?;
     engine::restrict(&mut plan, dir);
     let _ = sess.send(&Msg::Bye);
     Ok(plan)
@@ -770,7 +770,7 @@ fn run_sync(handle: AppHandle, uid: String, auto: bool) {
 /// es el mismo codigo que ejercita la suite de integridad (ver engine.rs).
 fn sync_inner(handle: &AppHandle, uid: &str) -> Result<engine::SyncResult> {
     let mut sess = open_session(handle, uid)?;
-    engine::sync(handle, &mut sess, uid)
+    engine::sync(&crate::AppHost(handle), &mut sess, uid)
 }
 
 fn platform_of(handle: &AppHandle, uid: &str) -> String {

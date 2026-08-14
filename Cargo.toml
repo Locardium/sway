@@ -1,0 +1,29 @@
+
+# Workspace Rust del proyecto (Fase 6).
+#
+# Hasta acá había un solo crate: la app Tauri. El server de sync (Fase 6.2)
+# corre headless en un Ubuntu sin escritorio, así que no puede arrastrar
+# `tauri` — que trae wry/tao y, en Linux, webkit2gtk. La única forma de
+# compartir el motor de sync entre la app y el server es que el motor viva en
+# un crate propio que no sepa que Tauri existe.
+#
+# `crates/core` es ese crate. La app y el server son dos frentes distintos
+# sobre el mismo motor.
+[workspace]
+resolver = "2"
+members = ["app/src-tauri", "crates/core"]
+
+# Las dependencias van optimizadas TAMBIEN en debug. Sin esto, el canal
+# cifrado del sync corre sin optimizar y da 3,5 MB/s: mandar un track de
+# 40 MB tardaba 12 s en `tauri dev`. Se pierden dias buscando eso en la red
+# — Nagle, wifi, el celu — cuando el cuello es ChaCha20-Poly1305 compilado
+# con opt-level 0. En release el mismo canal da 476 MB/s: 136x.
+#
+# Medirlo de nuevo:
+#   cargo test --release -p sway-core -- --ignored --nocapture channel_throughput
+#
+# Solo las dependencias, no los crates propios: esos siguen sin optimizar, que
+# es lo que mantiene util al debugger y corta la recompilacion. blake3 y
+# rusqlite se llevan la misma mejora de arriba.
+[profile.dev.package."*"]
+opt-level = 3
