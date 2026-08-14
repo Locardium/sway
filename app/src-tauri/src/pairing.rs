@@ -19,7 +19,6 @@ use crate::engine::{self, is_disconnect};
 use crate::wire::{Msg, Session};
 use crate::AppState;
 use anyhow::{anyhow, Result};
-use base64::Engine;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -49,12 +48,13 @@ pub fn emit_library_changed(handle: &AppHandle, force: bool) {
 
 /// Cuánto se espera a que una persona mire la pantalla y confirme.
 const DECISION_TIMEOUT: Duration = Duration::from_secs(120);
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// Generoso a propósito: del otro lado puede haber alguien todavía decidiendo.
-const IO_TIMEOUT: Duration = Duration::from_secs(180);
 
-const SETTING_PRIVKEY: &str = "noise_private";
-const SETTING_PUBKEY: &str = "noise_public";
+// Lo que no necesita pantalla vive en `sway_core::pairing` desde la Fase 6.1:
+// claves, estado de `devices`, conteos y timeouts. Acá queda la ceremonia —
+// mostrar el código y esperar a que alguien lo mire — y los eventos de ventana.
+// Las funciones de abajo son la misma operación con el `AppHandle` puesto.
+use sway_core::pairing as core_pair;
+use sway_core::pairing::{platform, Known, CONNECT_TIMEOUT, IO_TIMEOUT};
 
 /// Decisiones de pairing pendientes, por uid del peer. El hilo de la conexión
 /// espera en el receptor; el comando `confirm_pairing` manda la respuesta.
@@ -139,43 +139,15 @@ pub struct PeerHelloEvent {
 // Identidad criptográfica de este dispositivo
 // ---------------------------------------------------------------------------
 
-/// Par de claves estático, generado una sola vez. Vive en `app_settings`, o
-/// sea en la DB de la app (en Android, almacenamiento privado del paquete).
-fn keypair(conn: &rusqlite::Connection) -> Result<(Vec<u8>, Vec<u8>)> {
-    let b64 = base64::engine::general_purpose::STANDARD;
-    if let (Some(priv_b64), Some(pub_b64)) = (
-        db::get_setting(conn, SETTING_PRIVKEY)?,
-        db::get_setting(conn, SETTING_PUBKEY)?,
-    ) {
-        if let (Ok(pv), Ok(pb)) = (b64.decode(&priv_b64), b64.decode(&pub_b64)) {
-            return Ok((pv, pb));
-        }
-    }
-    let (private, public) = crate::wire::generate_keypair()?;
-    db::set_setting(conn, SETTING_PRIVKEY, &b64.encode(&private))?;
-    db::set_setting(conn, SETTING_PUBKEY, &b64.encode(&public))?;
-    log::info!("[pair] par de claves nuevo generado");
-    Ok((private, public))
-}
-
 fn private_key(handle: &AppHandle) -> Result<Vec<u8>> {
     let state = handle.state::<AppState>();
     let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
-    Ok(keypair(&conn)?.0)
+    Ok(core_pair::keypair(&conn)?.0)
 }
 
 // ---------------------------------------------------------------------------
 // Estado de `devices`
 // ---------------------------------------------------------------------------
-
-enum Known {
-    /// Ya pareado y la clave coincide.
-    Trusted,
-    /// Nunca se pareó con este uid.
-    Unknown,
-    /// Conocido pero con OTRA clave pública. Alarma, no rutina.
-    KeyMismatch,
-}
 
 fn known_state(handle: &AppHandle, uid: &str, pubkey: &[u8]) -> Known {
     let state = handle.state::<AppState>();
@@ -183,75 +155,30 @@ fn known_state(handle: &AppHandle, uid: &str, pubkey: &[u8]) -> Known {
         Ok(c) => c,
         Err(_) => return Known::Unknown,
     };
-    let stored: Option<Option<Vec<u8>>> = conn
-        .query_row("SELECT pubkey FROM devices WHERE uid = ?1", [uid], |r| r.get(0))
-        .ok();
-    match stored {
-        Some(Some(k)) if k == pubkey => Known::Trusted,
-        Some(Some(_)) => Known::KeyMismatch,
-        _ => Known::Unknown,
-    }
+    core_pair::known_state(&conn, uid, pubkey)
 }
 
 fn store_device(handle: &AppHandle, uid: &str, name: &str, platform: &str, pubkey: &[u8]) -> Result<()> {
     let state = handle.state::<AppState>();
     let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
-    let now = db::now_ms();
-    conn.execute(
-        "INSERT INTO devices (uid, name, platform, pubkey, paired_at, last_seen)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?5)
-         ON CONFLICT(uid) DO UPDATE SET
-            name = excluded.name, platform = excluded.platform,
-            pubkey = excluded.pubkey, paired_at = excluded.paired_at,
-            last_seen = excluded.last_seen",
-        rusqlite::params![uid, name, platform, pubkey, now],
-    )?;
-    // Política por defecto. Todavía no hace nada (5.6/5.7 la usan), pero la
-    // fila tiene que existir desde el pairing para que la UI pueda editarla.
-    conn.execute(
-        "INSERT OR IGNORE INTO sync_policy (device_uid) VALUES (?1)",
-        [uid],
-    )?;
-    conn.execute(
-        "INSERT INTO sync_log (ts, peer, kind, detail) VALUES (?1, ?2, 'paired', ?3)",
-        rusqlite::params![now, uid, name],
-    )?;
-    Ok(())
+    core_pair::store_device(&conn, uid, name, platform, pubkey)
 }
 
 fn library_counts(handle: &AppHandle) -> (i64, i64) {
     let state = handle.state::<AppState>();
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(_) => return (0, 0),
-    };
-    let tracks = conn
-        .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
-        .unwrap_or(0);
-    let playlists = conn
-        .query_row("SELECT COUNT(*) FROM playlists WHERE kind = 'playlist'", [], |r| r.get(0))
-        .unwrap_or(0);
-    (tracks, playlists)
+    // El guard va a una variable propia: como binding del `match` sería un
+    // temporario que vive más que `state`, y no compila.
+    let db = state.db.lock();
+    match db {
+        Ok(conn) => core_pair::library_counts(&conn),
+        Err(_) => (0, 0),
+    }
 }
 
 fn me(handle: &AppHandle) -> Result<(String, String)> {
     let state = handle.state::<AppState>();
     let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
-    let uid = db::this_device_uid(&conn)?;
-    let name = db::device_name(&conn)?;
-    Ok((uid, name))
-}
-
-fn platform() -> String {
-    if cfg!(target_os = "android") {
-        "android".into()
-    } else if cfg!(target_os = "windows") {
-        "windows".into()
-    } else if cfg!(target_os = "macos") {
-        "macos".into()
-    } else {
-        "linux".into()
-    }
+    core_pair::me(&conn)
 }
 
 // ---------------------------------------------------------------------------
@@ -319,7 +246,10 @@ fn serve(handle: &AppHandle, stream: TcpStream) -> Result<()> {
     let mut sess = Session::accept(stream, &private)?;
 
     match sess.recv()? {
-        Msg::PairRequest { uid, name, platform } => {
+        // El token que trae un `PairRequest` es para los dispositivos sin
+        // pantalla. Acá hay una: la prueba la da la persona comparando el
+        // código, así que el token se ignora aunque venga.
+        Msg::PairRequest { uid, name, platform, token: _ } => {
             match known_state(handle, &uid, &sess.peer_pubkey) {
                 Known::KeyMismatch => {
                     let _ = sess.send(&Msg::Reject {
@@ -533,6 +463,9 @@ fn connect_inner(handle: &AppHandle, uid: &str) -> Result<()> {
                 uid: my_uid,
                 name: my_name,
                 platform: platform(),
+                // Vincularse con otro dispositivo con pantalla: el código de
+                // seis dígitos alcanza. El token es para el server (Fase 6.3).
+                token: None,
             })?;
             let accepted_here = ask_user(
                 handle,
@@ -834,10 +767,7 @@ fn report_hello(
         // un temporario que vive más que `state`, y no compila.
         let db = state.db.lock();
         if let Ok(conn) = db {
-            let _ = conn.execute(
-                "UPDATE devices SET last_seen = ?1, name = ?2 WHERE uid = ?3",
-                rusqlite::params![db::now_ms(), name, uid],
-            );
+            core_pair::touch_device(&conn, uid, name);
         }
     }
     let _ = handle.emit(
@@ -868,17 +798,13 @@ fn emit_done(handle: &AppHandle, uid: &str, name: &str, ok: bool, error: Option<
 /// otro lado — o alguien haciéndose pasar por él. No se resuelve solo: queda
 /// registrado y el usuario tiene que desvincular a mano para volver a parear.
 fn warn_key_mismatch(handle: &AppHandle, uid: &str, name: &str) {
-    log::warn!("[pair] clave distinta para {name} ({uid}) — conexión rechazada");
     {
         let state = handle.state::<AppState>();
         // El guard va a una variable propia: como binding del `if let` sería
         // un temporario que vive más que `state`, y no compila.
         let db = state.db.lock();
         if let Ok(conn) = db {
-            let _ = conn.execute(
-                "INSERT INTO sync_log (ts, peer, kind, detail) VALUES (?1, ?2, 'key-mismatch', ?3)",
-                rusqlite::params![db::now_ms(), uid, name],
-            );
+            core_pair::log_key_mismatch(&conn, uid, name);
         }
     }
     emit_done(
@@ -893,8 +819,7 @@ fn warn_key_mismatch(handle: &AppHandle, uid: &str, name: &str) {
 fn forget_device(handle: &AppHandle, uid: &str) -> Result<()> {
     let state = handle.state::<AppState>();
     let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
-    conn.execute("DELETE FROM devices WHERE uid = ?1", [uid])?;
-    Ok(())
+    core_pair::forget_device(&conn, uid)
 }
 
 /// Saca un dispositivo de la lista de confiados y **le avisa**.

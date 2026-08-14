@@ -36,6 +36,16 @@ pub enum Msg {
         uid: String,
         name: String,
         platform: String,
+        /// Solo para vincularse con un dispositivo sin pantalla (el server de
+        /// archivo, Fase 6.2): ahi no hay nadie para comparar los seis digitos,
+        /// asi que la prueba de que tenes derecho a vincular es un token de su
+        /// configuracion. Entre dos dispositivos con pantalla va en `None` y
+        /// manda el codigo, como siempre.
+        ///
+        /// `default` a proposito: un peer con la version anterior no lo manda,
+        /// y su PairRequest tiene que seguir entrando.
+        #[serde(default)]
+        token: Option<String>,
     },
     /// Decision del lado que recibe.
     PairResponse { accepted: bool },
@@ -389,6 +399,7 @@ mod tests {
             uid: "u-1".into(),
             name: "PC".into(),
             platform: "windows".into(),
+            token: None,
         })
         .unwrap();
         match b.recv().unwrap() {

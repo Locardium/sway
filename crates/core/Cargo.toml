@@ -6,6 +6,8 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
+# Las claves Noise se guardan en texto en `app_settings`.
+base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }

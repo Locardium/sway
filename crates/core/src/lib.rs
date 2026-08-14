@@ -44,6 +44,7 @@ pub mod id3_sanitize;
 pub mod import;
 pub mod manifest;
 pub mod merge;
+pub mod pairing;
 pub mod rank;
 pub mod scope;
 pub mod transfer;
