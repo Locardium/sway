@@ -24,6 +24,40 @@ El binario queda en `target/release/sway-server` (`.exe` en Windows). No
 depende de nada del sistema: ni entorno gráfico, ni webview, ni SQLite
 instalado.
 
+### Para Linux, desde Windows
+
+Un binario sirve para un solo sistema operativo: el `.exe` no corre en el
+server. Esto compila el de Linux sin salir de Windows y sin instalar nada en
+el server — ni Rust, ni el código fuente.
+
+Una vez:
+
+```
+winget install zig.zig
+cargo install cargo-zigbuild
+rustup target add x86_64-unknown-linux-musl
+```
+
+Cada vez:
+
+```
+cargo zigbuild --release -p sway-server --target x86_64-unknown-linux-musl
+```
+
+Sale un único archivo en
+`target/x86_64-unknown-linux-musl/release/sway-server`, y es lo único que hay
+que copiar.
+
+**musl y no gnu** a propósito: el binario queda estáticamente enlazado, con
+SQLite adentro, así que no le importa qué versión de glibc tenga el server ni
+qué distribución sea. Con `gnu`, un binario compilado contra una glibc más
+nueva que la del server no arranca — y el error no dice eso, dice que no
+encuentra el archivo.
+
+`zig` acá no es el lenguaje: es su compilador de C, que sabe apuntarle a otro
+sistema. Hace falta porque SQLite viaja como código C y hay que compilarlo
+para el destino.
+
 ## Correr
 
 ```
