@@ -15,10 +15,15 @@
 //!   le gana a quitar concurrente, que es el sesgo correcto cuando lo que
 //!   está en juego es perder música de un set.
 //!
-//! - **Borrados (5.6): se aplican según la política del dispositivo que los
-//!   manda**, y el archivo va a la papelera de la biblioteca, no al vacío. El
-//!   tombstone se guarda siempre, aunque no se borre nada: es lo que impide
+//! - **Borrados: se aplican siempre**, y el archivo va a la papelera de la
+//!   biblioteca, no al vacío. El tombstone se guarda igual: es lo que impide
 //!   devolverle al otro lo que el otro ya sacó.
+//!
+//!   Hasta la Fase 6.4 había una política por dispositivo para ignorarlos o
+//!   encolarlos. Se sacó porque no podía cumplir lo que prometía: filtraba por
+//!   quién te pasaba el tombstone, no por quién había borrado, así que con tres
+//!   dispositivos el borrado que rechazabas al celular entraba por la laptop.
+//!   Lo que protege de verdad es la papelera, que no filtra nada.
 
 use crate::manifest::{Manifest, Membership, PlaylistEntry, ScopeEntry, DeviceSync, TrackEntry, Tombstone};
 use rusqlite::{Connection, OptionalExtension};
@@ -52,9 +57,6 @@ pub struct Applied {
     /// Filas de scope selectivo aplicadas (Fase 5.7).
     #[serde(default)]
     pub scope: usize,
-    /// Borrados encolados esperando confirmación (política `ask`).
-    #[serde(default)]
-    pub queued: usize,
 }
 
 impl Applied {
@@ -215,14 +217,21 @@ fn tombstone_at(conn: &Connection, entity: &str, uid: &str) -> Option<i64> {
     .flatten()
 }
 
-/// Aplica los cambios recibidos, incluidos los borrados según `policy`.
-/// `peer_uid` es de quién vienen: queda anotado en la cola de confirmación.
+/// Aplica los cambios recibidos, borrados incluidos.
+///
+/// Un borrado se aplica siempre. Hubo una política por dispositivo que permitía
+/// ignorarlos o encolarlos para confirmar, y se sacó en la Fase 6.4 porque no
+/// podía cumplir lo que prometía: filtraba por **quién te pasó** el tombstone,
+/// no por quién borró. Con tres dispositivos, un borrado que este rechazaba al
+/// celular entraba igual por la laptop, que lo había aceptado. Con un server
+/// siempre prendido dejaba de ser un caso raro y pasaba a ser la regla.
+///
+/// Lo que protege de un borrado por error es la papelera, que no filtra nada y
+/// funciona siempre: el archivo va a `.sway-trash` y se queda 30 días.
 pub fn apply(
     conn: &Connection,
     changes: &Changes,
     music_dir: &std::path::Path,
-    policy: DeletePolicy,
-    peer_uid: &str,
 ) -> rusqlite::Result<Applied> {
     let mut applied = Applied::default();
 
@@ -372,179 +381,15 @@ pub fn apply(
     // este dispositivo le devuelva al otro lo que el otro ya borró. Aplicarlos
     // o no es una decisión aparte.
     for t in &changes.tombstones {
-        // Un borrado que el usuario ya rechazó no vuelve a entrar. Sin esto el
-        // tombstone del otro lado reaparece en cada sync y la cola pregunta lo
-        // mismo para siempre.
-        if is_ignored(conn, &t.entity, &t.uid)? {
-            continue;
-        }
         conn.execute(
             "INSERT OR IGNORE INTO tombstones (entity, uid, deleted_at, device_uid)
              VALUES (?1, ?2, ?3, '')",
             rusqlite::params![t.entity, t.uid, t.deleted_at],
         )?;
-        match policy {
-            DeletePolicy::Propagate => applied.deleted += apply_tombstone(conn, music_dir, t)?,
-            DeletePolicy::Ask => applied.queued += enqueue_delete(conn, t, peer_uid)?,
-            DeletePolicy::Ignore => {}
-        }
+        applied.deleted += apply_tombstone(conn, music_dir, t)?;
     }
 
     Ok(applied)
-}
-
-/// True si el usuario ya rechazó ese borrado.
-fn is_ignored(conn: &Connection, entity: &str, uid: &str) -> rusqlite::Result<bool> {
-    let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM delete_ignores WHERE entity = ?1 AND uid = ?2",
-        rusqlite::params![entity, uid],
-        |r| r.get(0),
-    )?;
-    Ok(n > 0)
-}
-
-/// Encola un borrado para que el usuario lo confirme (política `ask`).
-/// Devuelve 1 si quedó encolado, 0 si no había nada que borrar acá.
-fn enqueue_delete(
-    conn: &Connection,
-    t: &Tombstone,
-    peer_uid: &str,
-) -> rusqlite::Result<usize> {
-    let label: Option<String> = match t.entity.as_str() {
-        "track" => conn
-            .query_row(
-                "SELECT CASE WHEN title <> '' THEN title ELSE rel_path END
-                 FROM tracks WHERE uid = ?1",
-                [&t.uid],
-                |r| r.get(0),
-            )
-            .optional()?,
-        "playlist" => conn
-            .query_row("SELECT name FROM playlists WHERE uid = ?1", [&t.uid], |r| r.get(0))
-            .optional()?,
-        "playlist_track" => {
-            let Some((pl, tr)) = t.uid.split_once(':') else { return Ok(0) };
-            conn.query_row(
-                "SELECT t.title || ' — ' || p.name FROM playlists p, tracks t
-                 WHERE p.uid = ?1 AND t.uid = ?2",
-                rusqlite::params![pl, tr],
-                |r| r.get(0),
-            )
-            .optional()?
-        }
-        _ => None,
-    };
-    // Nada que borrar acá: no hay nada que preguntar.
-    let Some(label) = label else { return Ok(0) };
-    let n = conn.execute(
-        "INSERT OR IGNORE INTO pending_deletes
-            (entity, uid, deleted_at, peer_uid, label, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![
-            t.entity,
-            t.uid,
-            t.deleted_at,
-            peer_uid,
-            label,
-            crate::db::now_ms()
-        ],
-    )?;
-    Ok(n)
-}
-
-/// Borrados esperando confirmación, para la pantalla de Sync.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PendingDelete {
-    pub id: i64,
-    pub entity: String,
-    pub uid: String,
-    pub peer_uid: String,
-    pub label: String,
-    pub deleted_at: i64,
-}
-
-pub fn pending_deletes(conn: &Connection) -> rusqlite::Result<Vec<PendingDelete>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, entity, uid, peer_uid, label, deleted_at
-         FROM pending_deletes ORDER BY created_at",
-    )?;
-    let rows = stmt.query_map([], |r| {
-        Ok(PendingDelete {
-            id: r.get(0)?,
-            entity: r.get(1)?,
-            uid: r.get(2)?,
-            peer_uid: r.get(3)?,
-            label: r.get(4)?,
-            deleted_at: r.get(5)?,
-        })
-    })?;
-    rows.collect()
-}
-
-/// Respuesta del usuario a un borrado encolado.
-///
-/// Aceptar lo aplica (papelera, 30 días). Rechazar borra el tombstone local y
-/// deja constancia de la decisión: si no, el otro lado lo vuelve a mandar en
-/// el próximo sync y la pregunta se repite para siempre. El otro dispositivo
-/// se queda sin el archivo — es lo que pidió; lo que la política protege es
-/// esta biblioteca, no la de él.
-pub fn resolve_pending_delete(
-    conn: &Connection,
-    music_dir: &std::path::Path,
-    id: i64,
-    accept: bool,
-) -> rusqlite::Result<usize> {
-    let row: Option<(String, String, i64)> = conn
-        .query_row(
-            "SELECT entity, uid, deleted_at FROM pending_deletes WHERE id = ?1",
-            [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?;
-    let Some((entity, uid, deleted_at)) = row else { return Ok(0) };
-    let done = if accept {
-        apply_tombstone(
-            conn,
-            music_dir,
-            &Tombstone { entity: entity.clone(), uid: uid.clone(), deleted_at },
-        )?
-    } else {
-        conn.execute(
-            "DELETE FROM tombstones WHERE entity = ?1 AND uid = ?2",
-            rusqlite::params![entity, uid],
-        )?;
-        conn.execute(
-            "INSERT OR REPLACE INTO delete_ignores (entity, uid, decided_at)
-             VALUES (?1, ?2, ?3)",
-            rusqlite::params![entity, uid, crate::db::now_ms()],
-        )?;
-        0
-    };
-    conn.execute("DELETE FROM pending_deletes WHERE id = ?1", [id])?;
-    Ok(done)
-}
-
-/// Qué hacer con un borrado que llega de otro dispositivo. Se evalúa del lado
-/// que RECIBE: poner `Ask` en la PC principal la protege de un borrado hecho
-/// en el celular sin bloquear el resto del sync.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeletePolicy {
-    Propagate,
-    /// Encolar en `pending_deletes` para que el usuario confirme (la cola se
-    /// resuelve desde la pantalla de Sync). El resto del sync no se bloquea.
-    Ask,
-    Ignore,
-}
-
-impl DeletePolicy {
-    pub fn from_setting(s: &str) -> Self {
-        match s {
-            "ignore" => Self::Ignore,
-            "ask" => Self::Ask,
-            _ => Self::Propagate,
-        }
-    }
 }
 
 /// Aplica un borrado. Devuelve 1 si borró algo, 0 si no había nada que borrar.
@@ -664,7 +509,7 @@ mod tests {
             tracks: vec![entry("t1", "nuevo", 500)],
             ..Default::default()
         };
-        assert_eq!(apply(&conn, &changes, std::path::Path::new("/nada"), DeletePolicy::Propagate, "peer").unwrap().tracks, 1);
+        assert_eq!(apply(&conn, &changes, std::path::Path::new("/nada")).unwrap().tracks, 1);
         let title: String = conn
             .query_row("SELECT title FROM tracks WHERE uid = 't1'", [], |r| r.get(0))
             .unwrap();
@@ -675,7 +520,7 @@ mod tests {
             tracks: vec![entry("t1", "anterior", 200)],
             ..Default::default()
         };
-        assert_eq!(apply(&conn, &old, std::path::Path::new("/nada"), DeletePolicy::Propagate, "peer").unwrap().tracks, 0);
+        assert_eq!(apply(&conn, &old, std::path::Path::new("/nada")).unwrap().tracks, 0);
         let title: String = conn
             .query_row("SELECT title FROM tracks WHERE uid = 't1'", [], |r| r.get(0))
             .unwrap();
@@ -699,9 +544,9 @@ mod tests {
             }],
             ..Default::default()
         };
-        let first = apply(&conn, &changes, std::path::Path::new("/nada"), DeletePolicy::Propagate, "peer").unwrap();
+        let first = apply(&conn, &changes, std::path::Path::new("/nada")).unwrap();
         assert!(first.total() > 0);
-        let second = apply(&conn, &changes, std::path::Path::new("/nada"), DeletePolicy::Propagate, "peer").unwrap();
+        let second = apply(&conn, &changes, std::path::Path::new("/nada")).unwrap();
         assert_eq!(second.total(), 0, "la segunda pasada no debe cambiar nada");
     }
 
@@ -718,7 +563,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        apply(&conn, &changes, std::path::Path::new("/nada"), DeletePolicy::Propagate, "peer").unwrap();
+        apply(&conn, &changes, std::path::Path::new("/nada")).unwrap();
 
         let (child_parent, folder_id): (Option<i64>, i64) = (
             conn.query_row("SELECT parent_id FROM playlists WHERE uid = 'p1'", [], |r| r.get(0))
@@ -742,7 +587,7 @@ mod tests {
             playlists: vec![pl("p1", "Sets", None, 10)],
             ..Default::default()
         };
-        assert_eq!(apply(&conn, &changes, std::path::Path::new("/nada"), DeletePolicy::Propagate, "peer").unwrap().playlists, 0);
+        assert_eq!(apply(&conn, &changes, std::path::Path::new("/nada")).unwrap().playlists, 0);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM playlists", [], |r| r.get(0))
             .unwrap();
@@ -761,9 +606,7 @@ mod tests {
                 playlists: vec![pl("p1", "Sets", None, 10)],
                 ..Default::default()
             },
-            std::path::Path::new("/nada"),
-            DeletePolicy::Propagate, "peer",
-        )
+            std::path::Path::new("/nada"))
         .unwrap();
         let member = Changes {
             memberships: vec![Membership {
@@ -774,7 +617,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert_eq!(apply(&conn, &member, std::path::Path::new("/nada"), DeletePolicy::Propagate, "peer").unwrap().memberships, 1);
+        assert_eq!(apply(&conn, &member, std::path::Path::new("/nada")).unwrap().memberships, 1);
 
         // Se saca acá, con constancia.
         conn.execute("DELETE FROM playlist_tracks", []).unwrap();
@@ -783,7 +626,7 @@ mod tests {
             [],
         )
         .unwrap();
-        assert_eq!(apply(&conn, &member, std::path::Path::new("/nada"), DeletePolicy::Propagate, "peer").unwrap().memberships, 0, "no debe volver");
+        assert_eq!(apply(&conn, &member, std::path::Path::new("/nada")).unwrap().memberships, 0, "no debe volver");
     }
 
     /// Una membresía de un track que todavía no llegó se ignora sin romper
@@ -801,7 +644,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let applied = apply(&conn, &changes, std::path::Path::new("/nada"), DeletePolicy::Propagate, "peer").unwrap();
+        let applied = apply(&conn, &changes, std::path::Path::new("/nada")).unwrap();
         assert_eq!(applied.playlists, 1);
         assert_eq!(applied.memberships, 0);
     }
@@ -815,7 +658,7 @@ mod tests {
             tracks: vec![entry("nunca-visto", "x", 10)],
             ..Default::default()
         };
-        assert_eq!(apply(&conn, &changes, std::path::Path::new("/nada"), DeletePolicy::Propagate, "peer").unwrap().tracks, 0);
+        assert_eq!(apply(&conn, &changes, std::path::Path::new("/nada")).unwrap().tracks, 0);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
             .unwrap();
@@ -862,7 +705,7 @@ mod tests {
             tombstones: vec![tomb("track", "t1")],
             ..Default::default()
         };
-        let applied = apply(&conn, &changes, &music, DeletePolicy::Propagate, "peer").unwrap();
+        let applied = apply(&conn, &changes, &music).unwrap();
 
         assert_eq!(applied.deleted, 1);
         let n: i64 = conn
@@ -875,105 +718,6 @@ mod tests {
             .flatten()
             .any(|e| std::fs::read(e.path()).unwrap() == b"audio");
         assert!(recuperable, "pero sigue existiendo en la papelera");
-        std::fs::remove_dir_all(&music).ok();
-    }
-
-    /// Con la política en `ignore`, el borrado del otro no toca nada acá —
-    /// pero el tombstone igual se guarda, para no devolvérselo.
-    #[test]
-    fn an_ignored_delete_keeps_the_track_but_records_the_tombstone() {
-        let music = tmp_music("ign");
-        let conn = mem();
-        let f = music.join("queda.flac");
-        std::fs::write(&f, b"audio").unwrap();
-        add_track_at(&conn, "t1", &f);
-
-        let changes = Changes {
-            tombstones: vec![tomb("track", "t1")],
-            ..Default::default()
-        };
-        let applied = apply(&conn, &changes, &music, DeletePolicy::Ignore, "peer").unwrap();
-
-        assert_eq!(applied.deleted, 0);
-        assert!(f.exists());
-        assert!(has_tombstone(&conn, "track", "t1"), "igual queda constancia");
-        std::fs::remove_dir_all(&music).ok();
-    }
-
-    /// Con la política en `ask`, el borrado no se aplica solo: queda en la
-    /// cola y el archivo sigue donde estaba hasta que alguien decida.
-    #[test]
-    fn a_protected_delete_waits_in_the_queue() {
-        let music = tmp_music("ask");
-        let conn = mem();
-        let f = music.join("espera.flac");
-        std::fs::write(&f, b"audio").unwrap();
-        add_track_at(&conn, "t1", &f);
-
-        let changes = Changes {
-            tombstones: vec![tomb("track", "t1")],
-            ..Default::default()
-        };
-        let applied = apply(&conn, &changes, &music, DeletePolicy::Ask, "celu").unwrap();
-
-        assert_eq!(applied.deleted, 0);
-        assert_eq!(applied.queued, 1);
-        assert!(f.exists(), "el archivo no se toca hasta que se confirme");
-        let queue = pending_deletes(&conn).unwrap();
-        assert_eq!(queue.len(), 1);
-        assert_eq!(queue[0].peer_uid, "celu");
-
-        // Y un segundo sync con el mismo tombstone no duplica la pregunta.
-        apply(&conn, &changes, &music, DeletePolicy::Ask, "celu").unwrap();
-        assert_eq!(pending_deletes(&conn).unwrap().len(), 1);
-        std::fs::remove_dir_all(&music).ok();
-    }
-
-    #[test]
-    fn accepting_a_queued_delete_applies_it() {
-        let music = tmp_music("ask-ok");
-        let conn = mem();
-        let f = music.join("chau.flac");
-        std::fs::write(&f, b"audio").unwrap();
-        add_track_at(&conn, "t1", &f);
-        let changes = Changes {
-            tombstones: vec![tomb("track", "t1")],
-            ..Default::default()
-        };
-        apply(&conn, &changes, &music, DeletePolicy::Ask, "celu").unwrap();
-        let id = pending_deletes(&conn).unwrap()[0].id;
-
-        assert_eq!(resolve_pending_delete(&conn, &music, id, true).unwrap(), 1);
-        assert!(!f.exists());
-        assert!(pending_deletes(&conn).unwrap().is_empty());
-        std::fs::remove_dir_all(&music).ok();
-    }
-
-    /// Rechazar tiene que pegarse: sin la constancia, el tombstone del otro
-    /// lado vuelve en el próximo sync y la cola pregunta lo mismo para siempre.
-    #[test]
-    fn rejecting_a_queued_delete_is_remembered() {
-        let music = tmp_music("ask-no");
-        let conn = mem();
-        let f = music.join("me-lo-quedo.flac");
-        std::fs::write(&f, b"audio").unwrap();
-        add_track_at(&conn, "t1", &f);
-        let changes = Changes {
-            tombstones: vec![tomb("track", "t1")],
-            ..Default::default()
-        };
-        apply(&conn, &changes, &music, DeletePolicy::Ask, "celu").unwrap();
-        let id = pending_deletes(&conn).unwrap()[0].id;
-
-        resolve_pending_delete(&conn, &music, id, false).unwrap();
-        assert!(f.exists());
-        assert!(!has_tombstone(&conn, "track", "t1"), "el borrado se descarta");
-
-        // El mismo tombstone vuelve a llegar y ya no molesta.
-        let applied = apply(&conn, &changes, &music, DeletePolicy::Ask, "celu").unwrap();
-        assert_eq!(applied.queued, 0);
-        assert!(pending_deletes(&conn).unwrap().is_empty());
-        assert!(f.exists());
         std::fs::remove_dir_all(&music).ok();
     }
 
@@ -1010,7 +754,7 @@ mod tests {
         assert!(changes_for_peer(&remote, &local).scopes.is_empty());
 
         let conn = mem();
-        let applied = apply(&conn, &out, std::path::Path::new("/nada"), DeletePolicy::Propagate, "peer").unwrap();
+        let applied = apply(&conn, &out, std::path::Path::new("/nada")).unwrap();
         assert_eq!(applied.scope, 2);
         let s = crate::scope::get(&conn, "celu").unwrap();
         assert_eq!(s.mode, crate::scope::Mode::Selected);
@@ -1037,9 +781,7 @@ mod tests {
                 }],
                 ..Default::default()
             },
-            &music,
-            DeletePolicy::Propagate, "peer",
-        )
+            &music)
         .unwrap();
 
         apply(
@@ -1048,9 +790,7 @@ mod tests {
                 tombstones: vec![tomb("playlist", "p1")],
                 ..Default::default()
             },
-            &music,
-            DeletePolicy::Propagate, "peer",
-        )
+            &music)
         .unwrap();
 
         let playlists: i64 = conn
@@ -1082,9 +822,7 @@ mod tests {
                 tombstones: vec![tomb("track", "t1")],
                 ..Default::default()
             },
-            &music,
-            DeletePolicy::Propagate, "peer",
-        )
+            &music)
         .unwrap();
 
         assert!(f.exists(), "el archivo ajeno no se toca");
@@ -1150,7 +888,7 @@ mod tests {
             ..Default::default()
         };
         let music = std::path::Path::new("/nada");
-        apply(&conn, &base, music, DeletePolicy::Propagate, "peer").unwrap();
+        apply(&conn, &base, music).unwrap();
 
         let reorder = Changes {
             memberships: vec![Membership {
@@ -1162,7 +900,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            apply(&conn, &reorder, music, DeletePolicy::Propagate, "peer")
+            apply(&conn, &reorder, music)
                 .unwrap()
                 .memberships,
             1
@@ -1174,7 +912,7 @@ mod tests {
 
         // Y aplicarlo otra vez no cuenta como trabajo.
         assert_eq!(
-            apply(&conn, &reorder, music, DeletePolicy::Propagate, "peer")
+            apply(&conn, &reorder, music)
                 .unwrap()
                 .memberships,
             0
@@ -1216,9 +954,7 @@ mod tests {
                 playlists: vec![pl("p1", "Sets", None, 10)],
                 ..Default::default()
             },
-            music,
-            DeletePolicy::Propagate, "peer",
-        )
+            music)
         .unwrap();
 
         // Se sacó hace rato...
@@ -1233,7 +969,7 @@ mod tests {
             memberships: vec![member("V", 500)],
             ..Default::default()
         };
-        assert_eq!(apply(&conn, &re_add, music, DeletePolicy::Propagate, "peer").unwrap().memberships, 1);
+        assert_eq!(apply(&conn, &re_add, music).unwrap().memberships, 1);
 
         // Y el tombstone viejo se limpia, para no volver a estorbar.
         assert!(!has_tombstone(&conn, "playlist_track", "p1:t1"));
@@ -1247,7 +983,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert_eq!(apply(&conn, &removal, music, DeletePolicy::Propagate, "peer").unwrap().deleted, 1);
+        assert_eq!(apply(&conn, &removal, music).unwrap().deleted, 1);
     }
 
     /// Y un borrado que llega viejo no puede sacar algo agregado después.
@@ -1263,9 +999,7 @@ mod tests {
                 memberships: vec![member("V", 800)],
                 ..Default::default()
             },
-            music,
-            DeletePolicy::Propagate, "peer",
-        )
+            music)
         .unwrap();
 
         let stale = Changes {
@@ -1276,7 +1010,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert_eq!(apply(&conn, &stale, music, DeletePolicy::Propagate, "peer").unwrap().deleted, 0);
+        assert_eq!(apply(&conn, &stale, music).unwrap().deleted, 0);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM playlist_tracks", [], |r| r.get(0))
             .unwrap();

@@ -731,35 +731,8 @@ fn unpair_device(app: AppHandle, uid: String) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
-// Políticas, scope selectivo y espacio (Fase 5.7)
+// Scope selectivo y espacio (Fase 5.7)
 // ---------------------------------------------------------------------------
-
-/// Qué hago con los borrados que manda ese dispositivo. Es lo único de a pares
-/// y **local**: protege ESTA biblioteca, así que sólo se edita acá (la
-/// dirección, en cambio, es del dispositivo y se replica — ver `scope.rs`).
-#[tauri::command]
-fn get_delete_policy(state: State<AppState>, uid: String) -> Result<String, String> {
-    let conn = state.db.lock().unwrap();
-    Ok(conn
-        .query_row(
-            "SELECT deletes FROM sync_policy WHERE device_uid = ?1",
-            [&uid],
-            |r| r.get(0),
-        )
-        .unwrap_or_else(|_| "propagate".to_string()))
-}
-
-#[tauri::command]
-fn set_delete_policy(state: State<AppState>, uid: String, deletes: String) -> Result<(), String> {
-    let conn = state.db.lock().unwrap();
-    conn.execute(
-        "INSERT INTO sync_policy (device_uid, deletes) VALUES (?1, ?2)
-         ON CONFLICT(device_uid) DO UPDATE SET deletes = excluded.deletes",
-        rusqlite::params![uid, deletes],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
-}
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1030,28 +1003,6 @@ fn free_space(app: AppHandle, state: State<AppState>) -> Result<(i64, i64), Stri
     Ok((n as i64, bytes))
 }
 
-/// Cola de borrados esperando confirmación (política `deletes = 'ask'`).
-#[tauri::command]
-fn list_pending_deletes(state: State<AppState>) -> Result<Vec<merge::PendingDelete>, String> {
-    let conn = state.db.lock().unwrap();
-    merge::pending_deletes(&conn).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-fn resolve_pending_delete(
-    app: AppHandle,
-    state: State<AppState>,
-    id: i64,
-    accept: bool,
-) -> Result<(), String> {
-    {
-        let conn = state.db.lock().unwrap();
-        merge::resolve_pending_delete(&conn, &state.music_dir, id, accept)
-            .map_err(|e| e.to_string())?;
-    }
-    let _ = app.emit("library-changed", ());
-    Ok(())
-}
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1465,8 +1416,6 @@ pub fn run() {
             confirm_pairing,
             pair_with_server,
             unpair_device,
-            get_delete_policy,
-            set_delete_policy,
             get_scope,
             set_scope_mode,
             set_scope_direction,
@@ -1474,8 +1423,6 @@ pub fn run() {
             set_scope_playlists,
             storage_status,
             free_space,
-            list_pending_deletes,
-            resolve_pending_delete,
             sync_history
         ])
         .run(tauri::generate_context!())

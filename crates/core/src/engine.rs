@@ -81,7 +81,6 @@ pub struct SyncResult {
     pub failed: usize,
     pub bytes: u64,
     pub organized: usize,
-    pub queued: usize,
 }
 
 /// El otro lado cerró sin decir nada: un sondeo, una app que se fue, un
@@ -193,10 +192,8 @@ pub fn serve_requests<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> 
             // Cambios de organización que nos manda el otro lado.
             Msg::MetaPush { changes } => {
                 let music_dir = host.music_dir();
-                let applied = host.with_db(|conn| {
-                    let policy = delete_policy(conn, peer_uid);
-                    Ok(crate::merge::apply(conn, &changes, &music_dir, policy, peer_uid)?)
-                })?;
+                let applied =
+                    host.with_db(|conn| Ok(crate::merge::apply(conn, &changes, &music_dir)?))?;
                 if applied.total() > 0 {
                     log::info!(
                         "[sync] aplicados {} tracks, {} playlists, {} membresías",
@@ -461,10 +458,8 @@ pub fn sync<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> Result<Syn
         crate::merge::Changes::default()
     };
 
-    let applied_here = host.with_db(|conn| {
-        let policy = delete_policy(conn, peer_uid);
-        Ok(crate::merge::apply(conn, &theirs, &music_dir, policy, peer_uid)?)
-    })?;
+    let applied_here =
+        host.with_db(|conn| Ok(crate::merge::apply(conn, &theirs, &music_dir)?))?;
     if applied_here.scope > 0 {
         restore(host);
     }
@@ -540,7 +535,6 @@ pub fn sync<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> Result<Syn
         failed,
         bytes,
         organized: applied_here.total() + applied_there.total(),
-        queued: applied_here.queued,
     })
 }
 
@@ -667,20 +661,6 @@ pub fn restore<H: Host>(host: &H) -> usize {
         host.library_changed(true);
     }
     n
-}
-
-/// Qué hacer con los borrados que manda ESTE peer. Se evalúa del lado que
-/// recibe: poner `ask` en la PC principal la protege de un borrado hecho en
-/// otro dispositivo sin bloquear el resto del sync.
-fn delete_policy(conn: &Connection, peer_uid: &str) -> crate::merge::DeletePolicy {
-    let s: String = conn
-        .query_row(
-            "SELECT deletes FROM sync_policy WHERE device_uid = ?1",
-            [peer_uid],
-            |r| r.get(0),
-        )
-        .unwrap_or_else(|_| "propagate".into());
-    crate::merge::DeletePolicy::from_setting(&s)
 }
 
 // ---------------------------------------------------------------------------
@@ -907,22 +887,6 @@ mod tests {
                 .unwrap_or_default()
         }
 
-        /// Este peer manda borrados que acá hay que confirmar a mano.
-        fn ask_before_deleting(&self, peer: &Device) {
-            let conn = self.db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO devices (uid, name, platform, paired_at, last_seen)
-                 VALUES (?1, 'peer', 'test', 0, 0)",
-                [peer.uid()],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO sync_policy (device_uid, deletes) VALUES (?1, 'ask')",
-                [peer.uid()],
-            )
-            .unwrap();
-        }
-
         fn cut_after(&self, bytes: u64) {
             *self.cut_after.lock().unwrap() = Some(bytes);
         }
@@ -1100,29 +1064,6 @@ mod tests {
         assert_eq!((r.sent, r.received), (0, 0), "lo borrado no puede volver");
         assert_eq!(a.track_uids().len(), 1);
         assert_eq!(b.track_uids().len(), 1);
-    }
-
-    /// La política `ask` protege al dispositivo donde vive: el borrado que
-    /// llega queda en cola y **no toca el archivo** hasta que alguien confirme.
-    #[test]
-    fn con_la_politica_ask_el_borrado_entrante_espera_y_no_toca_nada() {
-        let a = Device::new("ask-a");
-        let b = Device::new("ask-b");
-        let uid = a.add_track("delicado.flac", &audio(4096, 21), "Delicado");
-        sync_once(&a, &b).unwrap();
-        b.ask_before_deleting(&a);
-
-        a.delete_track(&uid);
-        sync_once(&a, &b).unwrap();
-
-        assert_eq!(b.track_uids().len(), 1, "el track sigue acá");
-        assert_eq!(b.audio_files().len(), 1, "y su archivo también");
-        let pendientes = {
-            let conn = b.db.lock().unwrap();
-            crate::merge::pending_deletes(&conn).unwrap()
-        };
-        assert_eq!(pendientes.len(), 1, "esperando que alguien lo confirme");
-        assert!(b.trashed().is_empty(), "nada se movió mientras tanto");
     }
 
     /// Los dos lados editan sin verse. La regla es la misma de siempre: gana

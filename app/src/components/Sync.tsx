@@ -10,17 +10,13 @@ import {
   deviceIdentity,
   freeSpace,
   getAutoSyncP2p,
-  getDeletePolicy,
   getScope,
   listPeers,
-  listPendingDeletes,
   pairWithServer,
   PLATFORM_SERVER,
   previewSync,
   refreshPeers,
-  resolvePendingDelete,
   setAutoSyncP2p,
-  setDeletePolicy,
   setDeviceName,
   setScopeDirection,
   setScopeMode,
@@ -34,7 +30,6 @@ import {
   type PairingDone,
   type PairingRequest,
   type Peer,
-  type PendingDelete,
   type PlaylistNode,
   type Scope,
   type Storage,
@@ -307,7 +302,6 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
   const [plans, setPlans] = useState<Record<string, SyncPlanEvent>>({});
   const [progress, setProgress] = useState<Record<string, SyncProgress>>({});
   const [storage, setStorage] = useState<Storage | null>(null);
-  const [pending, setPending] = useState<PendingDelete[]>([]);
   const [myScope, setMyScope] = useState<Scope>({ mode: 'all', direction: 'both', selected: [] });
   const [scanning, setScanning] = useState(false);
   const [freeing, setFreeing] = useState(false);
@@ -327,8 +321,6 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
 
   // Detalle de un dispositivo. `null` = la lista.
   const [openUid, setOpenUid] = useState<string | null>(null);
-  /// Política de borrados con ese peer. Local: protege esta biblioteca.
-  const [deletePolicy, setDeletePolicyState] = useState<string | null>(null);
   const [peerScope, setPeerScope] = useState<Scope>({
     mode: 'all',
     direction: 'both',
@@ -348,7 +340,6 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
     clearTimeout(localTimer.current);
     const run = () => {
       storageStatus().then(setStorage).catch(() => {});
-      listPendingDeletes().then(setPending).catch(() => {});
     };
     // Al abrir el panel no hay nada que agrupar: la espera es puro retraso
     // mirando un panel vacío. El respiro es para las ráfagas de después.
@@ -392,7 +383,7 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
         setProgress((p) => ({ ...p, [e.payload.uid]: e.payload }));
       }),
       listen<SyncDone>('sync-done', (e) => {
-        const { uid, name, received, sent, failed, organized, queued, auto, error } = e.payload;
+        const { uid, name, received, sent, failed, organized, auto, error } = e.payload;
         setBusyPeer(null);
         setProgress((p) => {
           const next = { ...p };
@@ -406,14 +397,13 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
           return next;
         });
         reloadLocal();
-        if (auto && !error && !received && !sent && !organized && !failed && !queued) return;
+        if (auto && !error && !received && !sent && !organized && !failed) return;
         if (error) onStatus(`${name}: ${error}`);
         else {
           const parts = [];
           if (received) parts.push(`${received} received`);
           if (sent) parts.push(`${sent} sent`);
           if (organized) parts.push(`${organized} playlist/metadata updates`);
-          if (queued) parts.push(`${queued} deletions need your OK`);
           if (failed) parts.push(`${failed} failed`);
           onStatus(parts.length ? `${name}: ${parts.join(', ')}` : `${name}: nothing to transfer`);
         }
@@ -451,7 +441,6 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
   // Al abrir el detalle de un dispositivo se leen sus reglas y su scope.
   useEffect(() => {
     if (!openUid) return;
-    getDeletePolicy(openUid).then(setDeletePolicyState).catch(() => {});
     getScope(openUid).then(setPeerScope).catch(() => {});
     syncHistory(openUid).then(setHistory).catch(() => {});
   }, [openUid]);
@@ -486,16 +475,6 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
     if (!accept) setBusyPeer(null);
     try {
       await confirmPairing(uid, accept);
-    } catch (e) {
-      onStatus(String(e));
-    }
-  }
-
-  async function saveDeletePolicy(next: string) {
-    if (!openUid) return;
-    setDeletePolicyState(next);
-    try {
-      await setDeletePolicy(openUid, next);
     } catch (e) {
       onStatus(String(e));
     }
@@ -557,16 +536,6 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
     }
   }
 
-  async function decideDelete(id: number, accept: boolean) {
-    try {
-      await resolvePendingDelete(id, accept);
-      reloadLocal();
-      onLibraryChanged();
-    } catch (e) {
-      onStatus(String(e));
-    }
-  }
-
   // El código va sobre todo lo demás: es una decisión de seguridad y no puede
   // quedar escondida detrás de un scroll.
   if (pairing) {
@@ -594,7 +563,7 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
 
   const openPeer = peers.find((p) => p.uid === openUid);
 
-  if (openUid && openPeer && deletePolicy) {
+  if (openUid && openPeer) {
     const handlers = scopeHandlers(openUid, peerScope);
     const busy = busyPeer === openUid;
     return (
@@ -656,31 +625,6 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
               syncing those files — it never deletes anything; {openPeer.name} keeps what it already
               has until someone frees the space <em>on that device</em>. A track that is also in a
               playlist you left checked stays in.
-            </p>
-          </section>
-
-          <section>
-            <h4>Deletions</h4>
-            <div className="set-row">
-              <div className="set-label">
-                <span>When {openPeer.name} deletes something</span>
-                <small>
-                  This setting lives here and protects this device only — it cannot be changed from
-                  the other side
-                </small>
-              </div>
-              <select
-                className="set-select"
-                value={deletePolicy}
-                onChange={(e) => saveDeletePolicy(e.target.value)}
-              >
-                <option value="propagate">Delete here too</option>
-                <option value="ask">Ask me first</option>
-                <option value="ignore">Keep it here</option>
-              </select>
-            </div>
-            <p className="set-note">
-              Deleted files go to the library trash for 30 days, never straight out.
             </p>
           </section>
 
@@ -805,31 +749,6 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
           )}
         </section>
 
-        {pending.length > 0 && (
-          <section>
-            <h4>Deletions waiting for you</h4>
-            <ul className="pending-list">
-              {pending.map((d) => (
-                <li key={d.id}>
-                  <div className="set-label">
-                    <span>{d.label}</span>
-                    <small>
-                      Deleted on {peers.find((p) => p.uid === d.peerUid)?.name ?? 'another device'} ·{' '}
-                      {formatWhen(d.deletedAt)}
-                    </small>
-                  </div>
-                  <div className="set-control">
-                    <button onClick={() => decideDelete(d.id, false)}>Keep</button>
-                    <button className="danger-btn" onClick={() => decideDelete(d.id, true)}>
-                      Delete here
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
-
         <section>
           <h4>Devices</h4>
           <div className="set-row">
@@ -903,7 +822,8 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
           )}
           <p className="set-note">
             Sync moves files in both directions, then playlists, folders, order and metadata. Each
-            device decides what it keeps; deletions follow the rules you set per device.
+            device decides what it keeps. Deleting a track deletes it everywhere — but never
+            straight out: the file sits in each device's trash for 30 days first.
           </p>
         </section>
 

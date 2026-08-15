@@ -713,10 +713,6 @@ struct SyncDoneEvent {
     /// entre los dos lados. Sin esto, un sync que sólo movió playlists
     /// reportaría "nada que transferir", que es falso.
     organized: usize,
-    /// Borrados entrantes que quedaron esperando confirmación (política
-    /// `ask`). Sin esto, un borrado protegido desaparecía sin dejar rastro
-    /// hasta que alguien abriera la pantalla de Sync.
-    queued: usize,
     /// Lo disparó el sync automático, no el usuario. La UI no avisa de los
     /// automáticos que no hicieron nada: serían un cartel cada pocos minutos.
     auto: bool,
@@ -746,7 +742,7 @@ fn run_sync(handle: AppHandle, uid: String, auto: bool) {
         };
         let name = peer_name(&handle, &uid);
         match sync_inner(&handle, &uid) {
-            Ok(engine::SyncResult { received, sent, failed, bytes, organized, queued }) => {
+            Ok(engine::SyncResult { received, sent, failed, bytes, organized }) => {
                 log::info!(
                     "[sync] {name}: {received} recibidos, {sent} enviados, {failed} fallados, {organized} de organización"
                 );
@@ -760,7 +756,6 @@ fn run_sync(handle: AppHandle, uid: String, auto: bool) {
                         failed,
                         bytes,
                         organized,
-                        queued,
                         auto,
                         error: None,
                     },
@@ -794,7 +789,6 @@ fn run_sync(handle: AppHandle, uid: String, auto: bool) {
                         failed: 0,
                         bytes: 0,
                         organized: 0,
-                        queued: 0,
                         auto,
                         error,
                     },

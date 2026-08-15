@@ -97,12 +97,6 @@ pub fn store_device(
             last_seen = excluded.last_seen",
         rusqlite::params![uid, name, platform, pubkey, now],
     )?;
-    // Política por defecto. La fila tiene que existir desde el pairing para que
-    // la UI pueda editarla.
-    conn.execute(
-        "INSERT OR IGNORE INTO sync_policy (device_uid) VALUES (?1)",
-        [uid],
-    )?;
     conn.execute(
         "INSERT INTO sync_log (ts, peer, kind, detail) VALUES (?1, ?2, 'paired', ?3)",
         rusqlite::params![now, uid, name],
@@ -278,17 +272,9 @@ mod tests {
     }
 
     #[test]
-    fn el_pairing_deja_politica_de_sync_y_queda_registrado() {
+    fn el_pairing_queda_registrado() {
         let conn = db();
         store_device(&conn, "peer-1", "Celu", "android", b"k").unwrap();
-        let policies: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sync_policy WHERE device_uid = 'peer-1'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(policies, 1);
         let logged: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sync_log WHERE peer = 'peer-1' AND kind = 'paired'",

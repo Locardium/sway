@@ -246,21 +246,12 @@ export interface SyncDone {
   bytes: number;
   /// Registros de organización aplicados (metadata, playlists, membresías).
   organized: number;
-  /// Borrados entrantes que quedaron esperando confirmación (política `ask`).
-  queued: number;
   /// Lo disparó el sync automático, no el usuario.
   auto: boolean;
   error: string | null;
 }
 
-// --- Políticas, scope selectivo y espacio (Fase 5.7) ------------------------
-
-/// Qué hago con los borrados que manda ese dispositivo (`propagate | ask |
-/// ignore`). Es lo único de a pares y LOCAL: protege esta biblioteca, así que
-/// sólo se edita acá. La dirección, en cambio, es del dispositivo y se replica.
-export const getDeletePolicy = (uid: string) => invoke<string>('get_delete_policy', { uid });
-export const setDeletePolicy = (uid: string, deletes: string) =>
-  invoke<void>('set_delete_policy', { uid, deletes });
+// --- Scope selectivo y espacio (Fase 5.7) -----------------------------------
 
 export interface Scope {
   /// all | selected
@@ -299,19 +290,6 @@ export const storageStatus = () => invoke<Storage>('storage_status');
 /// Manda a la papelera (30 días) los archivos fuera de scope. Devuelve
 /// [cuántos, bytes]. No borra nada de la biblioteca: las filas quedan.
 export const freeSpace = () => invoke<[number, number]>('free_space');
-
-export interface PendingDelete {
-  id: number;
-  entity: string;
-  uid: string;
-  peerUid: string;
-  label: string;
-  deletedAt: number;
-}
-
-export const listPendingDeletes = () => invoke<PendingDelete[]>('list_pending_deletes');
-export const resolvePendingDelete = (id: number, accept: boolean) =>
-  invoke<void>('resolve_pending_delete', { id, accept });
 
 export interface LogEntry {
   ts: number;

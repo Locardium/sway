@@ -115,10 +115,7 @@ CREATE TABLE IF NOT EXISTS app_settings (
 -- ---------------------------------------------------------------------------
 -- Fase 5: sync P2P.
 --
--- `devices`, `sync_policy`, `pending_deletes` y `delete_ignores` son LOCALES:
--- describen con quien sincroniza ESTE dispositivo y bajo que reglas. La
--- politica de borrados en particular PROTEGE a este dispositivo; si se pudiera
--- cambiar desde el otro lado no protegeria de nada.
+-- `devices` es LOCAL: describe con quien sincroniza ESTE dispositivo.
 --
 -- `device_scope` y `sync_scope` en cambio SI se replican (Fase 5.7): el scope
 -- describe un deseo (quiero estas playlists en el celular), no una regla de
@@ -140,23 +137,9 @@ CREATE TABLE IF NOT EXISTS devices (
     address      TEXT
 );
 
--- Lo unico de a pares y local que queda: que hago con los borrados que me
--- manda ESE dispositivo. La direccion se mudo a `device_sync` (es una
--- propiedad del dispositivo, no del vinculo).
-CREATE TABLE IF NOT EXISTS sync_policy (
-    device_uid TEXT PRIMARY KEY REFERENCES devices(uid) ON DELETE CASCADE,
-    -- Se evalua del lado que RECIBE el tombstone: 'propagate' aplica el
-    -- borrado, 'ask' lo encola para que el usuario confirme, 'ignore' lo
-    -- descarta. Poner 'ask' en la PC principal la protege de un borrado
-    -- hecho en otro dispositivo sin bloquear el resto del sync.
-    deletes    TEXT NOT NULL DEFAULT 'propagate'
-);
-
 -- Preferencias de sync de CADA dispositivo (incluido este). Replicadas, LWW
--- por `updated_at`. Vive aparte de `sync_policy` a proposito: la politica es
--- de a pares y local (que hago yo con lo que me manda ese), esto es una
--- propiedad del dispositivo (que hace, y que playlists viven ahi) y la misma
--- respuesta vale para todos los que la miren.
+-- por `updated_at`: describen una propiedad del dispositivo (que hace, y que
+-- playlists viven ahi), y la misma respuesta vale para todos los que la miren.
 --
 --   `direction`  que hace ESE dispositivo: manda, recibe, las dos, o nada.
 --                Entre dos dispositivos, A -> B pasa solo si A manda Y B
@@ -191,28 +174,6 @@ CREATE TABLE IF NOT EXISTS blob_replicas (
     device_uid TEXT NOT NULL,
     seen_at    INTEGER NOT NULL,
     PRIMARY KEY (hash, device_uid)
-);
-
--- Borrados entrantes esperando confirmacion (politica `deletes = 'ask'`).
--- Local: es la cola de este dispositivo.
-CREATE TABLE IF NOT EXISTS pending_deletes (
-    id         INTEGER PRIMARY KEY,
-    entity     TEXT NOT NULL,
-    uid        TEXT NOT NULL,
-    deleted_at INTEGER NOT NULL,
-    peer_uid   TEXT NOT NULL DEFAULT '',
-    label      TEXT NOT NULL DEFAULT '',
-    created_at INTEGER NOT NULL,
-    UNIQUE (entity, uid)
-);
-
--- Borrados que el usuario rechazo. Sin esto, el tombstone del otro lado
--- vuelve en cada sync y la cola pregunta lo mismo para siempre.
-CREATE TABLE IF NOT EXISTS delete_ignores (
-    entity     TEXT NOT NULL,
-    uid        TEXT NOT NULL,
-    decided_at INTEGER NOT NULL,
-    PRIMARY KEY (entity, uid)
 );
 
 -- Un borrado sin tombstone es un borrado que el proximo sync deshace: el otro
@@ -363,6 +324,16 @@ fn migrate(conn: &Connection) -> Result<()> {
         // Fase 6.3: direccion fija de los dispositivos que no se descubren.
         ("devices", "address TEXT"),
     ];
+    // Fase 6.4: la politica de borrados por dispositivo se saco. Filtraba por
+    // quien te pasaba el tombstone y no por quien habia borrado, asi que con
+    // tres dispositivos el borrado que rechazabas a uno entraba por el otro.
+    // Lo que protege es la papelera. Las tres tablas eran locales — no las
+    // referencia nada replicado — asi que se tiran.
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS sync_policy;
+         DROP TABLE IF EXISTS pending_deletes;
+         DROP TABLE IF EXISTS delete_ignores;",
+    )?;
     for (table, decl) in added {
         // Una tabla que todavia no existe no necesita migracion: la crea
         // SCHEMA. `migrate` tambien corre sola en los tests sobre bases
