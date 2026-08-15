@@ -528,6 +528,8 @@ const SERVER_IO_TIMEOUT: Duration = Duration::from_secs(15);
 /// tarde en decidir, así que la respuesta llega en el mismo viaje y la UI
 /// puede mostrar el resultado sin esperar un evento.
 pub fn pair_with_server(handle: &AppHandle, host: &str, port: u16, token: &str) -> Result<String> {
+    let (host, port) = split_host_port(host, port);
+    let host = host.as_str();
     let addr = crate::discovery::resolve(host, port)
         .ok_or_else(|| anyhow!("could not resolve {host}:{port}"))?;
     let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)?;
@@ -611,6 +613,48 @@ pub fn restore_manual_peers(handle: &AppHandle) {
         };
         state.peers.add_manual(&uid, &name, &platform, host, port);
     }
+}
+
+/// Lo que la persona escribió, convertido en algo que se pueda resolver.
+///
+/// El campo pide un nombre o una IP, pero lo que uno tiene a mano es la URL del
+/// server, y pegarla es lo que cualquiera haría. Sin esto, `https://casa.com/`
+/// se pasaba tal cual a la resolución de nombres y fallaba con un
+/// "could not resolve" que parecía un problema de DNS.
+///
+/// Si el texto trae su propio puerto, ese gana: es más específico que el del
+/// campo de al lado, y es el que la persona acaba de leer en algún lado.
+fn split_host_port(input: &str, default_port: u16) -> (String, u16) {
+    let mut s = input.trim();
+    // Esquema: `https://`, `http://`, `sway://`, lo que sea.
+    if let Some((_, rest)) = s.split_once("://") {
+        s = rest;
+    }
+    // Credenciales, por si vienen pegadas de una URL.
+    if let Some((_, rest)) = s.rsplit_once('@') {
+        s = rest;
+    }
+    // Ruta, query o fragmento: nada de eso es parte del host.
+    s = s.split(['/', '?', '#']).next().unwrap_or(s);
+
+    // IPv6 entre corchetes: `[fd00::1]:7420`.
+    if let Some(rest) = s.strip_prefix('[') {
+        if let Some((addr, tail)) = rest.split_once(']') {
+            let port = tail.strip_prefix(':').and_then(|p| p.parse().ok());
+            return (addr.to_string(), port.unwrap_or(default_port));
+        }
+    }
+    // Un solo `:` es host:puerto. Varios son un IPv6 escrito sin corchetes, y
+    // ahí no hay puerto que separar.
+    if s.matches(':').count() == 1 {
+        if let Some((h, p)) = s.split_once(':') {
+            // Un puerto que no es número es un typo. Se queda el host y se usa
+            // el del campo: vale más intentar que fallar con un "no se pudo
+            // resolver casa.ejemplo:puerto", que manda a mirar el DNS.
+            return (h.to_string(), p.parse().unwrap_or(default_port));
+        }
+    }
+    (s.to_string(), default_port)
 }
 
 /// `host:puerto`, con el host pudiendo ser un nombre o un IPv6 entre corchetes.
@@ -993,7 +1037,53 @@ fn notify_unpair(handle: &AppHandle, addr: SocketAddr) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::split_addr;
+    use super::{split_addr, split_host_port};
+
+    #[test]
+    fn pegar_la_url_del_server_funciona() {
+        // Es lo que uno tiene a mano y lo que cualquiera va a pegar.
+        assert_eq!(
+            split_host_port("https://sway.ejemplo.com/", 7420),
+            ("sway.ejemplo.com".into(), 7420)
+        );
+        assert_eq!(
+            split_host_port("http://sway.ejemplo.com:9000/algo?x=1", 7420),
+            ("sway.ejemplo.com".into(), 9000)
+        );
+        assert_eq!(
+            split_host_port("  sway.ejemplo.com  ", 7420),
+            ("sway.ejemplo.com".into(), 7420)
+        );
+    }
+
+    #[test]
+    fn el_puerto_escrito_le_gana_al_del_campo() {
+        // Más específico, y es el que la persona acaba de leer en algún lado.
+        assert_eq!(
+            split_host_port("192.168.0.10:9999", 7420),
+            ("192.168.0.10".into(), 9999)
+        );
+    }
+
+    #[test]
+    fn un_ipv6_no_se_confunde_con_un_puerto() {
+        // Los `:` de un IPv6 no separan nada: sin corchetes no hay puerto.
+        assert_eq!(split_host_port("fd00::1", 7420), ("fd00::1".into(), 7420));
+        assert_eq!(
+            split_host_port("[fd00::1]:9000", 7420),
+            ("fd00::1".into(), 9000)
+        );
+        assert_eq!(split_host_port("[fd00::1]", 7420), ("fd00::1".into(), 7420));
+    }
+
+    #[test]
+    fn un_puerto_que_no_es_numero_no_se_lleva_puesto_el_host() {
+        // Vale más intentar con el puerto del campo que fallar por un typo.
+        assert_eq!(
+            split_host_port("casa.ejemplo:puerto", 7420),
+            ("casa.ejemplo".into(), 7420)
+        );
+    }
 
     #[test]
     fn la_direccion_guardada_se_parte_en_host_y_puerto() {
