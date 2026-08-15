@@ -55,7 +55,7 @@ fn hold_window_open() {
     if attached != 1 {
         return;
     }
-    println!("\nEnter para cerrar.");
+    println!("\nPress Enter to close.");
     let mut _line = String::new();
     let _ = std::io::stdin().read_line(&mut _line);
 }
@@ -68,10 +68,10 @@ fn run() -> Result<()> {
 
     let path = config_path();
     let Some(cfg) = Config::load_or_create(&path)? else {
-        println!("Se creó {} con un token nuevo.", path.display());
+        println!("Created {} with a new token.", path.display());
         println!();
-        println!("Abrilo, copiá el `pair_token`, y volvé a arrancar el server.");
-        println!("Ahí queda escuchando y ya lo podés agregar desde la app.");
+        println!("Open it, copy the `pair_token`, and start the server again.");
+        println!("It will then start listening, and you can add it from the app.");
         return Ok(());
     };
 
@@ -114,8 +114,8 @@ fn run() -> Result<()> {
         .with_context(|| format!("no se pudo escuchar en {}", cfg.listen))?;
 
     log::info!("[server] {} ({uid})", cfg.name);
-    log::info!("[server] clave pública {}", fingerprint(&pubkey));
-    log::info!("[server] archivos en {}", cfg.music_dir.display());
+    log::info!("[server] public key {}", fingerprint(&pubkey));
+    log::info!("[server] files in {}", cfg.music_dir.display());
 
     serve::run(
         Arc::new(serve::Server {
@@ -130,7 +130,7 @@ fn spawn_trash_purge(music_dir: PathBuf, retention_days: u64) {
     std::thread::spawn(move || loop {
         let n = sway_core::trash::purge_old(&music_dir, retention_days);
         if n > 0 {
-            log::info!("[server] papelera: {n} archivo(s) pasaron los {retention_days} días");
+            log::info!("[server] trash: {n} file(s) older than {retention_days} days removed");
         }
         std::thread::sleep(std::time::Duration::from_secs(24 * 3600));
     });

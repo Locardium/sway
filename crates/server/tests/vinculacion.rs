@@ -109,7 +109,7 @@ fn con_el_token_correcto_el_dispositivo_queda_vinculado() {
     // Presentación mutua: el server manda el suyo y espera el nuestro.
     match sess.recv().unwrap() {
         Msg::Hello { platform, .. } => assert_eq!(platform, "server"),
-        other => panic!("se esperaba Hello, llegó {other:?}"),
+        other => panic!("expected Hello, got {other:?}"),
     }
     sess.send(&hello()).unwrap();
     drop(sess);
@@ -184,7 +184,7 @@ fn una_clave_distinta_para_un_uid_conocido_se_rechaza() {
     let mut sess = connect(&addr);
     sess.send(&hello()).unwrap();
     match sess.recv().unwrap() {
-        Msg::Reject { reason } => assert!(reason.contains("clave distinta"), "motivo: {reason}"),
+        Msg::Reject { reason } => assert!(reason.contains("different key"), "motivo: {reason}"),
         other => panic!("se esperaba Reject, llegó {other:?}"),
     }
 
@@ -220,7 +220,7 @@ fn el_token_no_alcanza_si_la_clave_no_coincide() {
     let mut sess = connect(&addr);
     sess.send(&pair_request(Some(TOKEN))).unwrap();
     match sess.recv().unwrap() {
-        Msg::Reject { reason } => assert!(reason.contains("clave distinta"), "motivo: {reason}"),
+        Msg::Reject { reason } => assert!(reason.contains("different key"), "motivo: {reason}"),
         other => panic!("se esperaba Reject, llegó {other:?}"),
     }
 }

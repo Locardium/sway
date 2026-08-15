@@ -417,12 +417,12 @@ fn apply_tombstone(
             // legacy de afuera no es nuestro para moverlo.
             if path.starts_with(music_dir) && path.exists() {
                 match crate::trash::move_to_trash(music_dir, path) {
-                    Ok(dest) => log::info!("[sync] a la papelera: {}", dest.display()),
+                    Ok(dest) => log::info!("[sync] moved to trash: {}", dest.display()),
                     Err(e) => {
                         // Si el archivo no se pudo mover, la fila se queda:
                         // una fila sin archivo es peor que un borrado que no
                         // se aplicó y se reintenta en el próximo sync.
-                        log::warn!("[sync] no se pudo mover a la papelera {}: {e}", path.display());
+                        log::warn!("[sync] could not move {} to trash: {e}", path.display());
                         return Ok(0);
                     }
                 }

@@ -241,7 +241,7 @@ impl engine::Host for AppHost<'_> {
         let conn = state
             .db
             .lock()
-            .map_err(|_| anyhow::anyhow!("db lock envenenado"))?;
+            .map_err(|_| anyhow::anyhow!("poisoned db lock"))?;
         f(&conn)
     }
 
@@ -252,7 +252,7 @@ impl engine::Host for AppHost<'_> {
         let conn = state
             .db_read
             .lock()
-            .map_err(|_| anyhow::anyhow!("db lock envenenado"))?;
+            .map_err(|_| anyhow::anyhow!("poisoned db lock"))?;
         f(&conn)
     }
 
@@ -492,7 +492,7 @@ fn create_playlist(
         // La creó el usuario acá: que no se esconda al instante por no estar
         // marcada. No fallar el comando si esto no sale — la playlist ya existe.
         if let Err(e) = scope::select_new_local(&conn, id) {
-            log::warn!("[scope] no se pudo marcar la playlist nueva: {e}");
+            log::warn!("[scope] could not select the new playlist: {e}");
         }
         id
     };

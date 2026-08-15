@@ -27,7 +27,7 @@ impl ServerHost {
 
 impl Host for ServerHost {
     fn with_db<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-        let conn = self.db.lock().map_err(|_| anyhow!("db lock envenenado"))?;
+        let conn = self.db.lock().map_err(|_| anyhow!("poisoned db lock"))?;
         f(&conn)
     }
 
@@ -48,13 +48,13 @@ impl Host for ServerHost {
         if p.done == 0 {
             log::info!(
                 "[sync] {} {}/{}: {}",
-                if p.sending { "enviando" } else { "recibiendo" },
+                if p.sending { "sending" } else { "receiving" },
                 p.index + 1,
                 p.total_files,
                 p.filename
             );
         } else if p.done >= p.total && p.total > 0 {
-            log::info!("[sync] listo {} ({} bytes)", p.filename, p.total);
+            log::info!("[sync] done {} ({} bytes)", p.filename, p.total);
         }
     }
 

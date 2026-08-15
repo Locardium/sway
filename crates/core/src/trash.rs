@@ -79,7 +79,7 @@ pub fn purge_old(music_dir: &Path, retention_days: u64) -> usize {
         }
     }
     if removed > 0 {
-        log::info!("[trash] {removed} archivo(s) purgados tras {retention_days} días");
+        log::info!("[trash] {removed} file(s) purged after {retention_days} days");
     }
     removed
 }

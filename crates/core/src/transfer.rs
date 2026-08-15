@@ -59,7 +59,7 @@ pub fn send_file(sess: &mut Session, path: &Path, offset: u64, hash: &str) -> Re
     let mut f = std::fs::File::open(path)?;
     let total = f.metadata()?.len();
     if offset > total {
-        return Err(anyhow!("offset {offset} más allá del archivo ({total})"));
+        return Err(anyhow!("offset {offset} is past the end of the file ({total})"));
     }
     f.seek(SeekFrom::Start(offset))?;
     sess.send(&Msg::BlobStart {
@@ -118,14 +118,14 @@ pub fn receive_file(
     std::fs::create_dir_all(&incoming)?;
     let part = part_path(music_dir, hash);
     if !resuming && part.exists() {
-        log::debug!("[sync] descarto un parcial viejo de {hash}");
+        log::debug!("[sync] discarding a stale partial of {hash}");
         let _ = std::fs::remove_file(&part);
     }
 
     let expected = match sess.recv()? {
         Msg::BlobStart { size } => size,
         Msg::BlobError { reason } => return Err(anyhow!(reason)),
-        other => return Err(anyhow!("se esperaba BlobStart, llegó {other:?}")),
+        other => return Err(anyhow!("expected BlobStart, got {other:?}")),
     };
 
     // Append: lo que ya estaba se conserva; por eso el pedido llevaba offset.
@@ -141,7 +141,7 @@ pub fn receive_file(
     while got < total {
         let chunk = sess.recv_bytes()?;
         if chunk.is_empty() {
-            return Err(anyhow!("el emisor cortó a los {got} de {total} bytes"));
+            return Err(anyhow!("the sender stopped at {got} of {total} bytes"));
         }
         f.write_all(&chunk)?;
         got += chunk.len() as u64;
@@ -157,9 +157,9 @@ pub fn receive_file(
         Msg::BlobEnd { hash: sent } if sent == hash => {}
         Msg::BlobEnd { hash: sent } => {
             let _ = std::fs::remove_file(&part);
-            return Err(anyhow!("el emisor dice haber mandado {sent}, se pedía {hash}"));
+            return Err(anyhow!("the sender reports having sent {sent}, {hash} was requested"));
         }
-        other => return Err(anyhow!("se esperaba BlobEnd, llegó {other:?}")),
+        other => return Err(anyhow!("expected BlobEnd, got {other:?}")),
     }
 
     // Se verifica el archivo ENTERO, no sólo lo que acaba de llegar: un .part
@@ -168,7 +168,7 @@ pub fn receive_file(
     if actual != hash {
         // La biblioteca nunca se tocó: lo único que se pierde es la descarga.
         let _ = std::fs::remove_file(&part);
-        return Err(anyhow!("hash distinto (esperado {hash}, obtenido {actual})"));
+        return Err(anyhow!("hash mismatch (expected {hash}, got {actual})"));
     }
 
     let dest = crate::import::managed_dest_for(music_dir, filename, got);
@@ -193,7 +193,7 @@ pub fn pull_file(
 ) -> Result<Received> {
     let offset = resume_offset(music_dir, hash);
     if offset > 0 {
-        log::info!("[sync] reanudando {filename} desde {offset} bytes");
+        log::info!("[sync] resuming {filename} from {offset} bytes");
     }
     sess.send(&Msg::BlobReq {
         hash: hash.to_string(),
@@ -280,9 +280,9 @@ pub fn insert_received(
             if let Some(managed) = dest.parent() {
                 match crate::trash::move_to_trash(managed, old) {
                     Ok(p) => {
-                        log::info!("[sync] reemplazado, el anterior a la papelera: {}", p.display())
+                        log::info!("[sync] replaced, previous one moved to trash: {}", p.display())
                     }
-                    Err(e) => log::warn!("[sync] no se pudo archivar {}: {e}", old.display()),
+                    Err(e) => log::warn!("[sync] could not store {}: {e}", old.display()),
                 }
             }
         }
@@ -611,7 +611,7 @@ mod tests {
             .unwrap_err();
         sender.join().unwrap();
 
-        assert!(err.to_string().contains("hash distinto"), "error inesperado: {err}");
+        assert!(err.to_string().contains("hash mismatch"), "error inesperado: {err}");
         // Ni archivo final ni .part: la biblioteca quedó intacta.
         assert!(!dst_dir.join("bueno.flac").exists());
         assert!(!part_path(&dst_dir, &wanted_hash).exists());
@@ -639,7 +639,7 @@ mod tests {
         let err = pull_file(&mut client, &dst_dir, &hash, "x.flac", &mut |_, _| {}, &mut |_| {}).unwrap_err();
         sender.join().unwrap();
 
-        assert!(err.to_string().contains("dice haber mandado"), "error: {err}");
+        assert!(err.to_string().contains("reports having sent"), "error: {err}");
         assert!(!part_path(&dst_dir, &hash).exists());
         std::fs::remove_dir_all(&src_dir).ok();
         std::fs::remove_dir_all(&dst_dir).ok();

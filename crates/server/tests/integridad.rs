@@ -146,7 +146,7 @@ impl Device {
         sess.send(&Msg::PairAck { accepted: true }).unwrap();
         let key = match sess.recv().unwrap() {
             Msg::Hello { .. } => sess.peer_pubkey.clone(),
-            other => panic!("se esperaba Hello, llegó {other:?}"),
+            other => panic!("expected Hello, got {other:?}"),
         };
         sess.send(&self.hello()).unwrap();
         drop(sess);
@@ -184,7 +184,7 @@ impl Device {
         sess.send(&self.hello()).unwrap();
         match sess.recv().unwrap() {
             Msg::Hello { .. } => {}
-            other => panic!("se esperaba Hello, llegó {other:?}"),
+            other => panic!("expected Hello, got {other:?}"),
         }
         let out = engine::sync(self, &mut sess, server_uid).unwrap();
         let _ = sess.send(&Msg::Bye);

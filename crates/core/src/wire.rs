@@ -206,7 +206,7 @@ impl Session {
         let code = sas_code(hs.get_handshake_hash());
         let peer_pubkey = hs
             .get_remote_static()
-            .ok_or_else(|| anyhow!("el peer no mando su clave estatica"))?
+            .ok_or_else(|| anyhow!("the peer did not send its static key"))?
             .to_vec();
         Ok(Self {
             stream,
@@ -249,11 +249,11 @@ impl Session {
         let frame = read_frame(&self.stream)?;
         let n = self.noise.read_message(&frame, &mut buf)?;
         if n != 4 {
-            return Err(anyhow!("cabecera invalida ({n} bytes)"));
+            return Err(anyhow!("invalid header ({n} bytes)"));
         }
         let total = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
         if total > MAX_MESSAGE {
-            return Err(anyhow!("mensaje demasiado grande ({total} bytes)"));
+            return Err(anyhow!("message too large ({total} bytes)"));
         }
         let mut out = Vec::with_capacity(total);
         while out.len() < total {
@@ -261,7 +261,7 @@ impl Session {
             let n = self.noise.read_message(&frame, &mut buf)?;
             out.extend_from_slice(&buf[..n]);
             if n == 0 {
-                return Err(anyhow!("el peer corto el mensaje por la mitad"));
+                return Err(anyhow!("the peer cut the message in half"));
             }
         }
         out.truncate(total);
@@ -303,7 +303,7 @@ fn tune(stream: &TcpStream) {
     // Que falle no es motivo para tirar la conexión: sin esto anda, sólo que
     // lento.
     if let Err(e) = stream.set_nodelay(true) {
-        log::debug!("[wire] no se pudo desactivar Nagle: {e}");
+        log::debug!("[wire] could not disable Nagle: {e}");
     }
 }
 
@@ -312,7 +312,7 @@ fn read_frame(mut stream: &TcpStream) -> Result<Vec<u8>> {
     stream.read_exact(&mut len)?;
     let len = u32::from_be_bytes(len) as usize;
     if len > 65535 {
-        return Err(anyhow!("frame invalido ({len} bytes)"));
+        return Err(anyhow!("invalid frame ({len} bytes)"));
     }
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf)?;

@@ -213,12 +213,12 @@ pub fn resolve_decision(handle: &AppHandle, uid: &str, accepted: bool) -> bool {
 /// Escucha en el puerto que 5.1 reservó y anunció por mDNS.
 pub fn spawn_server(handle: AppHandle, listener: TcpListener) {
     std::thread::spawn(move || {
-        log::info!("[pair] escuchando en {:?}", listener.local_addr());
+        log::info!("[pair] listening on {:?}", listener.local_addr());
         for stream in listener.incoming() {
             let stream = match stream {
                 Ok(s) => s,
                 Err(e) => {
-                    log::warn!("[pair] accept fallo: {e}");
+                    log::warn!("[pair] accept failed: {e}");
                     continue;
                 }
             };
@@ -229,9 +229,9 @@ pub fn spawn_server(handle: AppHandle, listener: TcpListener) {
                     // conectan y cortan sin mandar nada: es trafico esperado,
                     // no un error que valga la pena reportar cada 10 segundos.
                     if is_disconnect(&e) {
-                        log::debug!("[pair] sondeo de alcanzabilidad");
+                        log::debug!("[pair] reachability probe");
                     } else {
-                        log::warn!("[pair] conexion entrante terminada: {e}");
+                        log::warn!("[pair] incoming connection ended: {e}");
                     }
                 }
             });
@@ -253,10 +253,10 @@ fn serve(handle: &AppHandle, stream: TcpStream) -> Result<()> {
             match known_state(handle, &uid, &sess.peer_pubkey) {
                 Known::KeyMismatch => {
                     let _ = sess.send(&Msg::Reject {
-                        reason: "clave distinta a la que ya tenías para este dispositivo".into(),
+                        reason: "different key from the one you already had for this device".into(),
                     });
                     warn_key_mismatch(handle, &uid, &name);
-                    return Err(anyhow!("clave distinta para {uid}"));
+                    return Err(anyhow!("different key for {uid}"));
                 }
                 Known::Trusted | Known::Unknown => {}
             }
@@ -275,7 +275,7 @@ fn serve(handle: &AppHandle, stream: TcpStream) -> Result<()> {
                 accepted: accepted_here,
             })?;
             if !accepted_here {
-                emit_done(handle, &uid, &name, false, Some("rechazado en este dispositivo"));
+                emit_done(handle, &uid, &name, false, Some("rejected on this device"));
                 return Ok(());
             }
             // El otro lado también tiene que haber aceptado.
@@ -285,10 +285,10 @@ fn serve(handle: &AppHandle, stream: TcpStream) -> Result<()> {
                     emit_done(handle, &uid, &name, false, Some(&reason));
                     return Ok(());
                 }
-                other => return Err(anyhow!("se esperaba PairAck, llego {other:?}")),
+                other => return Err(anyhow!("expected PairAck, got {other:?}")),
             };
             if !accepted_there {
-                emit_done(handle, &uid, &name, false, Some("rechazado en el otro dispositivo"));
+                emit_done(handle, &uid, &name, false, Some("rejected on the other device"));
                 return Ok(());
             }
             store_device(handle, &uid, &name, &platform, &sess.peer_pubkey)?;
@@ -308,10 +308,10 @@ fn serve(handle: &AppHandle, stream: TcpStream) -> Result<()> {
                 Known::Trusted => {}
                 Known::KeyMismatch => {
                     let _ = sess.send(&Msg::Reject {
-                        reason: "clave distinta a la que ya tenías para este dispositivo".into(),
+                        reason: "different key from the one you already had for this device".into(),
                     });
                     warn_key_mismatch(handle, &uid, &name);
-                    return Err(anyhow!("clave distinta para {uid}"));
+                    return Err(anyhow!("different key for {uid}"));
                 }
                 Known::Unknown => {
                     // No es un error del otro lado: probablemente lo
@@ -343,14 +343,14 @@ fn serve(handle: &AppHandle, stream: TcpStream) -> Result<()> {
             match known_state(handle, &uid, &sess.peer_pubkey) {
                 Known::Trusted => {
                     forget_device(handle, &uid)?;
-                    log::info!("[pair] {uid} nos desvinculó");
+                    log::info!("[pair] {uid} unpaired us");
                     let _ = handle.emit("peers-changed", ());
                     Ok(())
                 }
-                _ => Err(anyhow!("unpair de un peer que no está vinculado ({uid})")),
+                _ => Err(anyhow!("unpair from a device that is not paired ({uid})")),
             }
         }
-        other => Err(anyhow!("primer mensaje inesperado: {other:?}")),
+        other => Err(anyhow!("unexpected first message: {other:?}")),
     }
 }
 
@@ -365,7 +365,7 @@ pub fn connect_peer(handle: AppHandle, uid: String) {
     std::thread::spawn(move || {
         let name = peer_name(&handle, &uid);
         if let Err(e) = connect_inner(&handle, &uid) {
-            log::warn!("[pair] conexion con {uid} fallo: {e}");
+            log::warn!("[pair] connection with {uid} failed: {e}");
             // Solo los fallos de RED apagan la fila: que diga "conectado"
             // justo después de un timeout es la peor combinación posible.
             // Un rechazo lógico (no vinculado, clave distinta) no significa
@@ -400,13 +400,13 @@ fn peer_addr(handle: &AppHandle, uid: &str) -> Result<SocketAddr> {
         .list()
         .into_iter()
         .find(|p| p.uid == uid)
-        .ok_or_else(|| anyhow!("el dispositivo ya no está visible en la red"))?;
+        .ok_or_else(|| anyhow!("that device is no longer visible on the network"))?;
     let addr = peer
         .addrs
         .first()
-        .ok_or_else(|| anyhow!("el dispositivo no publicó ninguna dirección"))?;
+        .ok_or_else(|| anyhow!("that device did not publish any address"))?;
     crate::discovery::resolve(addr, peer.port)
-        .ok_or_else(|| anyhow!("no se pudo resolver la dirección ({addr}:{})", peer.port))
+        .ok_or_else(|| anyhow!("could not resolve the address ({addr}:{})", peer.port))
 }
 
 fn connect_inner(handle: &AppHandle, uid: &str) -> Result<()> {
@@ -423,7 +423,7 @@ fn connect_inner(handle: &AppHandle, uid: &str) -> Result<()> {
         Known::KeyMismatch => {
             warn_key_mismatch(handle, uid, &name);
             return Err(anyhow!(
-                "la clave de {name} no coincide con la que tenías guardada"
+                "the key of {name} does not match the one you had stored"
             ));
         }
         Known::Trusted => {
@@ -454,10 +454,10 @@ fn connect_inner(handle: &AppHandle, uid: &str) -> Result<()> {
                 Msg::NotPaired => {
                     forget_device(handle, uid)?;
                     let _ = handle.emit("peers-changed", ());
-                    Err(anyhow!("{name} ya no te tiene vinculado"))
+                    Err(anyhow!("{name} no longer has you paired"))
                 }
                 Msg::Reject { reason } => Err(anyhow!(reason)),
-                other => Err(anyhow!("se esperaba Hello, llego {other:?}")),
+                other => Err(anyhow!("expected Hello, got {other:?}")),
             }
         }
         Known::Unknown => {
@@ -483,9 +483,9 @@ fn connect_inner(handle: &AppHandle, uid: &str) -> Result<()> {
                 // Cortar acá y no esperar la respuesta del otro: puede haber
                 // alguien mirando la pantalla hasta que expire el timeout.
                 let _ = sess.send(&Msg::Reject {
-                    reason: "rechazado en el otro dispositivo".into(),
+                    reason: "rejected on the other device".into(),
                 });
-                emit_done(handle, uid, &name, false, Some("rechazado en este dispositivo"));
+                emit_done(handle, uid, &name, false, Some("rejected on this device"));
                 return Ok(());
             }
             let accepted_there = match sess.recv()? {
@@ -494,13 +494,13 @@ fn connect_inner(handle: &AppHandle, uid: &str) -> Result<()> {
                     emit_done(handle, uid, &name, false, Some(&reason));
                     return Ok(());
                 }
-                other => return Err(anyhow!("se esperaba PairResponse, llego {other:?}")),
+                other => return Err(anyhow!("expected PairResponse, got {other:?}")),
             };
             sess.send(&Msg::PairAck {
                 accepted: accepted_here,
             })?;
             if !accepted_there {
-                emit_done(handle, uid, &name, false, Some("rechazado en el otro dispositivo"));
+                emit_done(handle, uid, &name, false, Some("rejected on the other device"));
                 return Ok(());
             }
             store_device(handle, uid, &name, &platform_of(handle, uid), &sess.peer_pubkey)?;
@@ -529,7 +529,7 @@ const SERVER_IO_TIMEOUT: Duration = Duration::from_secs(15);
 /// puede mostrar el resultado sin esperar un evento.
 pub fn pair_with_server(handle: &AppHandle, host: &str, port: u16, token: &str) -> Result<String> {
     let addr = crate::discovery::resolve(host, port)
-        .ok_or_else(|| anyhow!("no se pudo resolver {host}:{port}"))?;
+        .ok_or_else(|| anyhow!("could not resolve {host}:{port}"))?;
     let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)?;
     stream.set_read_timeout(Some(SERVER_IO_TIMEOUT))?;
     stream.set_write_timeout(Some(SERVER_IO_TIMEOUT))?;
@@ -546,10 +546,10 @@ pub fn pair_with_server(handle: &AppHandle, host: &str, port: u16, token: &str) 
     match sess.recv()? {
         Msg::PairResponse { accepted: true } => {}
         Msg::PairResponse { accepted: false } => {
-            return Err(anyhow!("el server rechazó el token"))
+            return Err(anyhow!("the server rejected the token"))
         }
         Msg::Reject { reason } => return Err(anyhow!(reason)),
-        other => return Err(anyhow!("se esperaba PairResponse, llego {other:?}")),
+        other => return Err(anyhow!("expected PairResponse, got {other:?}")),
     }
     sess.send(&Msg::PairAck { accepted: true })?;
 
@@ -561,12 +561,12 @@ pub fn pair_with_server(handle: &AppHandle, host: &str, port: u16, token: &str) 
             uid, name, platform, ..
         } => (uid, name, platform),
         Msg::Reject { reason } => return Err(anyhow!(reason)),
-        other => return Err(anyhow!("se esperaba Hello, llego {other:?}")),
+        other => return Err(anyhow!("expected Hello, got {other:?}")),
     };
     if let Known::KeyMismatch = known_state(handle, &their_uid, &sess.peer_pubkey) {
         warn_key_mismatch(handle, &their_uid, &their_name);
         return Err(anyhow!(
-            "la clave de {their_name} no coincide con la que tenías guardada"
+            "the key of {their_name} does not match the one you had stored"
         ));
     }
 
@@ -594,7 +594,7 @@ pub fn pair_with_server(handle: &AppHandle, host: &str, port: u16, token: &str) 
         .peers
         .add_manual(&their_uid, &their_name, &their_platform, host, port);
     let _ = handle.emit("peers-changed", ());
-    log::info!("[pair] server {their_name} vinculado en {host}:{port}");
+    log::info!("[pair] server {their_name} paired at {host}:{port}");
     Ok(their_name)
 }
 
@@ -606,7 +606,7 @@ pub fn restore_manual_peers(handle: &AppHandle) {
     let Ok(conn) = state.db.lock() else { return };
     for (uid, name, platform, address) in core_pair::devices_with_address(&conn) {
         let Some((host, port)) = split_addr(&address) else {
-            log::warn!("[pair] dirección guardada inválida para {name}: {address}");
+            log::warn!("[pair] invalid stored address for {name}: {address}");
             continue;
         };
         state.peers.add_manual(&uid, &name, &platform, host, port);
@@ -638,7 +638,7 @@ pub fn preview_sync(handle: AppHandle, uid: String) {
         match preview_inner(&handle, &uid) {
             Ok(plan) => {
                 if plan.is_empty() {
-                    log::info!("[sync] {name}: nada que sincronizar");
+                    log::info!("[sync] {name}: nothing to sync");
                 }
                 let _ = handle.emit(
                     "sync-plan",
@@ -652,7 +652,7 @@ pub fn preview_sync(handle: AppHandle, uid: String) {
                 );
             }
             Err(e) => {
-                log::warn!("[sync] preview con {uid} fallo: {e}");
+                log::warn!("[sync] preview with {uid} failed: {e}");
                 emit_done(&handle, &uid, &name, false, Some(&e.to_string()));
             }
         }
@@ -670,8 +670,8 @@ fn open_session(handle: &AppHandle, uid: &str) -> Result<Session> {
 
     match known_state(handle, uid, &sess.peer_pubkey) {
         Known::Trusted => {}
-        Known::KeyMismatch => return Err(anyhow!("la clave del dispositivo no coincide")),
-        Known::Unknown => return Err(anyhow!("todavía no está vinculado")),
+        Known::KeyMismatch => return Err(anyhow!("the device key does not match")),
+        Known::Unknown => return Err(anyhow!("not paired yet")),
     }
 
     let (my_uid, my_name) = me(handle)?;
@@ -689,9 +689,9 @@ fn open_session(handle: &AppHandle, uid: &str) -> Result<Session> {
         Msg::NotPaired => {
             forget_device(handle, uid)?;
             let _ = handle.emit("peers-changed", ());
-            Err(anyhow!("ese dispositivo ya no te tiene vinculado"))
+            Err(anyhow!("that device no longer has you paired"))
         }
-        other => Err(anyhow!("se esperaba Hello, llego {other:?}")),
+        other => Err(anyhow!("expected Hello, got {other:?}")),
     }
 }
 
@@ -766,20 +766,20 @@ pub fn wait_until_idle(handle: &AppHandle, uids: &[String], max: Duration) {
         }
         std::thread::sleep(POLL);
     }
-    log::warn!("[autosync] la red local sigue ocupada: se sincroniza con el server igual");
+    log::warn!("[autosync] local network is still busy: syncing with the server anyway");
 }
 
 fn run_sync(handle: AppHandle, uid: String, auto: bool) {
     std::thread::spawn(move || {
         let Some(_guard) = SyncGuard::acquire(&handle, &uid) else {
-            log::debug!("[sync] ya hay un sync corriendo con {uid}");
+            log::debug!("[sync] a sync with {uid} is already running");
             return;
         };
         let name = peer_name(&handle, &uid);
         match sync_inner(&handle, &uid) {
             Ok(engine::SyncResult { received, sent, failed, bytes, organized }) => {
                 log::info!(
-                    "[sync] {name}: {received} recibidos, {sent} enviados, {failed} fallados, {organized} de organización"
+                    "[sync] {name}: {received} received, {sent} sent, {failed} failed, {organized} organization"
                 );
                 let _ = handle.emit(
                     "sync-done",
@@ -799,7 +799,7 @@ fn run_sync(handle: AppHandle, uid: String, auto: bool) {
                 emit_library_changed(&handle, true);
             }
             Err(e) => {
-                log::warn!("[sync] {name} fallo: {e}");
+                log::warn!("[sync] {name} failed: {e}");
                 // Que se corte la conexión no es una falla que valga un cartel:
                 // el celular se durmió, cambió de red, o se cerró la app del
                 // otro lado. El sync automático lo reintenta solo. Se avisa
@@ -882,7 +882,7 @@ fn exchange_hello(handle: &AppHandle, sess: &mut Session, uid: &str, name: &str)
             report_hello(handle, uid, name, tracks, playlists, clock_ms);
             Ok(())
         }
-        other => Err(anyhow!("se esperaba Hello, llego {other:?}")),
+        other => Err(anyhow!("expected Hello, got {other:?}")),
     }
 }
 
@@ -896,7 +896,7 @@ fn report_hello(
 ) {
     let skew = their_clock - db::now_ms();
     if skew.abs() > 5 * 60 * 1000 {
-        log::warn!("[pair] reloj de {name} corrido {skew} ms — el merge por LWW puede elegir mal");
+        log::warn!("[pair] clock of {name} is off by {skew} ms - last-write-wins may pick the wrong side");
     }
     {
         let state = handle.state::<AppState>();
@@ -949,7 +949,7 @@ fn warn_key_mismatch(handle: &AppHandle, uid: &str, name: &str) {
         uid,
         name,
         false,
-        Some("la clave de este dispositivo cambió — desvinculalo y volvé a vincularlo si fuiste vos"),
+        Some("this device's key changed - unlink it and pair again if that was you"),
     );
 }
 
@@ -974,7 +974,7 @@ pub fn unpair(handle: &AppHandle, uid: &str) -> Result<()> {
         let uid = uid.to_string();
         std::thread::spawn(move || {
             if let Err(e) = notify_unpair(&handle, addr) {
-                log::debug!("[pair] no se pudo avisar el unpair a {uid}: {e}");
+                log::debug!("[pair] could not notify unpair to {uid}: {e}");
             }
         });
     }

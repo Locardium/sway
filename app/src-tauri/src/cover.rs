@@ -16,7 +16,7 @@ fn read_tagged(path: &Path) -> Option<TaggedFile> {
             // Mismo caso que import.rs::read_meta: un frame de fecha ID3
             // corrupto tira el tag entero. Sanitizar y reintentar en memoria
             // antes de rendirse (ver id3_sanitize.rs).
-            log::warn!("cover: lofty read_from_path fallo para {}: {e}", path.display());
+            log::warn!("cover: lofty read_from_path failed for {}: {e}", path.display());
             let bytes = std::fs::read(path).ok()?;
             let patched = sanitize_id3v2_date_frames(&bytes)?;
             Probe::new(Cursor::new(patched.as_slice())).guess_file_type().ok()?.read().ok()

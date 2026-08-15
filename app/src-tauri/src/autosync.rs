@@ -97,7 +97,7 @@ pub fn set_enabled(conn: &rusqlite::Connection, on: bool) -> rusqlite::Result<()
 
 /// Aviso de que algo cambió en esta biblioteca.
 pub fn note_change(handle: &AppHandle) {
-    log::info!("[autosync] cambio local anotado");
+    log::info!("[autosync] local change noted");
     handle.state::<AppState>().autosync.note_change();
 }
 
@@ -132,11 +132,11 @@ pub fn peer_came_online(handle: &AppHandle, uid: &str) {
         let Ok(conn) = guard else { return };
         let limits = crate::power::Limits::load(&conn);
         if let Some(h) = crate::power::hold(&conditions, &limits, remote) {
-            log::info!("[autosync] {uid} apareció pero se espera: {}", h.reason());
+            log::info!("[autosync] {uid} showed up but sync is on hold: {}", h.reason());
             return;
         }
     }
-    log::info!("[autosync] {uid} está disponible: poniéndose al día");
+    log::info!("[autosync] {uid} is available: catching up");
 
     // Un server que aparece espera a la red local, por lo mismo que en el
     // bucle de abajo: al arrancar la app suelen aparecer los dos a la vez, y
@@ -191,11 +191,11 @@ pub fn spawn(handle: AppHandle) {
             let peers: Vec<(String, String)> = {
                 let guard = state.db.lock();
                 let Ok(conn) = guard else {
-                    log::warn!("[autosync] no se pudo tomar el lock de la DB");
+                    log::warn!("[autosync] could not take the DB lock");
                     continue;
                 };
                 if !enabled(&conn) {
-                    log::debug!("[autosync] apagado por configuracion");
+                    log::debug!("[autosync] turned off in settings");
                     continue;
                 }
                 state
@@ -218,10 +218,10 @@ pub fn spawn(handle: AppHandle) {
                 // leyendo el log.
                 if due_change {
                     log::info!(
-                        "[autosync] hay cambios para propagar pero ningun dispositivo vinculado esta disponible"
+                        "[autosync] there are changes to propagate but no paired device is available"
                     );
                 } else {
-                    log::debug!("[autosync] ningun dispositivo vinculado disponible");
+                    log::debug!("[autosync] no paired device available");
                 }
                 // Puede estar marcado offline por un sondeo viejo: preguntar de
                 // nuevo ahora en vez de esperar la red de contención.
@@ -232,7 +232,7 @@ pub fn spawn(handle: AppHandle) {
             next_try = std::time::Instant::now();
             if due_change {
                 state.autosync.clear();
-                log::info!("[autosync] cambios locales -> {} dispositivo(s)", peers.len());
+                log::info!("[autosync] local changes -> {} device(s)", peers.len());
             }
 
             // Red y batería. Un sync automático puede esperar; uno pedido a
@@ -261,14 +261,14 @@ pub fn spawn(handle: AppHandle) {
 
             let lan = match crate::power::hold(&conditions, &limits, false) {
                 Some(h) => {
-                    log::info!("[autosync] la red local espera: {}", h.reason());
+                    log::info!("[autosync] local network on hold: {}", h.reason());
                     Vec::new()
                 }
                 None => lan,
             };
             let servers = match crate::power::hold(&conditions, &limits, true) {
                 Some(h) => {
-                    log::info!("[autosync] el server espera: {}", h.reason());
+                    log::info!("[autosync] server on hold: {}", h.reason());
                     Vec::new()
                 }
                 None => servers,

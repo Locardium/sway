@@ -52,10 +52,8 @@ local.properties
 *.sqlite-shm
 
 # === Server corriendo local ===
-# El TOML tiene el token de vinculacion adentro: es una contrasena.
-sway-server.toml
-sway-server
-sway-server.exe
+sv-test
+sv-test/*
 
 # === Salidas generadas del PoC (contienen la libreria del usuario) ===
 tools/itunes-xml-poc/*.xml

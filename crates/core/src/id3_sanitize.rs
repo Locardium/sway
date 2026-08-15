@@ -108,7 +108,7 @@ pub fn sanitize_id3v2_date_frames(bytes: &[u8]) -> Option<Vec<u8>> {
                     *b = 0;
                 }
                 log::warn!(
-                    "id3_sanitize: frame {} con fecha invalida, neutralizado",
+                    "id3_sanitize: frame {} had an invalid date, neutralized",
                     String::from_utf8_lossy(id)
                 );
             }

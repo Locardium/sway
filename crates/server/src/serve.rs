@@ -26,12 +26,12 @@ pub struct Server {
 }
 
 pub fn run(server: Arc<Server>, listener: TcpListener) -> Result<()> {
-    log::info!("[server] escuchando en {}", listener.local_addr()?);
+    log::info!("[server] listening on {}", listener.local_addr()?);
     for stream in listener.incoming() {
         let stream = match stream {
             Ok(s) => s,
             Err(e) => {
-                log::warn!("[server] accept falló: {e}");
+                log::warn!("[server] accept failed: {e}");
                 continue;
             }
         };
@@ -45,9 +45,9 @@ pub fn run(server: Arc<Server>, listener: TcpListener) -> Result<()> {
                 // Conectar y cortar sin decir nada es lo que hace el sondeo de
                 // alcanzabilidad de la app: tráfico esperado, no un error.
                 if is_disconnect(&e) {
-                    log::debug!("[server] {peer} cortó sin hablar");
+                    log::debug!("[server] {peer} disconnected without saying anything");
                 } else {
-                    log::warn!("[server] conexión con {peer} terminada: {e}");
+                    log::warn!("[server] connection with {peer} ended: {e}");
                 }
             }
         });
@@ -84,12 +84,12 @@ fn serve(server: &Server, stream: TcpStream) -> Result<()> {
                 Known::Trusted => {}
                 Known::KeyMismatch => {
                     let _ = sess.send(&Msg::Reject {
-                        reason: "clave distinta a la que ya tenía para este dispositivo".into(),
+                        reason: "different key from the one already stored for this device".into(),
                     });
                     server
                         .host
                         .with_db(|conn| Ok(pair::log_key_mismatch(conn, &uid, &name)))?;
-                    return Err(anyhow!("clave distinta para {uid}"));
+                    return Err(anyhow!("different key for {uid}"));
                 }
                 Known::Unknown => {
                     // Que se entere y limpie su fila, en vez de seguir
@@ -103,7 +103,7 @@ fn serve(server: &Server, stream: TcpStream) -> Result<()> {
             server
                 .host
                 .with_db(|conn| Ok(pair::touch_device(conn, &uid, &name)))?;
-            log::info!("[server] {name} conectado ({tracks} tracks, {playlists} playlists)");
+            log::info!("[server] {name} connected ({tracks} tracks, {playlists} playlists)");
             let stats = engine::serve_requests(&*server.host, &mut sess, &uid)?;
             // El que atiende no decide nada: responde pedidos. Sin este
             // resumen su log es una tira de líneas sueltas y no hay forma de
@@ -111,14 +111,14 @@ fn serve(server: &Server, stream: TcpStream) -> Result<()> {
             // ninguna pantalla donde mirarlo de otra manera.
             if stats.moved_something() {
                 log::info!(
-                    "[server] {name}: {} recibidos, {} enviados, {} de organización, {} borrados",
+                    "[server] {name}: {} received, {} sent, {} organization, {} deleted",
                     stats.received,
                     stats.sent,
                     stats.applied.tracks + stats.applied.playlists + stats.applied.memberships,
                     stats.applied.deleted,
                 );
             } else {
-                log::info!("[server] {name}: ya estaba al día");
+                log::info!("[server] {name}: already up to date");
             }
             Ok(())
         }
@@ -132,14 +132,14 @@ fn serve(server: &Server, stream: TcpStream) -> Result<()> {
             match known {
                 Known::Trusted => {
                     server.host.with_db(|conn| pair::forget_device(conn, &uid))?;
-                    log::info!("[server] {uid} se desvinculó");
+                    log::info!("[server] {uid} unpaired");
                     Ok(())
                 }
-                _ => Err(anyhow!("unpair de un peer que no está vinculado ({uid})")),
+                _ => Err(anyhow!("unpair from a device that is not paired ({uid})")),
             }
         }
 
-        other => Err(anyhow!("primer mensaje inesperado: {other:?}")),
+        other => Err(anyhow!("unexpected first message: {other:?}")),
     }
 }
 
@@ -157,12 +157,12 @@ fn pair_device(
         .with_db(|conn| Ok(pair::known_state(conn, uid, &sess.peer_pubkey)))?;
     if let Known::KeyMismatch = known {
         let _ = sess.send(&Msg::Reject {
-            reason: "clave distinta a la que ya tenía para este dispositivo".into(),
+            reason: "different key from the one already stored for this device".into(),
         });
         server
             .host
             .with_db(|conn| Ok(pair::log_key_mismatch(conn, uid, name)))?;
-        return Err(anyhow!("clave distinta para {uid}"));
+        return Err(anyhow!("different key for {uid}"));
     }
 
     // El token se compara entero (ver `pair::secret_eq`): con una comparación
@@ -171,8 +171,8 @@ fn pair_device(
     let ok = token.map(|t| pair::secret_eq(t, &server.token)).unwrap_or(false);
     if !ok {
         let _ = sess.send(&Msg::PairResponse { accepted: false });
-        log::warn!("[server] {name} ({uid}) intentó vincularse con un token que no es");
-        return Err(anyhow!("token inválido"));
+        log::warn!("[server] {name} ({uid}) tried to pair with a wrong token");
+        return Err(anyhow!("invalid token"));
     }
 
     sess.send(&Msg::PairResponse { accepted: true })?;
@@ -181,20 +181,20 @@ fn pair_device(
     match sess.recv()? {
         Msg::PairAck { accepted: true } => {}
         Msg::PairAck { accepted: false } => {
-            log::info!("[server] {name} canceló la vinculación");
+            log::info!("[server] {name} cancelled pairing");
             return Ok(());
         }
         Msg::Reject { reason } => {
-            log::info!("[server] {name} rechazó la vinculación: {reason}");
+            log::info!("[server] {name} rejected pairing: {reason}");
             return Ok(());
         }
-        other => return Err(anyhow!("se esperaba PairAck, llegó {other:?}")),
+        other => return Err(anyhow!("expected PairAck, got {other:?}")),
     }
 
     server
         .host
         .with_db(|conn| pair::store_device(conn, uid, name, platform, &sess.peer_pubkey))?;
-    log::info!("[server] {name} ({platform}) vinculado");
+    log::info!("[server] {name} ({platform}) paired");
 
     // Presentación mutua, igual que entre dos dispositivos: los dos mandan
     // primero y después esperan, así que no se traban.
@@ -204,7 +204,7 @@ fn pair_device(
             report_clock(name, clock_ms);
             Ok(())
         }
-        other => Err(anyhow!("se esperaba Hello, llegó {other:?}")),
+        other => Err(anyhow!("expected Hello, got {other:?}")),
     }
 }
 
@@ -229,6 +229,6 @@ fn hello_back(server: &Server, sess: &mut Session) -> Result<()> {
 fn report_clock(name: &str, their_clock: i64) {
     let skew = their_clock - db::now_ms();
     if skew.abs() > 5 * 60 * 1000 {
-        log::warn!("[server] reloj de {name} corrido {skew} ms — el merge por LWW puede elegir mal");
+        log::warn!("[server] clock of {name} is off by {skew} ms - last-write-wins may pick the wrong side");
     }
 }

@@ -39,7 +39,7 @@ fn read_meta(path: &Path) -> Meta {
     match lofty::read_from_path(path) {
         Ok(tagged) => fill_meta_from_tagged(&mut m, &tagged),
         Err(e) => {
-            log::warn!("lofty read_from_path (con tags) fallo para {}: {e}", path.display());
+            log::warn!("lofty read_from_path (with tags) failed for {}: {e}", path.display());
             apply_meta_from_broken_tag(path, &mut m);
         }
     }
@@ -63,11 +63,11 @@ fn apply_meta_from_broken_tag(path: &Path, m: &mut Meta) {
                 .ok()
                 .and_then(|p| p.read().ok());
             if let Some(tagged) = parsed {
-                log::info!("id3_sanitize: {} recupero el tag completo tras sanitizar", path.display());
+                log::info!("id3_sanitize: {} recovered its full tag after sanitizing", path.display());
                 fill_meta_from_tagged(m, &tagged);
                 return;
             }
-            log::warn!("id3_sanitize: {} sigue sin parsear incluso sanitizado", path.display());
+            log::warn!("id3_sanitize: {} still does not parse even after sanitizing", path.display());
         }
     }
     let props_only = ParseOptions::new().read_tags(false);
@@ -76,7 +76,7 @@ fn apply_meta_from_broken_tag(path: &Path, m: &mut Meta) {
             m.duration_ms = tagged.properties().duration().as_millis() as i64;
         }
         Err(e2) => {
-            log::warn!("lofty properties-only tambien fallo para {}: {e2}", path.display());
+            log::warn!("lofty properties-only also failed for {}: {e2}", path.display());
         }
     }
 }

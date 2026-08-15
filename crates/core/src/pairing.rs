@@ -50,7 +50,7 @@ pub fn keypair(conn: &Connection) -> Result<(Vec<u8>, Vec<u8>)> {
     let (private, public) = crate::wire::generate_keypair()?;
     db::set_setting(conn, SETTING_PRIVKEY, &b64.encode(&private))?;
     db::set_setting(conn, SETTING_PUBKEY, &b64.encode(&public))?;
-    log::info!("[pair] par de claves nuevo generado");
+    log::info!("[pair] new key pair generated");
     Ok((private, public))
 }
 
@@ -150,7 +150,7 @@ pub fn touch_device(conn: &Connection, uid: &str, name: &str) {
 /// lado — o alguien haciéndose pasar por él. No se resuelve solo: queda
 /// registrado y hay que desvincular a mano para volver a parear.
 pub fn log_key_mismatch(conn: &Connection, uid: &str, name: &str) {
-    log::warn!("[pair] clave distinta para {name} ({uid}) — conexión rechazada");
+    log::warn!("[pair] different key for {name} ({uid}) - connection rejected");
     let _ = conn.execute(
         "INSERT INTO sync_log (ts, peer, kind, detail) VALUES (?1, ?2, 'key-mismatch', ?3)",
         rusqlite::params![db::now_ms(), uid, name],

@@ -158,7 +158,7 @@ pub fn serve_requests<H: Host>(
                         stats.sent += 1;
                     }
                     None => sess.send(&Msg::BlobError {
-                        reason: format!("no tengo el archivo {hash}"),
+                        reason: format!("I do not have file {hash}"),
                     })?,
                 }
             }
@@ -209,11 +209,11 @@ pub fn serve_requests<H: Host>(
                         bpm,
                         updated_at,
                     ) {
-                        log::warn!("[sync] no se pudo dar de alta {filename}: {e}");
+                        log::warn!("[sync] could not register {filename}: {e}");
                     }
                     Ok(())
                 })?;
-                log::info!("[sync] recibido {filename} ({} bytes)", got.bytes);
+                log::info!("[sync] received {filename} ({} bytes)", got.bytes);
                 stats.received += 1;
                 // Sin forzar: en una tanda de archivos, una recarga completa
                 // de la biblioteca por archivo deja la UI inservible.
@@ -230,7 +230,7 @@ pub fn serve_requests<H: Host>(
                     // marcar una playlist entraba acá e imprimía tres ceros:
                     // el log decía "no pasó nada" justo cuando había pasado.
                     log::info!(
-                        "[sync] aplicados {} tracks, {} playlists, {} membresías, {} borrados, {} de scope",
+                        "[sync] applied {} tracks, {} playlists, {} memberships, {} deletions, {} scope rows",
                         applied.tracks,
                         applied.playlists,
                         applied.memberships,
@@ -253,7 +253,7 @@ pub fn serve_requests<H: Host>(
                 sess.send(&Msg::MetaAck { applied })?;
             }
             Msg::Bye => return Ok(stats),
-            other => return Err(anyhow!("pedido inesperado: {other:?}")),
+            other => return Err(anyhow!("unexpected request: {other:?}")),
         }
     }
 }
@@ -276,7 +276,7 @@ pub fn fetch_plan<H: Host>(
     sess.send(&Msg::ManifestReq)?;
     let remote = match sess.recv()? {
         Msg::ManifestData { manifest } => *manifest,
-        other => return Err(anyhow!("se esperaba el manifest, llego {other:?}")),
+        other => return Err(anyhow!("expected the manifest, got {other:?}")),
     };
     let local = host.with_db(|conn| {
         // Quién tiene qué archivo. Es lo único que después permite liberar
@@ -416,7 +416,7 @@ pub fn sync<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> Result<Syn
                 if is_disconnect(&e) {
                     return Err(e);
                 }
-                log::warn!("[sync] no se pudo traer {}: {e}", f.filename);
+                log::warn!("[sync] could not fetch {}: {e}", f.filename);
                 failed += 1;
             }
         }
@@ -468,7 +468,7 @@ pub fn sync<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> Result<Syn
                 if is_disconnect(&e) {
                     return Err(e);
                 }
-                log::warn!("[sync] no se pudo mandar {}: {e}", f.filename);
+                log::warn!("[sync] could not send {}: {e}", f.filename);
                 failed += 1;
             }
         }
@@ -509,13 +509,13 @@ pub fn sync<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> Result<Syn
     })?;
     let applied_there = match sess.recv()? {
         Msg::MetaAck { applied } => applied,
-        other => return Err(anyhow!("se esperaba MetaAck, llegó {other:?}")),
+        other => return Err(anyhow!("expected MetaAck, got {other:?}")),
     };
     // Desglosado y no sólo el total: si un sync repite los mismos números
     // corrida tras corrida, no está convergiendo, y el total solo no dice
     // qué se está re-aplicando.
     log::info!(
-        "[sync] acá: {} meta, {} playlists, {} membresías, {} borrados, {} de scope | allá: {} meta, {} playlists, {} membresías, {} borrados, {} de scope",
+        "[sync] here: {} meta, {} playlists, {} memberships, {} deletions, {} scope | there: {} meta, {} playlists, {} memberships, {} deletions, {} scope",
         applied_here.tracks,
         applied_here.playlists,
         applied_here.memberships,
@@ -529,7 +529,7 @@ pub fn sync<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> Result<Syn
     );
     if applied_here.total() > 0 {
         log::debug!(
-            "[sync] entrantes: {} tracks, {} playlists, {} membresías, {} tombstones",
+            "[sync] incoming: {} tracks, {} playlists, {} memberships, {} tombstones",
             theirs.tracks.len(),
             theirs.playlists.len(),
             theirs.memberships.len(),
@@ -666,7 +666,7 @@ pub fn restore<H: Host>(host: &H) -> usize {
     let candidates = match candidates {
         Ok(c) => c,
         Err(e) => {
-            log::warn!("[scope] no se pudo listar lo recuperable: {e}");
+            log::warn!("[scope] could not list restorable files: {e}");
             return 0;
         }
     };
@@ -696,7 +696,7 @@ pub fn restore<H: Host>(host: &H) -> usize {
     let n = match n {
         Ok(n) => n,
         Err(e) => {
-            log::warn!("[scope] recuperar de la papelera falló: {e}");
+            log::warn!("[scope] restoring from trash failed: {e}");
             return 0;
         }
     };

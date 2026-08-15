@@ -78,7 +78,7 @@ impl Config {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
             {
-                log::info!("[server] token tomado de {}", Self::TOKEN_ENV);
+                log::info!("[server] token taken from {}", Self::TOKEN_ENV);
                 cfg.pair_token = from_env;
             }
             if cfg.pair_token.trim().is_empty() {
@@ -97,37 +97,37 @@ impl Config {
 /// comentarios: el archivo lo va a leer una persona que no vio este código.
 fn template(token: &str) -> String {
     format!(
-        r#"# Server de archivo y sync de Sway.
+        r#"# Sway archive and sync server.
 #
-# Guarda todo lo que le mandan los dispositivos y se los devuelve cuando lo
-# piden. No importa musica por su cuenta: lo que tiene, se lo mando alguien.
+# Keeps whatever your devices send it and hands it back when they ask. It
+# never imports music on its own: everything it has, someone sent it.
 
-# Donde escuchar. 0.0.0.0 acepta desde afuera de esta maquina.
+# Where to listen. 0.0.0.0 accepts connections from outside this machine.
 listen = "0.0.0.0:7420"
 
-# Como se ve en la lista de dispositivos de la app.
+# How it shows up in the device list in the app.
 name = "Sway Server"
 
-# La base: identidad de cada track, playlists y estado de cada dispositivo.
+# The database: identity of every track, playlists, and per-device state.
 #
-# OJO con las rutas de Windows: la barra invertida es un escape. Se pone
-# 'D:\Musica' con comillas SIMPLES, o "D:/Musica" con barras normales.
+# CAREFUL with Windows paths: a backslash is an escape in TOML. Write
+# 'D:\Music' with SINGLE quotes, or "D:/Music" with forward slashes.
 data_dir = "data"
 
-# Los archivos de audio. Esto es lo que crece — que sea el disco grande.
+# The audio files. This is what grows - point it at the big disk.
 music_dir = "music"
 
-# Cuantos dias sobrevive en la papelera del server un archivo borrado.
+# How many days a deleted file survives in the server's trash.
 #
-# Un borrado viaja: lo borras en un dispositivo y desaparece de todos, server
-# incluido. Esto es lo unico que hace que se pueda rescatar despues. En 0 se
-# destruye en el acto — espejo exacto de tus dispositivos, sin red debajo.
+# Deletions travel: delete on one device and it is gone from all of them, the
+# server included. This is the only thing that makes it recoverable
+# afterwards. At 0 it is destroyed right away - an exact mirror of your
+# devices, with no safety net.
 retention_days = 90
 
-# Lo que hay que poner en la app para vincular un dispositivo con este server.
-# Reemplaza al codigo de seis digitos, porque aca no hay pantalla donde
-# compararlo. Tratalo como una contrasena. Cambiarlo NO desvincula lo que ya
-# esta vinculado.
+# What you type in the app to pair a device with this server. It replaces the
+# six-digit code, because there is no screen here to compare it on. Treat it
+# like a password. Changing it does NOT unpair what is already paired.
 pair_token = "{token}"
 "#
     )

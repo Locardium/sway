@@ -178,8 +178,8 @@ pub enum Hold {
 impl Hold {
     pub fn reason(&self) -> &'static str {
         match self {
-            Hold::Metered => "la red se paga por dato",
-            Hold::Battery => "queda poca batería",
+            Hold::Metered => "the network is metered",
+            Hold::Battery => "battery is low",
         }
     }
 }

@@ -286,7 +286,7 @@ pub fn start(
     // cambia al saltar de Wi-Fi a datos y volver.
     .enable_addr_auto();
     daemon.register(info)?;
-    log::info!("[mdns] publicado {name} ({uid}) en el puerto {port}");
+    log::info!("[mdns] published {name} ({uid}) on port {port}");
 
     spawn_browse_loop(handle, daemon.browse(SERVICE_TYPE)?, uid.to_string());
     Ok(daemon)
@@ -384,18 +384,18 @@ fn spawn_browse_loop(handle: AppHandle, receiver: mdns_sd::Receiver<ServiceEvent
                     };
                     if ours {
                         if state.peers.mark_gone_by_fullname(&fullname) {
-                            log::info!("[mdns] {fullname} dejó de anunciarse: gris hasta que el sondeo diga");
+                            log::info!("[mdns] {fullname} stopped announcing: greyed out until the probe says otherwise");
                             let _ = handle.emit("peers-changed", ());
                         }
                     } else if state.peers.remove_by_fullname(&fullname) {
-                        log::info!("[mdns] peer se fue: {fullname}");
+                        log::info!("[mdns] peer gone: {fullname}");
                         let _ = handle.emit("peers-changed", ());
                     }
                 }
                 _ => {}
             }
         }
-        log::debug!("[mdns] listener reemplazado por uno nuevo");
+        log::debug!("[mdns] listener replaced by a new one");
     });
 }
 
@@ -426,7 +426,7 @@ pub fn spawn_prober(handle: AppHandle) {
             // que se enciende después queda invisible todo ese rato.
             if tick % REBROWSE_EVERY == 0 {
                 if let Err(e) = refresh(&handle) {
-                    log::debug!("[mdns] re-browse fallo: {e}");
+                    log::debug!("[mdns] re-browse failed: {e}");
                 }
             }
 

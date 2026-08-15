@@ -854,7 +854,7 @@ pub fn finish_restore(
         restored += 1;
     }
     if restored > 0 {
-        log::info!("[scope] {restored} archivo(s) recuperados de la papelera");
+        log::info!("[scope] {restored} file(s) restored from trash");
     }
     Ok(restored)
 }
@@ -872,7 +872,7 @@ pub fn evict(
         let path = std::path::Path::new(&it.path);
         if path.exists() {
             if let Err(e) = crate::trash::move_to_trash(music_dir, path) {
-                log::warn!("[scope] no se pudo evacuar {}: {e}", path.display());
+                log::warn!("[scope] could not evict {}: {e}", path.display());
                 continue;
             }
         }
@@ -884,7 +884,7 @@ pub fn evict(
         bytes += it.size;
     }
     if n > 0 {
-        log::info!("[scope] {n} archivo(s) evacuados, {bytes} bytes liberados");
+        log::info!("[scope] {n} file(s) evicted, {bytes} bytes freed");
     }
     Ok((n, bytes))
 }
