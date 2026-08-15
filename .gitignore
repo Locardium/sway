@@ -30,14 +30,32 @@ app/src-tauri/gen/schemas/
 local.properties
 
 # === Media de muestra (musica con copyright — NO commitear) ===
-spike-android-audio/public/*.flac
-spike-android-audio/public/*.mp3
-spike-android-audio/public/*.wav
+#
+# En TODO el repo y no solo en el spike: este proyecto mueve archivos de
+# musica, y cualquier carpeta de prueba en la raiz termina llena de ellos. Ya
+# paso una vez — una prueba del server dejo 120 MB de mp3 listos para entrar en
+# un repo publico.
+*.flac
+*.mp3
+*.wav
+*.m4a
+*.aac
+*.ogg
+*.aiff
 
 # === Bases de datos locales / datos de usuario ===
 *.sqlite
 *.sqlite3
 *.db
+# SQLite en WAL deja estos dos al lado de la base. No los tapaba `*.sqlite`.
+*.sqlite-wal
+*.sqlite-shm
+
+# === Server corriendo local ===
+# El TOML tiene el token de vinculacion adentro: es una contrasena.
+sway-server.toml
+sway-server
+sway-server.exe
 
 # === Salidas generadas del PoC (contienen la libreria del usuario) ===
 tools/itunes-xml-poc/*.xml

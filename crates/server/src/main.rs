@@ -25,13 +25,53 @@ use sway_server::serve;
 
 const DEFAULT_CONFIG: &str = "sway-server.toml";
 
-fn main() -> Result<()> {
+fn main() {
+    let code = match run() {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("Error: {e:#}");
+            1
+        }
+    };
+    // Lo último que pasa, salga bien o mal: si esta ventana la abrió un doble
+    // click, cerrarse acá se lleva el mensaje puesto — que en la primera
+    // corrida es justamente dónde quedó el token.
+    hold_window_open();
+    std::process::exit(code);
+}
+
+/// Deja la ventana abierta hasta que alguien apriete Enter, **sólo** si la
+/// consola es de este proceso.
+///
+/// La distinción importa: en una terminal o bajo systemd nadie va a apretar
+/// nada, y un server que arranca esperando una tecla no arranca nunca. Windows
+/// lo dice contando cuántos procesos comparten la consola — si es uno solo,
+/// la creó este programa al abrirse, o sea que fue un doble click.
+#[cfg(windows)]
+fn hold_window_open() {
+    use windows_sys::Win32::System::Console::GetConsoleProcessList;
+    let mut pids = [0u32; 2];
+    let attached = unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) };
+    if attached != 1 {
+        return;
+    }
+    println!("\nEnter para cerrar.");
+    let mut _line = String::new();
+    let _ = std::io::stdin().read_line(&mut _line);
+}
+
+#[cfg(not(windows))]
+fn hold_window_open() {}
+
+fn run() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let path = config_path();
     let Some(cfg) = Config::load_or_create(&path)? else {
         println!("Se creó {} con un token nuevo.", path.display());
-        println!("Revisá el archivo y volvé a arrancar el server.");
+        println!();
+        println!("Abrilo, copiá el `pair_token`, y volvé a arrancar el server.");
+        println!("Ahí queda escuchando y ya lo podés agregar desde la app.");
         return Ok(());
     };
 

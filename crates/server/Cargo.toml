@@ -26,3 +26,9 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 # Token de vinculacion: v4 es aleatorio, que es lo unico que se le pide.
 uuid = { version = "1", features = ["v4"] }
+
+# Para saber si la consola la abrio un doble click (y entonces hay que dejarla
+# abierta para que se pueda leer) o si es una terminal o un servicio (donde
+# esperar una tecla seria colgarse). Ver `hold_window_open` en main.rs.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
