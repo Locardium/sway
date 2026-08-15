@@ -125,13 +125,24 @@ pub fn peer_came_online(handle: &AppHandle, uid: &str) {
         let Some(platform) = found else { return };
         platform
     };
+    let remote = platform == sway_core::pairing::PLATFORM_SERVER;
+    {
+        let conditions = crate::power::current(&state);
+        let guard = state.db.lock();
+        let Ok(conn) = guard else { return };
+        let limits = crate::power::Limits::load(&conn);
+        if let Some(h) = crate::power::hold(&conditions, &limits, remote) {
+            log::info!("[autosync] {uid} apareció pero se espera: {}", h.reason());
+            return;
+        }
+    }
     log::info!("[autosync] {uid} está disponible: poniéndose al día");
 
     // Un server que aparece espera a la red local, por lo mismo que en el
     // bucle de abajo: al arrancar la app suelen aparecer los dos a la vez, y
     // bajar por la LAN lo que después el server ya no va a tener que mandar
     // es la diferencia entre un segundo y varios minutos de internet.
-    if platform == sway_core::pairing::PLATFORM_SERVER {
+    if remote {
         let handle = handle.clone();
         let uid = uid.to_string();
         std::thread::spawn(move || {
@@ -224,6 +235,16 @@ pub fn spawn(handle: AppHandle) {
                 log::info!("[autosync] cambios locales -> {} dispositivo(s)", peers.len());
             }
 
+            // Red y batería. Un sync automático puede esperar; uno pedido a
+            // mano no pasa por acá, y es la salida cuando el sistema operativo
+            // se equivoca sobre la red.
+            let (conditions, limits) = {
+                let now = crate::power::current(&state);
+                let guard = state.db.lock();
+                let Ok(conn) = guard else { continue };
+                (now, crate::power::Limits::load(&conn))
+            };
+
             // La red local primero, el server después.
             //
             // No es "uno u otro": el server necesita los bytes igual, es el
@@ -237,6 +258,21 @@ pub fn spawn(handle: AppHandle) {
                 .partition(|(_, platform)| platform == sway_core::pairing::PLATFORM_SERVER);
             let servers: Vec<String> = servers.into_iter().map(|(uid, _)| uid).collect();
             let lan: Vec<String> = lan.into_iter().map(|(uid, _)| uid).collect();
+
+            let lan = match crate::power::hold(&conditions, &limits, false) {
+                Some(h) => {
+                    log::info!("[autosync] la red local espera: {}", h.reason());
+                    Vec::new()
+                }
+                None => lan,
+            };
+            let servers = match crate::power::hold(&conditions, &limits, true) {
+                Some(h) => {
+                    log::info!("[autosync] el server espera: {}", h.reason());
+                    Vec::new()
+                }
+                None => servers,
+            };
 
             for uid in lan.iter().cloned() {
                 crate::pairing::sync_files_auto(handle.clone(), uid);

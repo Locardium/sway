@@ -3,6 +3,7 @@ mod cover;
 mod discovery;
 mod export_xml;
 mod pairing;
+mod power;
 mod xml_sync;
 
 // El motor vive en `crates/core` desde la Fase 6.0 — la app y el server
@@ -182,6 +183,9 @@ pub struct AppState {
     expected_paths: Mutex<HashMap<PathBuf, i64>>,
     /// Estado del sync automático (cambios pendientes de propagar).
     autosync: autosync::AutoSync,
+    /// Red y batería (Fase 6.7). En desktop se leen acá; en Android las
+    /// reporta la pantalla, que es la única que puede.
+    conditions: Mutex<power::Conditions>,
 }
 
 /// Cuánto tiempo se ignoran los eventos de un archivo que dejó el sync.
@@ -711,6 +715,56 @@ fn sync_files(app: AppHandle, uid: String) {
 #[tauri::command]
 fn confirm_pairing(app: AppHandle, uid: String, accept: bool) -> bool {
     pairing::resolve_decision(&app, &uid, accept)
+}
+
+// ---------------------------------------------------------------------------
+// Red medida y batería (Fase 6.7)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncConditions {
+    /// Lo que se puede medir ahora mismo. Cada campo puede ser `null`: no
+    /// saberlo es una respuesta distinta de saber que no.
+    now: power::Conditions,
+    limits: power::Limits,
+}
+
+/// Estado de red y batería, más los límites configurados. La pantalla los usa
+/// para no ofrecer una opción que en este dispositivo no significa nada — una
+/// PC de escritorio no tiene batería, y preguntar por ella sería ruido.
+#[tauri::command]
+fn sync_conditions(state: State<AppState>) -> Result<SyncConditions, String> {
+    let now = power::current(&state);
+    let conn = state.db.lock().map_err(|_| "db lock".to_string())?;
+    Ok(SyncConditions { now, limits: power::Limits::load(&conn) })
+}
+
+#[tauri::command]
+fn set_sync_limits(state: State<AppState>, on_metered: bool, min_battery: u8) -> Result<(), String> {
+    let limits = power::Limits { on_metered, min_battery: min_battery.min(100) };
+    let conn = state.db.lock().map_err(|_| "db lock".to_string())?;
+    limits.save(&conn).map_err(|e| e.to_string())
+}
+
+/// Lo que la pantalla puede medir y Rust no.
+///
+/// En Android el estado de la red y la batería sólo se leen desde Java, y el
+/// contexto de JNI no está inicializado del lado de Rust (ver
+/// `device_info.rs`). El webview, en cambio, tiene `navigator.getBattery()` y
+/// `navigator.connection`, así que lo reporta desde ahí.
+#[tauri::command]
+fn report_conditions(
+    state: State<AppState>,
+    metered: Option<bool>,
+    battery_pct: Option<u8>,
+    charging: Option<bool>,
+) {
+    let mut c = match state.conditions.lock() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    *c = power::Conditions { metered, battery_pct, charging };
 }
 
 /// Vincula con un server de archivo por dirección (Fase 6.3).
@@ -1327,6 +1381,7 @@ pub fn run() {
                 pairing: pairing::Pairing::default(),
                 expected_paths: Mutex::new(HashMap::new()),
                 autosync: autosync::AutoSync::default(),
+                conditions: Mutex::new(power::Conditions::default()),
             });
 
             // Los dispositivos con dirección fija (el server de archivo) van
@@ -1414,6 +1469,9 @@ pub fn run() {
             preview_sync,
             sync_files,
             confirm_pairing,
+            sync_conditions,
+            set_sync_limits,
+            report_conditions,
             pair_with_server,
             unpair_device,
             get_scope,

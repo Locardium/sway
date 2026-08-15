@@ -15,6 +15,10 @@ import {
   pairWithServer,
   PLATFORM_SERVER,
   previewSync,
+  setSyncLimits,
+  syncConditions,
+  type Conditions,
+  type SyncLimits,
   refreshPeers,
   setAutoSyncP2p,
   setDeviceName,
@@ -306,6 +310,12 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
   const [scanning, setScanning] = useState(false);
   const [freeing, setFreeing] = useState(false);
 
+  // Red y batería. `null` en un campo = no se sabe, que es distinto de saber
+  // que no: una PC de escritorio no tiene batería, y ahí la opción no se
+  // muestra en vez de mostrarse sin sentido.
+  const [conditions, setConditions] = useState<Conditions | null>(null);
+  const [limits, setLimits] = useState<SyncLimits | null>(null);
+
   // Server de archivo: no se descubre, se escribe. Se acuerda del host entre
   // intentos (equivocarse en el token es lo más probable) pero nunca del
   // token.
@@ -358,6 +368,12 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
       })
       .catch(() => {});
     getAutoSyncP2p().then(setAutoSync).catch(() => {});
+    syncConditions()
+      .then(({ now, limits }) => {
+        setConditions(now);
+        setLimits(limits);
+      })
+      .catch(() => {});
     reloadPeers();
     reloadLocal(true);
 
@@ -883,6 +899,63 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
             straight out: the file sits in each device's trash for 30 days first.
           </p>
         </section>
+
+        {limits && conditions && (conditions.metered !== null || conditions.batteryPct !== null) && (
+          <section>
+            <h4>When to sync automatically</h4>
+            {/* Sólo se muestra lo que este dispositivo puede medir. Una PC de
+                escritorio no tiene batería: preguntar por ella sería ruido. */}
+            {conditions.metered !== null && (
+              <div className="set-row">
+                <div className="set-label">
+                  <span>Sync over metered connections</span>
+                  <small>
+                    This network is {conditions.metered ? 'metered' : 'not metered'}. Only syncing
+                    with the archive server uses your data plan — devices on the same network never
+                    do.
+                  </small>
+                </div>
+                <Switch
+                  checked={limits.onMetered}
+                  onChange={(on) => {
+                    setLimits({ ...limits, onMetered: on });
+                    setSyncLimits(on, limits.minBattery).catch((e) => onStatus(String(e)));
+                  }}
+                />
+              </div>
+            )}
+            {conditions.batteryPct !== null && (
+              <div className="set-row">
+                <div className="set-label">
+                  <span>Pause below {limits.minBattery}%</span>
+                  <small>
+                    Battery is at {conditions.batteryPct}%
+                    {conditions.charging ? ' and charging — limits do not apply' : ''}. Set to 0 to
+                    never pause.
+                  </small>
+                </div>
+                <input
+                  className="set-slider"
+                  type="range"
+                  min={0}
+                  max={50}
+                  step={5}
+                  value={limits.minBattery}
+                  onChange={(e) => setLimits({ ...limits, minBattery: Number(e.target.value) })}
+                  onPointerUp={() =>
+                    setSyncLimits(limits.onMetered, limits.minBattery).catch((e) =>
+                      onStatus(String(e)),
+                    )
+                  }
+                />
+              </div>
+            )}
+            <p className="set-note">
+              These only hold back automatic syncing. Hitting Sync on a device always runs — it is
+              the way out when the system is wrong about the network.
+            </p>
+          </section>
+        )}
 
         <section>
           <h4>Archive server</h4>

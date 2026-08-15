@@ -30,6 +30,7 @@ import {
   setVolume as setVolumeBackend,
   revealTrack,
   syncXmlAfterChange,
+  watchConditions,
 } from './api';
 import { beginDrag, didDrag, DragPayload, RawTarget } from './dnd';
 import { isAndroid } from './platform';
@@ -212,6 +213,11 @@ export default function App() {
       delete w.__swayAppVisible;
     };
   }, []);
+
+  // Red y batería: en Android sólo las puede leer el webview, y el sync
+  // automático las necesita para no gastar datos ni la última barra sin que
+  // nadie se lo haya pedido. En desktop no hace nada.
+  useEffect(() => watchConditions(), []);
 
   // Progreso de importacion (copia a la carpeta gestionada).
   useEffect(() => {

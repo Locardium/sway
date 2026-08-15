@@ -175,6 +175,111 @@ export const pairWithServer = (host: string, port: number, token: string) =>
 /// mostrarlo como algo que debería aparecer en la red.
 export const PLATFORM_SERVER = 'server';
 
+// --- Red medida y batería (Fase 6.7) ---------------------------------------
+
+/// Cada campo puede ser `null`, y eso significa "no se sabe" — que es distinto
+/// de saber que no. Una PC de escritorio devuelve `batteryPct: null` porque no
+/// tiene batería, y con eso la pantalla sabe que no tiene que ofrecer la
+/// opción.
+export interface Conditions {
+  metered: boolean | null;
+  batteryPct: number | null;
+  charging: boolean | null;
+}
+
+export interface SyncLimits {
+  /// Sincronizar con el server aunque la red se pague por dato.
+  onMetered: boolean;
+  /// Debajo de este porcentaje no se sincroniza solo. 0 = sin límite.
+  minBattery: number;
+}
+
+export const syncConditions = () =>
+  invoke<{ now: Conditions; limits: SyncLimits }>('sync_conditions');
+export const setSyncLimits = (onMetered: boolean, minBattery: number) =>
+  invoke<void>('set_sync_limits', { onMetered, minBattery });
+
+/// Lo que la pantalla puede medir y Rust no.
+///
+/// En Android el estado de la red y la batería sólo se leen desde Java, y el
+/// contexto de JNI no está inicializado del lado de Rust. El webview sí tiene
+/// `navigator.getBattery()` y `navigator.connection`, así que se reportan
+/// desde acá. En desktop no hace falta: Rust los lee directo.
+export const reportConditions = (c: Conditions) =>
+  invoke<void>('report_conditions', {
+    metered: c.metered,
+    batteryPct: c.batteryPct,
+    charging: c.charging,
+  });
+
+interface NetworkInformationLike {
+  type?: string;
+  effectiveType?: string;
+  saveData?: boolean;
+  addEventListener?: (type: string, cb: () => void) => void;
+}
+
+interface BatteryLike {
+  level: number;
+  charging: boolean;
+  addEventListener?: (type: string, cb: () => void) => void;
+}
+
+/// Mide lo que el webview puede medir. Todo lo que no se puede saber vuelve en
+/// `null`, nunca inventado: frenar un sync por un dato adivinado sería peor
+/// que no frenarlo.
+async function measure(): Promise<Conditions> {
+  const nav = navigator as Navigator & {
+    connection?: NetworkInformationLike;
+    getBattery?: () => Promise<BatteryLike>;
+  };
+
+  let metered: boolean | null = null;
+  const conn = nav.connection;
+  if (conn) {
+    // `type` es lo único que responde de verdad la pregunta. `saveData` es el
+    // usuario pidiendo ahorrar datos, que a los efectos de esto es lo mismo.
+    if (conn.type === 'cellular') metered = true;
+    else if (conn.type === 'wifi' || conn.type === 'ethernet') metered = false;
+    if (conn.saveData) metered = true;
+  }
+
+  let batteryPct: number | null = null;
+  let charging: boolean | null = null;
+  if (nav.getBattery) {
+    try {
+      const b = await nav.getBattery();
+      batteryPct = Math.round(b.level * 100);
+      charging = b.charging;
+    } catch {
+      // Sin batería o sin permiso: queda en null, que es la respuesta honesta.
+    }
+  }
+  return { metered, batteryPct, charging };
+}
+
+/// Arranca el reporte periódico. Sólo en Android: en desktop Rust lee mejor de
+/// lo que puede leer el webview, y pisarle sus datos con `null` sería perder
+/// información.
+export function watchConditions(): () => void {
+  if (!android) return () => {};
+  let stopped = false;
+  const push = () => {
+    if (stopped) return;
+    measure()
+      .then((c) => reportConditions(c))
+      .catch(() => {});
+  };
+  push();
+  // La red cambia sola (wifi que se cae, datos que entran) y la batería baja
+  // despacio: un minuto alcanza para las dos y no despierta al teléfono.
+  const timer = setInterval(push, 60_000);
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
+}
+
 /// Payload del evento `pairing-request`: hay que mostrar `code` y esperar que
 /// el usuario confirme. El mismo código aparece en las dos pantallas.
 export interface PairingRequest {
