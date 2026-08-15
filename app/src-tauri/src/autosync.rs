@@ -32,6 +32,12 @@ use tauri::{AppHandle, Manager};
 const QUIET_PERIOD_MS: i64 = 500;
 /// Red de contención.
 const PERIODIC: Duration = Duration::from_secs(10 * 60);
+/// Cuánto se le da a la red local antes de sincronizar con el server igual.
+///
+/// Es un techo, no una espera: en cuanto la LAN termina, sigue. Existe para
+/// que una transferencia grande —o un peer que se durmió a la mitad— no deje
+/// al server sin sincronizar por el resto del día.
+const LAN_FIRST_MAX_WAIT: Duration = Duration::from_secs(15 * 60);
 /// Sumado al respiro, es el techo de lo que tarda en arrancar un sync.
 const TICK: Duration = Duration::from_millis(250);
 /// Cada cuánto se reintenta cuando hay un cambio para propagar pero no hay
@@ -104,21 +110,52 @@ pub fn note_change(handle: &AppHandle) {
 /// que acordarse.
 pub fn peer_came_online(handle: &AppHandle, uid: &str) {
     let state = handle.state::<AppState>();
-    {
+    let platform: String = {
         let guard = state.db.lock();
         let Ok(conn) = guard else { return };
         if !enabled(&conn) {
             return;
         }
-        let paired = conn
-            .query_row("SELECT 1 FROM devices WHERE uid = ?1", [uid], |_| Ok(()))
-            .is_ok();
-        if !paired {
-            return;
-        }
-    }
+        let found = conn
+            .query_row("SELECT platform FROM devices WHERE uid = ?1", [uid], |r| {
+                r.get(0)
+            })
+            .ok();
+        // No vinculado: no hay nada que sincronizar con él.
+        let Some(platform) = found else { return };
+        platform
+    };
     log::info!("[autosync] {uid} está disponible: poniéndose al día");
+
+    // Un server que aparece espera a la red local, por lo mismo que en el
+    // bucle de abajo: al arrancar la app suelen aparecer los dos a la vez, y
+    // bajar por la LAN lo que después el server ya no va a tener que mandar
+    // es la diferencia entre un segundo y varios minutos de internet.
+    if platform == sway_core::pairing::PLATFORM_SERVER {
+        let handle = handle.clone();
+        let uid = uid.to_string();
+        std::thread::spawn(move || {
+            let lan = lan_peers(&handle);
+            crate::pairing::wait_until_idle(&handle, &lan, LAN_FIRST_MAX_WAIT);
+            crate::pairing::sync_files_auto(handle.clone(), uid);
+        });
+        return;
+    }
     crate::pairing::sync_files_auto(handle.clone(), uid.to_string());
+}
+
+/// Los dispositivos vinculados y disponibles que no son un server.
+fn lan_peers(handle: &AppHandle) -> Vec<String> {
+    let state = handle.state::<AppState>();
+    let guard = state.db.lock();
+    let Ok(conn) = guard else { return Vec::new() };
+    state
+        .peers
+        .merged_list(&conn)
+        .into_iter()
+        .filter(|p| p.paired && p.online && p.platform != sway_core::pairing::PLATFORM_SERVER)
+        .map(|p| p.uid)
+        .collect()
 }
 
 pub fn spawn(handle: AppHandle) {
@@ -140,7 +177,7 @@ pub fn spawn(handle: AppHandle) {
                 since_periodic = std::time::Instant::now();
             }
 
-            let peers: Vec<String> = {
+            let peers: Vec<(String, String)> = {
                 let guard = state.db.lock();
                 let Ok(conn) = guard else {
                     log::warn!("[autosync] no se pudo tomar el lock de la DB");
@@ -155,7 +192,7 @@ pub fn spawn(handle: AppHandle) {
                     .merged_list(&conn)
                     .into_iter()
                     .filter(|p| p.paired && p.online)
-                    .map(|p| p.uid)
+                    .map(|p| (p.uid, p.platform))
                     .collect()
             };
             if peers.is_empty() {
@@ -186,8 +223,32 @@ pub fn spawn(handle: AppHandle) {
                 state.autosync.clear();
                 log::info!("[autosync] cambios locales -> {} dispositivo(s)", peers.len());
             }
-            for uid in peers {
+
+            // La red local primero, el server después.
+            //
+            // No es "uno u otro": el server necesita los bytes igual, es el
+            // archivo. Es en qué orden. La LAN mueve un track en un segundo y
+            // sin gastar internet; cuando después le toca al server, el
+            // inventario ya cuenta lo que acaba de llegar y le pide sólo lo
+            // que de verdad falta. Al revés, lo mismo se bajaba dos veces y la
+            // primera por el camino lento.
+            let (servers, lan): (Vec<_>, Vec<_>) = peers
+                .into_iter()
+                .partition(|(_, platform)| platform == sway_core::pairing::PLATFORM_SERVER);
+            let servers: Vec<String> = servers.into_iter().map(|(uid, _)| uid).collect();
+            let lan: Vec<String> = lan.into_iter().map(|(uid, _)| uid).collect();
+
+            for uid in lan.iter().cloned() {
                 crate::pairing::sync_files_auto(handle.clone(), uid);
+            }
+            if !servers.is_empty() {
+                let handle = handle.clone();
+                std::thread::spawn(move || {
+                    crate::pairing::wait_until_idle(&handle, &lan, LAN_FIRST_MAX_WAIT);
+                    for uid in servers {
+                        crate::pairing::sync_files_auto(handle.clone(), uid);
+                    }
+                });
             }
         }
     });

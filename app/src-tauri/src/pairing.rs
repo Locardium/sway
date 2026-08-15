@@ -734,6 +734,38 @@ pub fn sync_files_auto(handle: AppHandle, uid: String) {
     run_sync(handle, uid, true)
 }
 
+/// Espera a que terminen los syncs con esos dispositivos.
+///
+/// Es lo que deja poner al server siempre después de la red local: la LAN
+/// mueve los archivos rápido y sin internet, y cuando después le toca al
+/// server, el inventario ya cuenta lo que acaba de llegar — así que le pide
+/// sólo lo que de verdad falta y nada viaja dos veces.
+///
+/// El respiro del principio no es de más: `sync_files_auto` toma su marca
+/// recién adentro del hilo que lanza, así que preguntar en el acto encuentra
+/// todo quieto y la espera no espera nada.
+pub fn wait_until_idle(handle: &AppHandle, uids: &[String], max: Duration) {
+    const GRACE: Duration = Duration::from_millis(800);
+    const POLL: Duration = Duration::from_millis(250);
+    std::thread::sleep(GRACE);
+    let until = std::time::Instant::now() + max;
+    while std::time::Instant::now() < until {
+        let busy = {
+            let state = handle.state::<AppState>();
+            let active = state.pairing.active.lock();
+            match active {
+                Ok(a) => uids.iter().any(|u| a.contains(u)),
+                Err(_) => false,
+            }
+        };
+        if !busy {
+            return;
+        }
+        std::thread::sleep(POLL);
+    }
+    log::warn!("[autosync] la red local sigue ocupada: se sincroniza con el server igual");
+}
+
 fn run_sync(handle: AppHandle, uid: String, auto: bool) {
     std::thread::spawn(move || {
         let Some(_guard) = SyncGuard::acquire(&handle, &uid) else {
