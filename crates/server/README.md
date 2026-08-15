@@ -39,14 +39,35 @@ listen = "0.0.0.0:7420"
 name = "Sway Server"
 data_dir = "data"
 music_dir = "music"
+retention_days = 90
 pair_token = "..."
 ```
 
 - `music_dir` es lo que crece: apuntalo al disco grande, no al del sistema.
+  **En Windows la barra invertida es un escape en TOML**: se pone `'D:\Musica'`
+  con comillas simples, o `"D:/Musica"` con barras normales.
+- `retention_days` es cuántos días sobrevive en la papelera del server un
+  archivo borrado. Un borrado viaja: lo borrás en un dispositivo y desaparece
+  de todos, server incluido. Esto es lo único que hace que se pueda rescatar
+  después. En `0` se destruye en el acto — espejo exacto de tus dispositivos,
+  sin red debajo.
 - `pair_token` es lo que hay que poner en la app para vincular un dispositivo.
   Reemplaza al código de seis dígitos, porque acá no hay pantalla donde
   compararlo. **Tratalo como una contraseña.** Cambiarlo no desvincula lo que ya
-  está vinculado: las claves ya están guardadas.
+  está vinculado: las claves ya están guardadas. También se puede pasar por
+  la variable de entorno `SWAY_SERVER_TOKEN`, que pisa la del archivo: en un
+  despliegue conviene que el secreto no viva en un archivo que puede terminar
+  en un repo.
+
+## Qué guarda
+
+Todo. El server no elige: cada dispositivo le manda lo que tiene y se lleva lo
+que le falta. La misma canción mandada por tres dispositivos ocupa **una sola
+vez** — los archivos se identifican por su contenido, no por su nombre.
+
+Por eso su configuración de sync no se puede editar desde la app: un archivo
+con agujeros no es un archivo, y un server en "solo envía" no te devuelve nada
+el día que lo necesitás.
 
 ## Seguridad
 

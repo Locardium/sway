@@ -94,6 +94,22 @@ fn run() -> Result<()> {
         Ok((db::this_device_uid(conn)?, public))
     })?;
 
+    // El server quiere todo, en las dos direcciones, y lo declara en la fila
+    // que se replica. No alcanza con que sea el default: los dispositivos leen
+    // esa fila para decidir qué le mandan, y una fila explícita es también lo
+    // que la app muestra (en gris) cuando abrís el server en la lista.
+    hostage.with_db(|conn| {
+        let me = db::this_device_uid(conn)?;
+        sway_core::scope::set_mode(conn, &me, sway_core::scope::Mode::All)?;
+        sway_core::scope::set_direction(conn, &me, "both")?;
+        Ok(())
+    })?;
+
+    // La papelera: lo que la retención ya dejó vencer se borra de verdad.
+    // Corre al arrancar y una vez por día — un server queda prendido meses, y
+    // si sólo se limpiara al arrancar no se limpiaría nunca.
+    spawn_trash_purge(cfg.music_dir.clone(), cfg.retention_days);
+
     let listener = TcpListener::bind(&cfg.listen)
         .with_context(|| format!("no se pudo escuchar en {}", cfg.listen))?;
 
@@ -108,6 +124,16 @@ fn run() -> Result<()> {
         }),
         listener,
     )
+}
+
+fn spawn_trash_purge(music_dir: PathBuf, retention_days: u64) {
+    std::thread::spawn(move || loop {
+        let n = sway_core::trash::purge_old(&music_dir, retention_days);
+        if n > 0 {
+            log::info!("[server] papelera: {n} archivo(s) pasaron los {retention_days} días");
+        }
+        std::thread::sleep(std::time::Duration::from_secs(24 * 3600));
+    });
 }
 
 fn config_path() -> PathBuf {

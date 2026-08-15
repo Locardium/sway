@@ -566,6 +566,7 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
   if (openUid && openPeer) {
     const handlers = scopeHandlers(openUid, peerScope);
     const busy = busyPeer === openUid;
+    const isServer = openPeer.platform === PLATFORM_SERVER;
     return (
       <Modal title={openPeer.name} onClose={onClose} wide>
         <div className="settings">
@@ -576,9 +577,21 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
           <section>
             <div className="set-row">
               <div className="set-label">
-                <span>{openPeer.online ? 'On this network' : 'Not on this network'}</span>
+                {/* Un server no está ni deja de estar "en esta red": vive
+                    afuera y se lo llama por su dirección. */}
+                <span>
+                  {isServer
+                    ? openPeer.online
+                      ? 'Reachable'
+                      : 'Unreachable'
+                    : openPeer.online
+                      ? 'On this network'
+                      : 'Not on this network'}
+                </span>
                 <small>
-                  {openPeer.platform} · {openPeer.paired ? 'Paired' : 'Not paired'}
+                  {isServer
+                    ? `Archive server · ${openPeer.addrs[0] ?? '?'}:${openPeer.port}`
+                    : `${openPeer.platform} · ${openPeer.paired ? 'Paired' : 'Not paired'}`}
                 </small>
               </div>
               <div className="set-control">
@@ -619,13 +632,57 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
 
           <section>
             <h4>What {openPeer.name} does</h4>
-            <ScopeEditor nodes={nodes} scope={peerScope} {...handlers} />
-            <p className="set-note">
-              These belong to {openPeer.name} and can be edited from any device. Unchecking stops
-              syncing those files — it never deletes anything; {openPeer.name} keeps what it already
-              has until someone frees the space <em>on that device</em>. A track that is also in a
-              playlist you left checked stays in.
-            </p>
+            {/* Un server no elige: existe para tener todo y para poder
+                devolvértelo. Dejarlo configurable sería dejarte romper el
+                respaldo en silencio — con media biblioteca seleccionada el
+                archivo queda con agujeros, y en "solo envía" el día que
+                quieras recuperar no te devuelve nada. */}
+            {isServer ? (
+              <>
+                <div className="set-row">
+                  <div className="set-label">
+                    <span>Keeps everything, both ways</span>
+                    <small>Not editable — an archive with gaps is not an archive</small>
+                  </div>
+                </div>
+                <p className="set-note">
+                  Every device sends {openPeer.name} what it has, and takes back whatever it is
+                  missing. Same song from three devices takes up space once: files are identified by
+                  their contents.
+                </p>
+                <div className="set-row">
+                  <div className="set-label">
+                    <span>Restore everything here</span>
+                    <small>
+                      Brings back every track, playlist and folder this device is missing. Nothing
+                      here is overwritten or removed — it only fills gaps.
+                    </small>
+                  </div>
+                  <button
+                    disabled={busy || !openPeer.online}
+                    onClick={() => {
+                      setBusyPeer(openUid);
+                      syncFiles(openUid).catch((e) => {
+                        setBusyPeer(null);
+                        onStatus(String(e));
+                      });
+                    }}
+                  >
+                    {busy ? 'Restoring…' : 'Restore'}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <ScopeEditor nodes={nodes} scope={peerScope} {...handlers} />
+                <p className="set-note">
+                  These belong to {openPeer.name} and can be edited from any device. Unchecking
+                  stops syncing those files — it never deletes anything; {openPeer.name} keeps what
+                  it already has until someone frees the space <em>on that device</em>. A track that
+                  is also in a playlist you left checked stays in.
+                </p>
+              </>
+            )}
           </section>
 
           <section>
