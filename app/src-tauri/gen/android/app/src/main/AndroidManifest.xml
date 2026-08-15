@@ -17,9 +17,14 @@
         android:label="@string/app_name"
         android:theme="@style/Theme.sway"
         android:usesCleartextTraffic="${usesCleartextTraffic}">
+        <!-- windowSoftInputMode: sin esto el teclado se dibuja ENCIMA del
+             webview y escribis a ciegas, con el campo tapado. `adjustResize`
+             achica la ventana para que el campo entre en lo que queda visible;
+             traerlo al centro lo hace Modal.tsx al enfocarlo. -->
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
             android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize"
             android:label="@string/main_activity_title"
             android:name=".MainActivity"
             android:exported="true">

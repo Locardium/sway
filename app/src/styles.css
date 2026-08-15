@@ -663,7 +663,13 @@ table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
 /* ---------- Settings ---------- */
 .settings {
   display: flex; flex-direction: column; gap: 18px;
-  max-height: 74vh; overflow-y: auto; margin: 2px -4px 0; padding: 0 4px;
+  /* Dos veces a proposito: `dvh` sigue al alto REAL de la ventana, asi que
+     cuando sale el teclado del telefono el panel se achica y el campo
+     enfocado queda dentro de lo que se ve. `vh` no se entera del teclado —
+     queda de fallback para motores que no soportan `dvh`. */
+  max-height: 74vh;
+  max-height: 74dvh;
+  overflow-y: auto; margin: 2px -4px 0; padding: 0 4px;
 }
 .settings section { display: flex; flex-direction: column; gap: 2px; }
 .settings h4 {
