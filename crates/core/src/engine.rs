@@ -106,14 +106,40 @@ pub fn is_disconnect(e: &anyhow::Error) -> bool {
 // Lado que atiende
 // ---------------------------------------------------------------------------
 
+/// Lo que pasó mientras se atendía a alguien.
+///
+/// El que atiende no decide nada —responde pedidos— así que sin esto su log es
+/// una tira de lineas sueltas sin totales, y no hay forma de leer de un
+/// vistazo si una corrida movió algo. Del lado del server, que no tiene
+/// pantalla, es el único resumen que existe.
+#[derive(Debug, Default)]
+pub struct ServeStats {
+    /// Archivos que nos empujaron.
+    pub received: usize,
+    /// Archivos que nos pidieron y mandamos.
+    pub sent: usize,
+    pub applied: crate::merge::Applied,
+}
+
+impl ServeStats {
+    pub fn moved_something(&self) -> bool {
+        self.received > 0 || self.sent > 0 || self.applied.total() > 0
+    }
+}
+
 /// Después de presentarse, la sesión queda abierta atendiendo pedidos hasta
 /// que el otro corta.
-pub fn serve_requests<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> Result<()> {
+pub fn serve_requests<H: Host>(
+    host: &H,
+    sess: &mut Session,
+    peer_uid: &str,
+) -> Result<ServeStats> {
+    let mut stats = ServeStats::default();
     loop {
         let msg = match sess.recv() {
             Ok(m) => m,
             // Cortó: fin normal de la sesión, no un error.
-            Err(e) if is_disconnect(&e) => return Ok(()),
+            Err(e) if is_disconnect(&e) => return Ok(stats),
             Err(e) => return Err(e),
         };
         match msg {
@@ -127,7 +153,10 @@ pub fn serve_requests<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> 
             Msg::BlobReq { hash, offset } => {
                 let path = host.with_db(|conn| Ok(crate::transfer::path_for_hash(conn, &hash)))?;
                 match path {
-                    Some(p) => crate::transfer::send_file(sess, &p, offset, &hash)?,
+                    Some(p) => {
+                        crate::transfer::send_file(sess, &p, offset, &hash)?;
+                        stats.sent += 1;
+                    }
                     None => sess.send(&Msg::BlobError {
                         reason: format!("no tengo el archivo {hash}"),
                     })?,
@@ -185,6 +214,7 @@ pub fn serve_requests<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> 
                     Ok(())
                 })?;
                 log::info!("[sync] recibido {filename} ({} bytes)", got.bytes);
+                stats.received += 1;
                 // Sin forzar: en una tanda de archivos, una recarga completa
                 // de la biblioteca por archivo deja la UI inservible.
                 host.library_changed(false);
@@ -215,9 +245,14 @@ pub fn serve_requests<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> 
                 if applied.scope > 0 {
                     restore(host);
                 }
+                stats.applied.tracks += applied.tracks;
+                stats.applied.playlists += applied.playlists;
+                stats.applied.memberships += applied.memberships;
+                stats.applied.deleted += applied.deleted;
+                stats.applied.scope += applied.scope;
                 sess.send(&Msg::MetaAck { applied })?;
             }
-            Msg::Bye => return Ok(()),
+            Msg::Bye => return Ok(stats),
             other => return Err(anyhow!("pedido inesperado: {other:?}")),
         }
     }

@@ -104,7 +104,23 @@ fn serve(server: &Server, stream: TcpStream) -> Result<()> {
                 .host
                 .with_db(|conn| Ok(pair::touch_device(conn, &uid, &name)))?;
             log::info!("[server] {name} conectado ({tracks} tracks, {playlists} playlists)");
-            engine::serve_requests(&*server.host, &mut sess, &uid)
+            let stats = engine::serve_requests(&*server.host, &mut sess, &uid)?;
+            // El que atiende no decide nada: responde pedidos. Sin este
+            // resumen su log es una tira de líneas sueltas y no hay forma de
+            // leer de un vistazo si la corrida movió algo — y acá no hay
+            // ninguna pantalla donde mirarlo de otra manera.
+            if stats.moved_something() {
+                log::info!(
+                    "[server] {name}: {} recibidos, {} enviados, {} de organización, {} borrados",
+                    stats.received,
+                    stats.sent,
+                    stats.applied.tracks + stats.applied.playlists + stats.applied.memberships,
+                    stats.applied.deleted,
+                );
+            } else {
+                log::info!("[server] {name}: ya estaba al día");
+            }
+            Ok(())
         }
 
         // Lo sacaron de la lista del otro lado. Sólo vale si su clave es la que

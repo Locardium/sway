@@ -331,7 +331,10 @@ fn serve(handle: &AppHandle, stream: TcpStream) -> Result<()> {
                 clock_ms: db::now_ms(),
             })?;
             report_hello(handle, &uid, &name, tracks, playlists, clock_ms);
-            engine::serve_requests(&crate::AppHost(handle), &mut sess, &uid)
+            // Los totales le sirven a quien no tiene pantalla (el server, ver
+            // `crates/server/src/serve.rs`); acá lo que pasó ya se vio salir
+            // por los eventos de progreso.
+            engine::serve_requests(&crate::AppHost(handle), &mut sess, &uid).map(|_| ())
         }
         // El otro lado nos sacó de sus dispositivos. Solo se acepta si su
         // clave es la que teníamos guardada — o sea, si el handshake probó
