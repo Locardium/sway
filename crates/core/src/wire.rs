@@ -310,6 +310,11 @@ fn tune(stream: &TcpStream) {
 fn read_frame(mut stream: &TcpStream) -> Result<Vec<u8>> {
     let mut len = [0u8; 4];
     stream.read_exact(&mut len)?;
+    if let Some(what) = looks_like_http(&len) {
+        return Err(anyhow!(
+            "that port is a web server, not a Sway server (it answered {what})"
+        ));
+    }
     let len = u32::from_be_bytes(len) as usize;
     if len > 65535 {
         return Err(anyhow!("invalid frame ({len} bytes)"));
@@ -319,10 +324,65 @@ fn read_frame(mut stream: &TcpStream) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// Los cuatro primeros bytes, leidos como texto, cuando son el principio de
+/// algo de HTTP.
+///
+/// Apuntarle al puerto equivocado es EL error de este protocolo, y pasa por
+/// los dos lados: la app contra un proxy web (que contesta `HTTP/1.1 400`), o
+/// un navegador contra el server (que manda `GET `). Los dos casos terminaban
+/// en "invalid frame (1213486160 bytes)", que es el largo del mensaje leido de
+/// cuatro letras ASCII — un numero que no le dice nada a nadie y menos que
+/// menos que el puerto es de un servidor web.
+fn looks_like_http(head: &[u8; 4]) -> Option<&'static str> {
+    match head {
+        b"HTTP" => Some("HTTP"),
+        b"GET " => Some("GET"),
+        b"POST" => Some("POST"),
+        b"HEAD" => Some("HEAD"),
+        b"PUT " => Some("PUT"),
+        b"OPTI" => Some("OPTIONS"),
+        b"DELE" => Some("DELETE"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _;
     use std::net::{TcpListener, TcpStream};
+
+    /// Apuntarle al puerto de un proxy web es EL error de este protocolo. El
+    /// mensaje tiene que decir eso y no un numero de cuatro bytes leidos como
+    /// largo.
+    #[test]
+    fn contra_un_servidor_web_el_error_lo_dice() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let web = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // Como un proxy de verdad: primero lee lo que le mandan —nuestro
+            // handshake, que para él es basura— y recién ahí contesta. Cerrar
+            // antes de leer daría un error de socket y no el que se prueba.
+            let mut scratch = [0u8; 512];
+            let _ = stream.read(&mut scratch);
+            let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n");
+            // Que el cliente alcance a leer la respuesta antes del cierre.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        });
+
+        let stream = TcpStream::connect(addr).unwrap();
+        let (private, _) = generate_keypair().unwrap();
+        // `unwrap_err` pediria que `Session` sea Debug sólo para imprimirlo.
+        let msg = match Session::connect(stream, &private) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("no puede haber sesión contra un servidor web"),
+        };
+        web.join().unwrap();
+
+        assert!(msg.contains("web server"), "mensaje inutil: {msg}");
+        assert!(msg.contains("HTTP"), "mensaje inutil: {msg}");
+    }
 
     /// Levanta las dos puntas de una sesion sobre loopback.
     fn pair() -> (Session, Session) {
