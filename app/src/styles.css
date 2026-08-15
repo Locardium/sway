@@ -694,6 +694,11 @@ table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
 .set-select:disabled { opacity: 0.5; }
 .set-slider { width: 140px; }
 .set-note { color: var(--muted); font-size: 12px; margin: 6px 0 0; line-height: 1.5; }
+/* Una nota que hay que leer: algo configurado acá no hace lo que parece. */
+.set-note.warn {
+  color: var(--text); border-left: 2px solid var(--accent);
+  padding: 6px 0 6px 10px; background: oklch(23% 0 0 / 0.35); border-radius: 0 5px 5px 0;
+}
 .set-input {
   background: var(--panel-2); color: var(--text);
   border: 1px solid var(--line); border-radius: 6px;

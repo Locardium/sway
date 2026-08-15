@@ -657,15 +657,27 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
               <>
                 <div className="set-row">
                   <div className="set-label">
-                    <span>Keeps everything, both ways</span>
+                    <span>Takes everything, gives everything back</span>
                     <small>Not editable — an archive with gaps is not an archive</small>
                   </div>
                 </div>
                 <p className="set-note">
-                  Every device sends {openPeer.name} what it has, and takes back whatever it is
-                  missing. Same song from three devices takes up space once: files are identified by
-                  their contents.
+                  {openPeer.name} accepts whatever a device sends it and hands back whatever that
+                  device is missing. Picking only some playlists on a device changes nothing here —
+                  it still backs up everything it has. Same song from three devices takes up space
+                  once: files are identified by their contents.
                 </p>
+                {/* Lo que el server acepte no alcanza: si este dispositivo no
+                    manda, no manda tampoco acá. Decirlo en el panel del server
+                    es el único lugar donde alguien lo va a leer a tiempo. */}
+                {(myScope.direction === 'receive' || myScope.direction === 'off') && (
+                  <p className="set-note warn">
+                    This device is set to{' '}
+                    <strong>{myScope.direction === 'off' ? 'paused' : 'only receive'}</strong>, so it
+                    sends nothing — not even to {openPeer.name}. Nothing you import here is backed
+                    up until you change that above, under this device.
+                  </p>
+                )}
                 <div className="set-row">
                   <div className="set-label">
                     <span>Restore everything here</span>

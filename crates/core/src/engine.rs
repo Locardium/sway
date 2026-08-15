@@ -195,11 +195,17 @@ pub fn serve_requests<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> 
                 let applied =
                     host.with_db(|conn| Ok(crate::merge::apply(conn, &changes, &music_dir)?))?;
                 if applied.total() > 0 {
+                    // Las cinco cifras, no tres. `total()` cuenta también el
+                    // scope y los borrados, así que cambiar una dirección o
+                    // marcar una playlist entraba acá e imprimía tres ceros:
+                    // el log decía "no pasó nada" justo cuando había pasado.
                     log::info!(
-                        "[sync] aplicados {} tracks, {} playlists, {} membresías",
+                        "[sync] aplicados {} tracks, {} playlists, {} membresías, {} borrados, {} de scope",
                         applied.tracks,
                         applied.playlists,
-                        applied.memberships
+                        applied.memberships,
+                        applied.deleted,
+                        applied.scope
                     );
                     host.library_changed(true);
                 }
@@ -474,15 +480,17 @@ pub fn sync<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> Result<Syn
     // corrida tras corrida, no está convergiendo, y el total solo no dice
     // qué se está re-aplicando.
     log::info!(
-        "[sync] acá: {} meta, {} playlists, {} membresías, {} borrados | allá: {} meta, {} playlists, {} membresías, {} borrados",
+        "[sync] acá: {} meta, {} playlists, {} membresías, {} borrados, {} de scope | allá: {} meta, {} playlists, {} membresías, {} borrados, {} de scope",
         applied_here.tracks,
         applied_here.playlists,
         applied_here.memberships,
         applied_here.deleted,
+        applied_here.scope,
         applied_there.tracks,
         applied_there.playlists,
         applied_there.memberships,
-        applied_there.deleted
+        applied_there.deleted,
+        applied_there.scope
     );
     if applied_here.total() > 0 {
         log::debug!(
