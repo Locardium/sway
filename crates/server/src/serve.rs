@@ -83,12 +83,16 @@ fn serve(server: &Server, stream: TcpStream) -> Result<()> {
             match known {
                 Known::Trusted => {}
                 Known::KeyMismatch => {
-                    let _ = sess.send(&Msg::Reject {
-                        reason: "different key from the one already stored for this device".into(),
-                    });
+                    // Se registra ANTES de contestar: si la conexión se corta
+                    // al mandar el rechazo, el intento tiene que quedar
+                    // anotado igual. Un evento de seguridad no depende de que
+                    // el otro lado llegue a escuchar.
                     server
                         .host
                         .with_db(|conn| Ok(pair::log_key_mismatch(conn, &uid, &name)))?;
+                    let _ = sess.send(&Msg::Reject {
+                        reason: "different key from the one already stored for this device".into(),
+                    });
                     return Err(anyhow!("different key for {uid}"));
                 }
                 Known::Unknown => {
@@ -156,12 +160,13 @@ fn pair_device(
         .host
         .with_db(|conn| Ok(pair::known_state(conn, uid, &sess.peer_pubkey)))?;
     if let Known::KeyMismatch = known {
-        let _ = sess.send(&Msg::Reject {
-            reason: "different key from the one already stored for this device".into(),
-        });
+        // Igual que arriba: primero queda anotado, después se contesta.
         server
             .host
             .with_db(|conn| Ok(pair::log_key_mismatch(conn, uid, name)))?;
+        let _ = sess.send(&Msg::Reject {
+            reason: "different key from the one already stored for this device".into(),
+        });
         return Err(anyhow!("different key for {uid}"));
     }
 

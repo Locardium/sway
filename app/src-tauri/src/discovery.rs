@@ -175,6 +175,17 @@ impl Peers {
         self.set_online(uid, false)
     }
 
+    /// Saca de la lista a un dispositivo puesto a mano.
+    ///
+    /// A un peer de la LAN no hace falta: mDNS lo vuelve a anunciar en
+    /// segundos. A uno con dirección fija no lo anuncia nadie, así que si no
+    /// se saca acá queda para siempre en pantalla — desvinculado, pero con un
+    /// botón de "Pair" que no puede funcionar: un server necesita su token, y
+    /// ese botón manda el flujo de la red local, que no lo lleva.
+    pub fn forget(&self, uid: &str) -> bool {
+        self.by_uid.lock().unwrap().remove(uid).is_some()
+    }
+
     /// Un dispositivo con dirección fija, que nadie va a descubrir (Fase 6.3).
     ///
     /// Entra a la misma lista que los que anuncia mDNS, y esa es toda la

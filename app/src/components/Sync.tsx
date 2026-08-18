@@ -884,6 +884,14 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
                         <button onClick={() => setOpenUid(p.uid)}>
                           Settings <ChevronRight size={13} />
                         </button>
+                      ) : p.platform === PLATFORM_SERVER ? (
+                        // Un server no se vincula con el código de seis
+                        // dígitos: hay que darle su token. Ofrecer el botón de
+                        // siempre mandaría el flujo de la red local, que no lo
+                        // lleva, y el server contestaría que el token no es.
+                        <button disabled title="Add it again below, with its token">
+                          Needs token
+                        </button>
                       ) : (
                         <button
                           disabled={!p.online || incompatible || busyPeer === p.uid}

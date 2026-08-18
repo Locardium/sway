@@ -1012,7 +1012,25 @@ fn forget_device(handle: &AppHandle, uid: &str) -> Result<()> {
 /// próxima vez que intente conectarse y reciba `NotPaired`.
 pub fn unpair(handle: &AppHandle, uid: &str) -> Result<()> {
     let addr = peer_addr(handle, uid).ok();
+    // Si tenía dirección fija (un server), también sale de la lista en
+    // pantalla. A un peer de la LAN lo vuelve a anunciar mDNS en segundos; a
+    // este no lo anuncia nadie, así que quedaba ahí para siempre con un botón
+    // de "Pair" que no puede funcionar — ese botón manda el flujo de la red
+    // local, sin token, y un server sin token contesta que no.
+    let manual = {
+        let state = handle.state::<AppState>();
+        let db = state.db.lock();
+        match db {
+            Ok(conn) => core_pair::devices_with_address(&conn)
+                .iter()
+                .any(|(u, _, _, _)| u == uid),
+            Err(_) => false,
+        }
+    };
     forget_device(handle, uid)?;
+    if manual {
+        handle.state::<AppState>().peers.forget(uid);
+    }
     if let Some(addr) = addr {
         let handle = handle.clone();
         let uid = uid.to_string();
