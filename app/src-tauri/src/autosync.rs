@@ -37,7 +37,7 @@ const PERIODIC: Duration = Duration::from_secs(10 * 60);
 /// Es un techo, no una espera: en cuanto la LAN termina, sigue. Existe para
 /// que una transferencia grande —o un peer que se durmió a la mitad— no deje
 /// al server sin sincronizar por el resto del día.
-const LAN_FIRST_MAX_WAIT: Duration = Duration::from_secs(15 * 60);
+pub(crate) const LAN_FIRST_MAX_WAIT: Duration = Duration::from_secs(15 * 60);
 /// Sumado al respiro, es el techo de lo que tarda en arrancar un sync.
 const TICK: Duration = Duration::from_millis(250);
 /// Cada cuánto se reintenta cuando hay un cambio para propagar pero no hay
@@ -58,11 +58,23 @@ pub struct AutoSync {
     pending_since: AtomicI64,
 }
 
+/// Marca en la base de que hay algo local sin propagar.
+///
+/// Lo pendiente vivía sólo en memoria, y eso alcanzaba mientras cada arranque
+/// empezara comparando las dos bibliotecas enteras. Desde que eso no pasa (ver
+/// `watch.rs`), un cambio hecho sin señal y con la app cerrada después no
+/// tenía quién lo empujara: el otro lado no sabe que existe, así que no avisa
+/// nada, y del lado de acá no quedaba rastro de que faltaba mandarlo.
+const PENDING: &str = "autosync_pending";
+
 impl AutoSync {
-    /// Lo llama cualquier cosa que modifique la biblioteca.
-    pub fn note_change(&self) {
-        self.pending_since
-            .store(crate::db::now_ms(), Ordering::Relaxed);
+    /// Lo llama cualquier cosa que modifique la biblioteca. Devuelve `true` si
+    /// no había nada pendiente hasta recién — o sea, si hay que anotarlo.
+    pub fn note_change(&self) -> bool {
+        let before = self
+            .pending_since
+            .swap(crate::db::now_ms(), Ordering::Relaxed);
+        before == 0
     }
 
     #[cfg(test)]
@@ -78,8 +90,10 @@ impl AutoSync {
         since != 0 && crate::db::now_ms() - since >= QUIET_PERIOD_MS
     }
 
-    fn clear(&self) {
-        self.pending_since.store(0, Ordering::Relaxed);
+    /// Devuelve `true` si de verdad había algo, para no escribir en la base
+    /// en cada vuelta del bucle.
+    fn clear(&self) -> bool {
+        self.pending_since.swap(0, Ordering::Relaxed) != 0
     }
 }
 
@@ -98,7 +112,34 @@ pub fn set_enabled(conn: &rusqlite::Connection, on: bool) -> rusqlite::Result<()
 /// Aviso de que algo cambió en esta biblioteca.
 pub fn note_change(handle: &AppHandle) {
     log::info!("[autosync] local change noted");
-    handle.state::<AppState>().autosync.note_change();
+    let state = handle.state::<AppState>();
+    // Sólo en el primero de una tanda: importar una carpeta son cientos de
+    // avisos seguidos y no hace falta escribir la misma marca cientos de veces.
+    if state.autosync.note_change() {
+        if let Ok(conn) = state.db.lock() {
+            let _ = crate::db::set_setting(&conn, PENDING, "1");
+        }
+    }
+}
+
+/// Lo pendiente que quedó de la corrida anterior.
+///
+/// Se llama al arrancar: un cambio que no llegó a salir tiene que salir ahora,
+/// y nadie más se va a acordar de él.
+fn restore_pending(handle: &AppHandle) {
+    let state = handle.state::<AppState>();
+    let pending = {
+        let Ok(conn) = state.db.lock() else { return };
+        crate::db::get_setting(&conn, PENDING)
+            .ok()
+            .flatten()
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    };
+    if pending {
+        log::info!("[autosync] there were local changes left from the previous run");
+        state.autosync.note_change();
+    }
 }
 
 /// Un dispositivo volvió a estar disponible: ponerse al día.
@@ -126,6 +167,14 @@ pub fn peer_came_online(handle: &AppHandle, uid: &str) {
         platform
     };
     let remote = platform == sway_core::pairing::PLATFORM_SERVER;
+    // Un server con watcher se pone al día solo, y mejor: pregunta con la
+    // revisión que conocía y sincroniza sólo si de verdad se perdió algo.
+    // Lanzar además el sync de acá sería una corrida completa contra el
+    // archivo cada vez que el server vuelve a aparecer.
+    if remote && state.watchers.is_watched(uid) {
+        log::debug!("[autosync] {uid} is being watched: leaving the catch-up to the watcher");
+        return;
+    }
     {
         let conditions = crate::power::current(&state);
         let guard = state.db.lock();
@@ -156,7 +205,7 @@ pub fn peer_came_online(handle: &AppHandle, uid: &str) {
 }
 
 /// Los dispositivos vinculados y disponibles que no son un server.
-fn lan_peers(handle: &AppHandle) -> Vec<String> {
+pub(crate) fn lan_peers(handle: &AppHandle) -> Vec<String> {
     let state = handle.state::<AppState>();
     let guard = state.db.lock();
     let Ok(conn) = guard else { return Vec::new() };
@@ -171,6 +220,7 @@ fn lan_peers(handle: &AppHandle) -> Vec<String> {
 
 pub fn spawn(handle: AppHandle) {
     std::thread::spawn(move || {
+        restore_pending(&handle);
         let mut since_periodic = std::time::Instant::now();
         // Antes de este momento no se vuelve a intentar propagar. Sólo se
         // mueve cuando un intento no encontró a nadie.
@@ -230,8 +280,10 @@ pub fn spawn(handle: AppHandle) {
                 continue;
             }
             next_try = std::time::Instant::now();
-            if due_change {
-                state.autosync.clear();
+            if due_change && state.autosync.clear() {
+                if let Ok(conn) = state.db.lock() {
+                    let _ = crate::db::set_setting(&conn, PENDING, "0");
+                }
                 log::info!("[autosync] local changes -> {} device(s)", peers.len());
             }
 
@@ -256,8 +308,26 @@ pub fn spawn(handle: AppHandle) {
             let (servers, lan): (Vec<_>, Vec<_>) = peers
                 .into_iter()
                 .partition(|(_, platform)| platform == sway_core::pairing::PLATFORM_SERVER);
-            let servers: Vec<String> = servers.into_iter().map(|(uid, _)| uid).collect();
+            let mut servers: Vec<String> = servers.into_iter().map(|(uid, _)| uid).collect();
             let lan: Vec<String> = lan.into_iter().map(|(uid, _)| uid).collect();
+
+            // La red de contención no cubre a quien ya tiene a alguien
+            // mirándolo. Con la conexión de espera abierta (ver `watch.rs`) el
+            // server avisa de cualquier cosa en el momento, así que esta
+            // pasada sólo puede terminar en "no había nada que hacer" — y
+            // averiguarlo cuesta el inventario entero: con 5000 temas son 4 MB
+            // cada diez minutos, 576 MB por día, por dispositivo y por
+            // internet. Se saltea sólo la pasada periódica: un cambio local
+            // hay que empujarlo igual, lo esté mirando alguien o no.
+            if !due_change {
+                servers.retain(|uid| {
+                    let watched = state.watchers.is_live(uid);
+                    if watched {
+                        log::debug!("[autosync] {uid} is already being watched: skipping the periodic pass");
+                    }
+                    !watched
+                });
+            }
 
             let lan = match crate::power::hold(&conditions, &limits, false) {
                 Some(h) => {
@@ -299,7 +369,8 @@ mod tests {
         let a = AutoSync::default();
         assert!(!a.is_settled(), "sin cambios no hay nada que hacer");
 
-        a.note_change();
+        assert!(a.note_change(), "el primero hay que anotarlo");
+        assert!(!a.note_change(), "el segundo ya está anotado");
         assert!(!a.is_settled(), "recién cambió: hay que esperar");
 
         // Simula que pasó el respiro.
@@ -330,7 +401,8 @@ mod tests {
         assert!(a.is_settled());
         assert!(a.is_settled(), "mirarlo dos veces no lo borra");
         assert_ne!(a.pending(), 0);
-        a.clear();
+        assert!(a.clear(), "había algo que limpiar");
+        assert!(!a.clear(), "y limpiar de nuevo no vuelve a escribir");
         assert!(!a.is_settled());
     }
 }

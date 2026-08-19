@@ -3996,6 +3996,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "blake3",
+ "flate2",
  "lofty",
  "log",
  "rusqlite",

@@ -16,7 +16,7 @@
 //! Lo que NO entra acá: pairing, descubrimiento, y todo lo que necesita que
 //! haya una persona mirando una pantalla. Eso sigue en `pairing.rs`.
 
-use crate::wire::{Msg, Session};
+use crate::wire::{Mark, Msg, Session};
 use anyhow::{anyhow, Result};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
@@ -68,7 +68,77 @@ pub trait Host {
     /// La biblioteca cambió. `force` distingue el fin de una corrida (que
     /// siempre avisa) del goteo de archivo por archivo (que se limita).
     fn library_changed(&self, _force: bool) {}
+
+    /// `peer_uid` acaba de mover esta biblioteca.
+    ///
+    /// Va aparte de `library_changed` porque contesta otra pregunta: aquélla
+    /// dice "hay que redibujar", ésta dice "hay que avisarle a los demás", y
+    /// para lo segundo hace falta saber a quién NO avisarle. Sin el autor, el
+    /// dispositivo que empuja un cambio se despierta a sí mismo y sale a
+    /// sincronizar algo que él mismo acaba de mandar.
+    fn note_change_by(&self, _peer_uid: &str) {}
+
+    /// Hasta dónde va esta biblioteca: la corrida actual y cuántas veces se
+    /// movió desde que arrancó.
+    ///
+    /// La cuenta no es persistente ni tiene que serlo — sólo sirve para
+    /// comparar contra sí misma dentro de una espera (ver `Msg::Watch`)—, y por
+    /// eso viaja con la corrida al lado: un reinicio la vuelve a cero, y sin
+    /// saber que fue otra corrida ese cero es indistinguible de "no pasó nada".
+    ///
+    /// `None` = este dispositivo no sabe avisar de novedades. Es el default
+    /// porque sólo el server de archivo tiene sentido que espere: entre dos
+    /// dispositivos con pantalla, el que cambia algo llama al otro y se lo
+    /// empuja, así que nadie necesita que le avisen.
+    fn revision(&self) -> Option<Mark> {
+        None
+    }
+
+    /// Espera hasta `max` a que aparezca un cambio posterior a `since` que no
+    /// haya hecho `ignoring`.
+    ///
+    /// La referencia la pone quien llama y no se vuelve a tomar acá a
+    /// propósito: la espera se corta cada tanto para mandar un latido, y si
+    /// cada vuelta tomara la revisión de nuevo, un cambio caído justo entre
+    /// dos vueltas quedaría del lado viejo de la comparación y no despertaría
+    /// a nadie.
+    fn wait_revision(&self, _since: Mark, _ignoring: &str, _max: std::time::Duration) -> Seen {
+        Seen {
+            news: false,
+            mark: Mark { epoch: 0, rev: 0 },
+        }
+    }
 }
+
+/// Lo que vio una espera: si hay novedades, y en qué revisión estaba la
+/// biblioteca al mirar.
+///
+/// Las dos cosas salen de la **misma** mirada a propósito. Leer la revisión
+/// aparte, después, deja una ventana en la que un cambio entra sin que nadie
+/// lo cuente: el latido diría "estás al día en la revisión N" cuando N ya
+/// incluye algo que no se contó, y quien espera avanzaría su `since` por
+/// encima de una novedad que nunca le llegó.
+pub struct Seen {
+    pub news: bool,
+    pub mark: Mark,
+}
+
+/// Cada cuánto se manda un latido mientras no pasa nada (`Msg::Watch`).
+///
+/// Una conexión abierta y callada no sobrevive sola, y quien la corta primero
+/// no es el proxy —el Stream de Nginx aguanta 10 minutos— sino el NAT de la
+/// operadora: en datos móviles una conexión TCP ociosa se cae entre los 30 y
+/// los 60 segundos. Se midió: con dos minutos, la del celular vivía 17 y 47
+/// segundos por vez.
+///
+/// Cuarenta y cinco segundos entran abajo de ese plazo y encima acortan a la
+/// mitad lo que tarda el que atiende en darse cuenta de que del otro lado ya
+/// no hay nadie — sólo se entera cuando le falla el latido, y hasta entonces
+/// tiene un hilo parado hablándole a un muerto.
+///
+/// Sigue siendo barato: un frame de unas decenas de bytes, contra el sondeo
+/// TCP cada 10 segundos que esto reemplaza.
+pub const WATCH_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(45);
 
 // ---------------------------------------------------------------------------
 // Resultado
@@ -143,11 +213,9 @@ pub fn serve_requests<H: Host>(
             Err(e) => return Err(e),
         };
         match msg {
-            Msg::ManifestReq => {
+            Msg::ManifestReq { gzip } => {
                 let manifest = host.with_db(|conn| Ok(crate::manifest::build(conn)?))?;
-                sess.send(&Msg::ManifestData {
-                    manifest: Box::new(manifest),
-                })?;
+                send_manifest(sess, manifest, gzip)?;
             }
             // Alguien pide un archivo nuestro.
             Msg::BlobReq { hash, offset } => {
@@ -215,6 +283,7 @@ pub fn serve_requests<H: Host>(
                 })?;
                 log::info!("[sync] received {filename} ({} bytes)", got.bytes);
                 stats.received += 1;
+                host.note_change_by(peer_uid);
                 // Sin forzar: en una tanda de archivos, una recarga completa
                 // de la biblioteca por archivo deja la UI inservible.
                 host.library_changed(false);
@@ -238,6 +307,7 @@ pub fn serve_requests<H: Host>(
                         applied.scope
                     );
                     host.library_changed(true);
+                    host.note_change_by(peer_uid);
                 }
                 // El scope de este dispositivo lo pudo haber cambiado el otro:
                 // si volvió a marcar una playlist, lo liberado se recupera de
@@ -251,6 +321,48 @@ pub fn serve_requests<H: Host>(
                 stats.applied.deleted += applied.deleted;
                 stats.applied.scope += applied.scope;
                 sess.send(&Msg::MetaAck { applied })?;
+            }
+            // "Avisame cuando cambie algo." De acá no se sale hasta que la
+            // biblioteca se mueva o se corte la conexión: el que llama dejó
+            // esta sesión abierta justo para eso y no va a mandar nada más.
+            Msg::Watch { since } => {
+                let Some(current) = host.revision() else {
+                    // Que se entere y deje de intentar, en vez de reconectar
+                    // contra un dispositivo que nunca le va a contestar.
+                    sess.send(&Msg::Reject {
+                        reason: "this device does not report changes".into(),
+                    })?;
+                    return Ok(stats);
+                };
+                // Sin marca, se espera desde ahora. Con una de otra corrida —o
+                // de una revisión que todavía no existe— no hay forma de saber
+                // qué pasó en el medio, así que se contesta que sí y que venga
+                // a comparar. Es la respuesta segura: un sync de más no rompe
+                // nada, uno de menos deja una biblioteca incompleta.
+                let since = match since {
+                    None => current,
+                    Some(s) if s.epoch != current.epoch => {
+                        sess.send(&Msg::Changed { mark: current })?;
+                        log::info!("[sync] {peer_uid} knows another run: telling it to sync");
+                        return Ok(stats);
+                    }
+                    Some(s) if s.rev > current.rev => {
+                        sess.send(&Msg::Changed { mark: current })?;
+                        log::info!("[sync] {peer_uid} knows a newer revision: telling it to sync");
+                        return Ok(stats);
+                    }
+                    Some(s) => s,
+                };
+                log::info!("[sync] {peer_uid} is waiting for changes");
+                loop {
+                    let seen = host.wait_revision(since, peer_uid, WATCH_HEARTBEAT);
+                    if seen.news {
+                        sess.send(&Msg::Changed { mark: seen.mark })?;
+                        log::info!("[sync] told {peer_uid} that there are changes");
+                        return Ok(stats);
+                    }
+                    sess.send(&Msg::Ping { mark: seen.mark })?;
+                }
             }
             Msg::Bye => return Ok(stats),
             other => return Err(anyhow!("unexpected request: {other:?}")),
@@ -273,9 +385,10 @@ pub fn fetch_plan<H: Host>(
     host: &H,
     sess: &mut Session,
 ) -> Result<(crate::manifest::Plan, crate::manifest::Manifest, (bool, bool))> {
-    sess.send(&Msg::ManifestReq)?;
+    sess.send(&Msg::ManifestReq { gzip: true })?;
     let remote = match sess.recv()? {
         Msg::ManifestData { manifest } => *manifest,
+        Msg::ManifestGz { data } => serde_json::from_slice(&crate::manifest::expand(&data)?)?,
         other => return Err(anyhow!("expected the manifest, got {other:?}")),
     };
     let local = host.with_db(|conn| {
@@ -297,6 +410,32 @@ pub fn fetch_plan<H: Host>(
         &remote.device_sync,
     );
     Ok((crate::manifest::plan(&local, &remote), remote, dir))
+}
+
+/// Manda el inventario, comprimido si el otro lado sabe leerlo.
+///
+/// Es lo único grande que viaja en una comparación, y viaja **entero** aunque
+/// no haya cambiado nada: con 5000 temas son 4 MB de JSON, que comprimidos
+/// quedan en unos cientos de kilobytes. Del lado del celular, eso sale del
+/// plan de datos.
+fn send_manifest(
+    sess: &mut Session,
+    manifest: crate::manifest::Manifest,
+    gzip: bool,
+) -> Result<()> {
+    if !gzip {
+        return sess.send(&Msg::ManifestData {
+            manifest: Box::new(manifest),
+        });
+    }
+    let json = serde_json::to_vec(&manifest)?;
+    let data = crate::manifest::squeeze(&json)?;
+    log::debug!(
+        "[sync] manifest: {} KB -> {} KB",
+        json.len() / 1024,
+        data.len() / 1024
+    );
+    sess.send(&Msg::ManifestGz { data })
 }
 
 /// Recorta el plan a lo que la dirección de los dos dispositivos permite. El

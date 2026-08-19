@@ -117,6 +117,48 @@ pub fn set_device_address(conn: &Connection, uid: &str, address: &str) -> Result
     Ok(())
 }
 
+/// Hasta dónde sabemos de la biblioteca de ese dispositivo.
+///
+/// Guardarla es lo que evita comparar las dos bibliotecas enteras cada vez que
+/// arranca la app: con la marca en la mano se pregunta "¿pasó algo desde
+/// acá?", y si no pasó nada no viaja nada. En un celular, donde el sistema
+/// mata la app cuando se le antoja, eso es la diferencia entre unas cuantas
+/// comparaciones completas por día y ninguna.
+pub fn watch_mark(conn: &Connection, uid: &str) -> Option<crate::wire::Mark> {
+    conn.query_row(
+        "SELECT watch_epoch, watch_rev FROM devices WHERE uid = ?1",
+        [uid],
+        |r| {
+            Ok(match (r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?) {
+                (Some(epoch), Some(rev)) => Some(crate::wire::Mark {
+                    epoch: epoch as u64,
+                    rev: rev as u64,
+                }),
+                _ => None,
+            })
+        },
+    )
+    .ok()
+    .flatten()
+}
+
+/// Guarda (o borra, con `None`) la marca.
+pub fn set_watch_mark(
+    conn: &Connection,
+    uid: &str,
+    mark: Option<crate::wire::Mark>,
+) -> Result<()> {
+    let (epoch, rev) = match mark {
+        Some(m) => (Some(m.epoch as i64), Some(m.rev as i64)),
+        None => (None, None),
+    };
+    conn.execute(
+        "UPDATE devices SET watch_epoch = ?1, watch_rev = ?2 WHERE uid = ?3",
+        rusqlite::params![epoch, rev, uid],
+    )?;
+    Ok(())
+}
+
 /// Los que tienen dirección fija: `(uid, name, platform, address)`.
 pub fn devices_with_address(conn: &Connection) -> Vec<(String, String, String, String)> {
     let mut stmt = match conn.prepare(
@@ -297,6 +339,35 @@ mod tests {
         assert_eq!(listed.len(), 1, "el peer de la LAN no tiene que tener dirección");
         assert_eq!(listed[0].0, "srv-1");
         assert_eq!(listed[0].3, "casa.ejemplo:7420");
+    }
+
+    /// La marca sobrevive al cierre de la app: es lo que evita comparar las
+    /// dos bibliotecas enteras en cada arranque.
+    #[test]
+    fn la_marca_se_guarda_y_se_recupera() {
+        let conn = db();
+        store_device(&conn, "srv-1", "Server", PLATFORM_SERVER, b"k").unwrap();
+        assert!(watch_mark(&conn, "srv-1").is_none(), "todavía no sabemos nada");
+
+        let m = crate::wire::Mark { epoch: 7, rev: 42 };
+        set_watch_mark(&conn, "srv-1", Some(m)).unwrap();
+        assert_eq!(watch_mark(&conn, "srv-1"), Some(m));
+
+        set_watch_mark(&conn, "srv-1", None).unwrap();
+        assert!(watch_mark(&conn, "srv-1").is_none(), "se tiene que poder borrar");
+    }
+
+    /// Y se va con el dispositivo: dejarla ahí haría que volver a vincular el
+    /// mismo server arranque creyendo que sabe algo de una biblioteca que ya
+    /// no tiene nada que ver.
+    #[test]
+    fn desvincular_se_lleva_la_marca() {
+        let conn = db();
+        store_device(&conn, "srv-1", "Server", PLATFORM_SERVER, b"k").unwrap();
+        set_watch_mark(&conn, "srv-1", Some(crate::wire::Mark { epoch: 1, rev: 2 })).unwrap();
+        forget_device(&conn, "srv-1").unwrap();
+        store_device(&conn, "srv-1", "Server", PLATFORM_SERVER, b"k").unwrap();
+        assert!(watch_mark(&conn, "srv-1").is_none());
     }
 
     #[test]

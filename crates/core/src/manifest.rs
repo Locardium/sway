@@ -8,9 +8,47 @@
 //! `plan()` es una función pura sobre dos manifests. Todas las decisiones
 //! difíciles viven ahí y se testean sin red, sin DB y sin dispositivos.
 
+use anyhow::Result;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::io::{Read, Write};
+
+// ---------------------------------------------------------------------------
+// Compresión del inventario
+// ---------------------------------------------------------------------------
+
+/// Tope de lo que se acepta descomprimir.
+///
+/// Un `Vec` comprimido chiquito puede expandirse a gigabytes si lo armó
+/// alguien con ganas de que el otro lado se quede sin memoria. El límite es el
+/// mismo que ya tenía el canal para un mensaje entero (ver `wire.rs`): un
+/// inventario más grande que esto es un problema aunque venga sin comprimir.
+const MAX_INFLATED: u64 = 64 * 1024 * 1024;
+
+/// Comprime el inventario.
+///
+/// El inventario es JSON y es de lo más comprimible que hay: las mismas claves
+/// repetidas en cada fila, uuids y hashes en hexadecimal. Y no es un detalle
+/// de eficiencia — es lo que viaja **entero** en cada comparación, haya
+/// cambiado algo o no, y del celular sale por el plan de datos.
+pub fn squeeze(json: &[u8]) -> Result<Vec<u8>> {
+    // Compresión rápida y no máxima: la diferencia entre los dos extremos son
+    // unos pocos puntos porcentuales sobre algo que ya baja diez veces, y el
+    // lado que sirve puede ser una Raspberry.
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    enc.write_all(json)?;
+    Ok(enc.finish()?)
+}
+
+/// Lo devuelve a JSON.
+pub fn expand(gz: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(gz)
+        .take(MAX_INFLATED)
+        .read_to_end(&mut out)?;
+    Ok(out)
+}
 
 // ---------------------------------------------------------------------------
 // Inventario
@@ -520,6 +558,115 @@ pub fn build(conn: &Connection) -> rusqlite::Result<Manifest> {
         scopes: crate::scope::entries(conn)?,
         device_sync: crate::scope::all_device_sync(conn)?,
     })
+}
+
+#[cfg(test)]
+mod compresion {
+    use super::*;
+
+    #[test]
+    fn lo_que_se_comprime_vuelve_igual() {
+        let json = br#"{"tracks":[{"uid":"a","title":"Un tema"}],"playlists":[]}"#;
+        let gz = squeeze(json).unwrap();
+        assert_eq!(expand(&gz).unwrap(), json);
+    }
+
+    /// Un inventario vacío también tiene que sobrevivir: es lo que manda un
+    /// dispositivo recién instalado, y es justo el caso donde equivocarse
+    /// borraría la biblioteca del otro lado.
+    #[test]
+    fn un_inventario_vacio_sobrevive() {
+        let json = b"{}";
+        assert_eq!(expand(&squeeze(json).unwrap()).unwrap(), json);
+    }
+
+    /// Basura comprimida no puede colgar ni reventar al que la recibe: tiene
+    /// que dar error y nada más.
+    #[test]
+    fn algo_que_no_es_gzip_da_error_y_no_panic() {
+        assert!(expand(b"esto no es un gzip ni por casualidad").is_err());
+    }
+}
+
+#[cfg(test)]
+mod peso {
+    use super::*;
+
+    /// Cuánto pesa el inventario que viaja en CADA sync, haya cambiado algo o
+    /// no. No es una aserción, es una medición: correr con
+    /// `cargo test -p sway-core -- --ignored --nocapture peso`.
+    ///
+    /// Importa porque el inventario no depende de lo que cambió sino de lo que
+    /// hay: una biblioteca quieta cuesta exactamente lo mismo que una que se
+    /// movió entera. Es lo que hace que la pasada periódica escale con el
+    /// tamaño de la biblioteca en vez de con la cantidad de novedades.
+    #[test]
+    #[ignore]
+    fn cuanto_pesa_el_inventario() {
+        for (tracks, por_tema) in [(100usize, 3usize), (1_000, 3), (5_000, 3)] {
+            let m = sintetico(tracks, por_tema);
+            let json = serde_json::to_vec(&m).unwrap();
+            let gz = crate::manifest::squeeze(&json).unwrap();
+            println!(
+                "{tracks} temas, {} membresías -> {:.2} MB en crudo, {:.2} MB comprimido ({:.1}x)",
+                m.memberships.len(),
+                json.len() as f64 / (1024.0 * 1024.0),
+                gz.len() as f64 / (1024.0 * 1024.0),
+                json.len() as f64 / gz.len() as f64,
+            );
+        }
+    }
+
+    /// Una biblioteca de mentira con medidas realistas: uid de UUID, hash de
+    /// blake3 en hexa, y títulos y nombres de archivo de largo corriente.
+    fn sintetico(tracks: usize, playlists_por_tema: usize) -> Manifest {
+        let uid = |n: usize| format!("{n:08x}-1111-4222-8333-444455556666");
+        let hash = |n: usize| format!("{:064x}", n);
+        Manifest {
+            device_uid: uid(0),
+            tracks: (0..tracks)
+                .map(|i| TrackEntry {
+                    uid: uid(i),
+                    hash: Some(hash(i)),
+                    size: 9_325_265,
+                    filename: format!("Artista {i} - Un Titulo Bastante Largo (Extended Mix).flac"),
+                    title: format!("Un Titulo Bastante Largo {i} (Extended Mix)"),
+                    artist: format!("Artista {i}"),
+                    album: format!("Un Album {i}"),
+                    genre: "Progressive House".into(),
+                    duration_ms: 384_000,
+                    bpm: Some(126),
+                    updated_at: 1_755_000_000_000,
+                    present: true,
+                })
+                .collect(),
+            playlists: (0..40)
+                .map(|i| PlaylistEntry {
+                    uid: uid(900_000 + i),
+                    name: format!("Set de la playlist {i}"),
+                    kind: "playlist".into(),
+                    parent_uid: None,
+                    rank: "aZk".into(),
+                    updated_at: 1_755_000_000_000,
+                })
+                .collect(),
+            // Un tema suele estar en varias playlists, y cada pertenencia es
+            // una fila propia en el inventario.
+            memberships: (0..tracks)
+                .flat_map(|i| {
+                    (0..playlists_por_tema).map(move |p| Membership {
+                        playlist_uid: uid(900_000 + p),
+                        track_uid: uid(i),
+                        rank: "aZkQm".into(),
+                        added_at: 1_755_000_000_000,
+                    })
+                })
+                .collect(),
+            tombstones: Vec::new(),
+            scopes: Vec::new(),
+            device_sync: Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]

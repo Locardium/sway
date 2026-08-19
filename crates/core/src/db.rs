@@ -130,6 +130,13 @@ CREATE TABLE IF NOT EXISTS devices (
     paired_at    INTEGER,
     last_seen    INTEGER,
     last_sync_at INTEGER,            -- corte del manifest incremental
+    -- Hasta donde sabemos de la biblioteca de ESE dispositivo (ver
+    -- `wire::Mark`). Sobrevive al cierre de la app a proposito: sin esto, cada
+    -- vez que Android mata el proceso hay que comparar las dos bibliotecas
+    -- enteras para descubrir que no cambio nada — y en un celular eso pasa
+    -- decenas de veces por dia.
+    watch_epoch  INTEGER,
+    watch_rev    INTEGER,
     -- `host:puerto` de un dispositivo que NO se descubre solo (Fase 6.3): el
     -- server de archivo, que vive fuera de la LAN y por eso no aparece en
     -- mDNS. Los dispositivos de la red local lo dejan NULL — su direccion
@@ -323,6 +330,10 @@ fn migrate(conn: &Connection) -> Result<()> {
         ("sync_scope", "updated_at INTEGER NOT NULL DEFAULT 0"),
         // Fase 6.3: direccion fija de los dispositivos que no se descubren.
         ("devices", "address TEXT"),
+        // Fase 6.9: hasta donde sabemos de la biblioteca del otro, guardado
+        // para no tener que comparar todo en cada arranque de la app.
+        ("devices", "watch_epoch INTEGER"),
+        ("devices", "watch_rev INTEGER"),
     ];
     // Fase 6.4: la politica de borrados por dispositivo se saco. Filtraba por
     // quien te pasaba el tombstone y no por quien habia borrado, asi que con

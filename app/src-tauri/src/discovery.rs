@@ -217,7 +217,7 @@ impl Peers {
     }
 
     /// Devuelve `true` si el estado cambió (o sea, si hay algo que mostrar).
-    fn set_online(&self, uid: &str, online: bool) -> bool {
+    pub(crate) fn set_online(&self, uid: &str, online: bool) -> bool {
         let mut map = self.by_uid.lock().unwrap();
         match map.get_mut(uid) {
             Some(p) if p.online != online => {
@@ -452,6 +452,14 @@ pub fn probe_once(handle: &AppHandle) {
     let mut changed = false;
     let mut came_online = Vec::new();
     for (uid, ip, port) in state.peers.probe_targets() {
+        // Con una conexión de espera abierta (ver `watch.rs`) no hay nada que
+        // sondear: esa conexión ya prueba que el dispositivo está ahí, y mejor
+        // que un connect, porque se corta en el momento en que deja de estarlo.
+        // Sondearlo igual sería abrir un socket cada diez segundos contra un
+        // dispositivo que ya tenemos del otro lado del teléfono.
+        if state.watchers.is_live(&uid) {
+            continue;
+        }
         let reachable = match resolve(&ip, port) {
             Some(addr) => std::net::TcpStream::connect_timeout(&addr, PROBE_TIMEOUT).is_ok(),
             None => false,
@@ -470,6 +478,10 @@ pub fn probe_once(handle: &AppHandle) {
     // El celular puede haber estado sin wifi toda la tarde. (Que esté vinculado
     // lo filtra `peer_came_online`.)
     for uid in came_online {
+        // Y si hay un watcher esperando su turno contra este dispositivo, que
+        // deje de esperar: esta es la única noticia de que el server volvió
+        // que va a llegar, porque el server no puede dar ninguna.
+        state.watchers.wake(&uid);
         crate::autosync::peer_came_online(handle, &uid);
     }
 }

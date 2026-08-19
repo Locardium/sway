@@ -28,6 +28,25 @@ const MAX_MESSAGE: usize = 64 * 1024 * 1024;
 // Mensajes
 // ---------------------------------------------------------------------------
 
+/// Hasta donde sabe un dispositivo de la biblioteca del otro.
+///
+/// `epoch` identifica la corrida del que atiende, y no es decoracion: la
+/// cuenta de revisiones vive en memoria y arranca de cero en cada arranque.
+/// Sin distinguir la corrida, una marca vieja (revision 57) puede coincidir
+/// con una revision 57 de OTRA corrida, y el que pregunta concluye que esta al
+/// dia justo cuando se perdio todo lo que paso en el medio. Con el `epoch`,
+/// una corrida distinta es siempre "no te conozco, veni a comparar".
+///
+/// Importa mas desde que la marca se guarda en disco: antes vivia en memoria y
+/// se descartaba al cerrar la app, asi que el choque era raro; guardada, la
+/// marca sobrevive dias y coincidir pasa a ser cuestion de tiempo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Mark {
+    pub epoch: u64,
+    pub rev: u64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Msg {
@@ -72,10 +91,34 @@ pub enum Msg {
     /// desvincularon del otro lado.
     NotPaired,
     /// Pedido y respuesta del inventario de la biblioteca (Fase 5.3).
-    ManifestReq,
+    /// `gzip` dice si quien pregunta sabe leer el inventario comprimido.
+    ///
+    /// La capacidad viaja en el pedido y no en el saludo porque es asunto de
+    /// estos dos mensajes y de nadie mas: el que pregunta dice que sabe leer,
+    /// el que contesta le da eso. Sin estado de sesion que mantener al dia en
+    /// los cuatro lugares que procesan un `Hello`.
+    ///
+    /// `default` a proposito, y en las dos direcciones. Un peer viejo manda
+    /// `{"type":"manifestReq"}` sin el campo y se lee como `false`, asi que
+    /// recibe el inventario de siempre. Y al reves, un peer viejo que recibe
+    /// el campo de mas lo ignora, porque para el esta variante no tiene campos
+    /// y serde saltea lo que no conoce (hay un test que lo fija). Sin esto,
+    /// actualizar la PC y no el celular rompia el sync entero — bastante peor
+    /// que que sea lento.
+    ManifestReq {
+        #[serde(default)]
+        gzip: bool,
+    },
     ManifestData {
         manifest: Box<crate::manifest::Manifest>,
     },
+    /// El mismo inventario, comprimido (ver `manifest::squeeze`).
+    ///
+    /// Va como variante aparte y no como un campo de `ManifestData` para que
+    /// un peer viejo, que no la conoce, falle al leerla en vez de creer que
+    /// recibio un inventario vacio. Solo se manda a quien dijo en su `Hello`
+    /// que sabe leerla.
+    ManifestGz { data: Vec<u8> },
     // --- Transferencia de archivos (Fase 5.4) -----------------------------
     //
     // Los bytes NO viajan adentro de estos mensajes: van como payloads crudos
@@ -115,6 +158,37 @@ pub enum Msg {
     MetaAck {
         applied: crate::merge::Applied,
     },
+    // --- Aviso de novedades (Fase 6.9) -----------------------------------
+    //
+    // El sync lo maneja siempre el que llama: el que atiende responde pedidos
+    // y no decide nada. Contra el server de archivo eso deja un agujero — un
+    // cambio hecho en el celular llega al server enseguida, pero la PC no
+    // tiene forma de enterarse, porque nadie le habla. Estos tres mensajes
+    // son la forma de que se entere sin preguntar cada tanto: el que llama
+    // deja una conexion abierta y el que atiende contesta cuando pasa algo.
+    /// "Avisame cuando cambie tu biblioteca." Despues de mandarlo, el que
+    /// llama no manda nada mas: escucha.
+    ///
+    /// `since` es la ultima revision que el que llama conoce. Es lo que hace
+    /// que reconectar sea barato: en un celular la conexion no sobrevive medio
+    /// minuto —cambia de wifi a datos, el NAT de la operadora corta lo que
+    /// esta callado—, asi que se reconecta todo el tiempo. Sin este numero,
+    /// cada reconexion tiene que arrastrar una puesta al dia completa por las
+    /// dudas; con el, el que atiende sabe si de verdad te perdiste algo y
+    /// contesta `Changed` en el acto, o parkea. `None` = "no se de nada":
+    /// parkea desde ahora.
+    Watch { since: Option<Mark> },
+    /// Hubo novedades. Cierra la espera; lo que sigue es un sync normal, por
+    /// su propia conexion. La marca es desde donde seguir esperando despues.
+    Changed { mark: Mark },
+    /// Latido mientras no pasa nada. Una conexion que se queda callada horas
+    /// la corta cualquier cosa en el medio (un proxy, el NAT del router) y
+    /// del lado que espera no se nota hasta que hace falta.
+    ///
+    /// Lleva la marca para que el que espera la mantenga al dia sin preguntar:
+    /// si se corta despues de horas parkeado, reconecta preguntando por lo
+    /// ultimo y no por lo de ayer.
+    Ping { mark: Mark },
     /// Cierre ordenado de la sesion.
     Bye,
 }
@@ -450,6 +524,30 @@ mod tests {
         let (a1, _) = pair();
         let (a2, _) = pair();
         assert_ne!(a1.code, a2.code);
+    }
+
+    /// La compatibilidad hacia atras del inventario comprimido descansa en
+    /// esto: que a un peer viejo, para el que `manifestReq` no tiene campos,
+    /// el `gzip` de mas no le rompa nada. Si serde lo rechazara, actualizar un
+    /// dispositivo y no el otro cortaria el sync entero.
+    #[test]
+    fn un_campo_de_mas_no_rompe_un_mensaje_sin_campos() {
+        let con_sobra = br#"{"type":"bye","gzip":true,"loQueSea":42}"#;
+        assert!(
+            matches!(serde_json::from_slice::<Msg>(con_sobra), Ok(Msg::Bye)),
+            "un peer viejo tiene que poder ignorar lo que no conoce"
+        );
+    }
+
+    /// Y al reves: el pedido de un peer viejo, sin el campo, se lee como "no
+    /// se leer comprimido" — que es la respuesta segura.
+    #[test]
+    fn un_pedido_sin_el_campo_pide_el_inventario_de_siempre() {
+        let viejo = br#"{"type":"manifestReq"}"#;
+        match serde_json::from_slice::<Msg>(viejo) {
+            Ok(Msg::ManifestReq { gzip }) => assert!(!gzip),
+            other => panic!("no se pudo leer el pedido viejo: {other:?}"),
+        }
     }
 
     #[test]

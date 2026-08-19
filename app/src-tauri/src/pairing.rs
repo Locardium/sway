@@ -705,9 +705,21 @@ pub fn preview_sync(handle: AppHandle, uid: String) {
 
 /// Abre una sesión con un dispositivo ya vinculado y se presenta.
 fn open_session(handle: &AppHandle, uid: &str) -> Result<Session> {
+    open_session_with(handle, uid, IO_TIMEOUT)
+}
+
+/// Igual, con el plazo de lectura a elección.
+///
+/// Lo necesita la conexión que espera novedades (`watch.rs`): ahí el silencio
+/// es lo normal, no un síntoma, y `IO_TIMEOUT` la cortaría entre dos latidos.
+pub(crate) fn open_session_with(
+    handle: &AppHandle,
+    uid: &str,
+    read_timeout: Duration,
+) -> Result<Session> {
     let addr = peer_addr(handle, uid)?;
     let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)?;
-    stream.set_read_timeout(Some(IO_TIMEOUT))?;
+    stream.set_read_timeout(Some(read_timeout))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     let private = private_key(handle)?;
     let mut sess = Session::connect(stream, &private)?;
@@ -814,7 +826,16 @@ pub fn wait_until_idle(handle: &AppHandle, uids: &[String], max: Duration) {
 }
 
 fn run_sync(handle: AppHandle, uid: String, auto: bool) {
-    std::thread::spawn(move || {
+    std::thread::spawn(move || run_sync_blocking(handle, uid, auto));
+}
+
+/// Igual, en el hilo de quien llama.
+///
+/// Lo necesita el watcher (`watch.rs`): tiene que ponerse al día **antes** de
+/// quedarse esperando novedades, y si no espera a que la corrida termine se
+/// pone a esperar contra un estado que él mismo está por cambiar.
+pub(crate) fn run_sync_blocking(handle: AppHandle, uid: String, auto: bool) {
+    {
         let Some(_guard) = SyncGuard::acquire(&handle, &uid) else {
             log::debug!("[sync] a sync with {uid} is already running");
             return;
@@ -874,7 +895,7 @@ fn run_sync(handle: AppHandle, uid: String, auto: bool) {
                 );
             }
         }
-    });
+    }
 }
 
 /// Una corrida completa contra un dispositivo ya vinculado.

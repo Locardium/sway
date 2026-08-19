@@ -23,6 +23,14 @@ log = "0.4"
 blake3 = "1"
 uuid = { version = "1", features = ["v4"] }
 
+# El inventario del sync viaja como JSON, y es lo mas comprimible que hay:
+# claves repetidas en cada fila, uuids y hashes en hexa. Con 5000 temas son
+# 4 MB por cada comparacion, y esas comparaciones salen por internet desde un
+# celular. Sin features por default a proposito: el backend de C (`zlib`) es
+# un problema mas en el cross-compile a Android y a musl, y `rust_backend`
+# (miniz_oxide) es Rust puro.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
 # Canal cifrado del sync (Fase 5.2): handshake Noise XX. Sin features por
 # default a proposito — el set completo arrastra `ring` (C/asm, un problema
 # mas en el cross-compile a Android) y AES, que no se usa. Esto deja

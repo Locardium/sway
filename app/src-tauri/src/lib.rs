@@ -4,6 +4,7 @@ mod discovery;
 mod export_xml;
 mod pairing;
 mod power;
+mod watch;
 mod xml_sync;
 
 // El motor vive en `crates/core` desde la Fase 6.0 — la app y el server
@@ -186,6 +187,8 @@ pub struct AppState {
     /// Red y batería (Fase 6.7). En desktop se leen acá; en Android las
     /// reporta la pantalla, que es la única que puede.
     conditions: Mutex<power::Conditions>,
+    /// Conexiones abiertas esperando que el server avise de cambios.
+    watchers: watch::Watchers,
 }
 
 /// Cuánto tiempo se ignoran los eventos de un archivo que dejó el sync.
@@ -1382,6 +1385,7 @@ pub fn run() {
                 expected_paths: Mutex::new(HashMap::new()),
                 autosync: autosync::AutoSync::default(),
                 conditions: Mutex::new(power::Conditions::default()),
+                watchers: watch::Watchers::default(),
             });
 
             // Los dispositivos con dirección fija (el server de archivo) van
@@ -1393,6 +1397,7 @@ pub fn run() {
                 pairing::spawn_server(app.handle().clone(), listener);
                 discovery::spawn_prober(app.handle().clone());
                 autosync::spawn(app.handle().clone());
+                watch::spawn(app.handle().clone());
             }
 
             // Descubrimiento. Va después de `manage` porque el thread de mDNS
