@@ -1,8 +1,8 @@
 {
   "name": "sway-workspace",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
-  "description": "Sway DJ app + server workspace",
+  "description": "Sway",
   "scripts": {
     "dev": "cd app && pnpm tauri dev",
     "dev:android": "cd app && pnpm tauri android dev --no-watch",
