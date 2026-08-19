@@ -23,7 +23,11 @@ const KIND_BY_EXT: &[(&str, &str)] = &[
 ];
 
 pub fn generate_xml(conn: &Connection, music_dir: &Path) -> Result<String> {
-    let tracks = db::list_tracks(conn)?;
+    // iTunes emite los tracks ordenados por Track ID ascendente y Rekordbox
+    // asume ese orden al indexar el dict: con las claves desordenadas resuelve
+    // mal cada entrada y muestra el mismo tema repetido.
+    let mut tracks = db::list_tracks(conn)?;
+    tracks.sort_by_key(|t| t.id);
     let playlists = db::list_playlists(conn)?;
 
     let mut children: HashMap<Option<i64>, Vec<&PlaylistNode>> = HashMap::new();
@@ -415,28 +419,38 @@ fn percent_encode_segment(seg: &str) -> String {
     out
 }
 
-/// Persistent ID = 16 hex uppercase. A diferencia del PoC (que hasheaba
-/// paths porque no tenia ids estables), acá usamos directo el id de SQLite,
-/// que ya es estable entre corridas.
+/// Persistent ID = 16 hex uppercase. iTunes los emite con entropia plena
+/// ("8B6A141E5191AE9A"); zero-padded ("0000000000000003") Rekordbox no los
+/// distingue y colapsa toda la coleccion en el primer track. Se hashea el id
+/// de SQLite (estable entre corridas) y se fuerza el bit mas alto para que
+/// nunca queden ceros a la izquierda.
 fn persistent_id_track(id: i64) -> String {
-    format!("{:016X}", id as u64)
+    persistent_id_from_seed(&format!("track:{id}"))
 }
 
-/// Igual pero con el bit mas alto seteado, para que el espacio de ids de
-/// playlist nunca choque con el de tracks aunque compartan el mismo numero.
+/// Igual, con otro prefijo de seed para que el espacio de ids de playlist
+/// nunca choque con el de tracks aunque compartan el mismo numero.
 fn persistent_id_playlist(id: i64) -> String {
-    format!("{:016X}", (1u64 << 62) | (id as u64))
+    persistent_id_from_seed(&format!("playlist:{id}"))
+}
+
+fn persistent_id_from_seed(seed: &str) -> String {
+    format!("{:016X}", fnv1a(seed) | (1u64 << 63))
 }
 
 /// FNV-1a 64-bit, solo para el Library Persistent ID (un unico valor
 /// derivado de la carpeta gestionada, no necesita mas que ser estable).
 fn fnv1a_hex(s: &str) -> String {
+    format!("{:016X}", fnv1a(s))
+}
+
+fn fnv1a(s: &str) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
     for b in s.as_bytes() {
         hash ^= *b as u64;
         hash = hash.wrapping_mul(0x100000001b3);
     }
-    format!("{hash:016X}")
+    hash
 }
 
 #[cfg(test)]
@@ -512,6 +526,39 @@ mod tests {
     fn xml_escape_collapses_nul_and_escapes_amp() {
         let out = xml_escape("Foo\u{0}Bar & Baz");
         assert_eq!(out, "Foo / Bar &amp; Baz");
+    }
+
+    #[test]
+    fn track_dicts_are_emitted_in_ascending_track_id_order() {
+        let conn = mem();
+        // Se insertan con artist vacio/desordenado a proposito: list_tracks
+        // ordena por artist, asi que el orden de insercion != orden de id.
+        conn.execute(
+            "INSERT INTO tracks (path, title, artist) VALUES ('C:/a.flac', 'A', 'zz')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tracks (path, title, artist) VALUES ('C:/b.flac', 'B', 'aa')",
+            [],
+        )
+        .unwrap();
+        let xml = generate_xml(&conn, &PathBuf::from(r"C:\Music\Sway")).unwrap();
+        let first = xml.find("<key>Track ID</key><integer>1</integer>").unwrap();
+        let second = xml.find("<key>Track ID</key><integer>2</integer>").unwrap();
+        assert!(first < second, "los tracks deben salir por id ascendente");
+    }
+
+    #[test]
+    fn persistent_ids_have_no_leading_zeros() {
+        // Rekordbox no distingue ids zero-padded y muestra el mismo tema repetido.
+        for id in [0i64, 1, 2, 3, 42, 9999] {
+            for pid in [persistent_id_track(id), persistent_id_playlist(id)] {
+                assert_eq!(pid.len(), 16);
+                assert!(!pid.starts_with('0'), "persistent id con cero a la izquierda: {pid}");
+            }
+        }
+        assert_ne!(persistent_id_track(1), persistent_id_playlist(1));
     }
 
     #[test]

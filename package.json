@@ -1,0 +1,16 @@
+{
+  "name": "sway-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sway DJ app + server workspace",
+  "scripts": {
+    "dev": "cd app && pnpm tauri dev",
+    "dev:android": "cd app && pnpm tauri android dev --no-watch",
+    "build:win": "cd app && pnpm tauri build --bundles msi",
+    "build:android": "cd app && pnpm tauri android build --bundles apk",
+    "server:build-linux": "cargo zigbuild --release -p sway-server --target x86_64-unknown-linux-musl",
+    "server:build-win": "cargo build --release -p sway-server",
+    "server:dev": "cargo run -p sway-server -- --config config.toml",
+    "build:all": "pnpm run build:win && pnpm run build:android && pnpm run server:build-linux && pnpm run server:build-win"
+  }
+}
