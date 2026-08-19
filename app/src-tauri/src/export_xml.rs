@@ -1,7 +1,7 @@
-//! Generador puro del iTunes Music Library.xml (formato validado en Fase 0,
-//! `tools/itunes-xml-poc/generate.mjs`). Sin conocimiento de rutas de SO ni
-//! de Tauri: recibe la conexion a la DB y la carpeta gestionada, devuelve un
-//! String. La escritura a disco + backup vive en `xml_sync`.
+//! Pure generator for the iTunes Music Library.xml (format validated in Phase 0,
+//! `tools/itunes-xml-poc/generate.mjs`). No knowledge of OS paths or of
+//! Tauri: receives the DB connection and the managed folder, returns a
+//! String. Writing to disk + backup lives in `xml_sync`.
 
 use crate::db::{self, PlaylistNode, Track};
 use anyhow::Result;
@@ -23,9 +23,9 @@ const KIND_BY_EXT: &[(&str, &str)] = &[
 ];
 
 pub fn generate_xml(conn: &Connection, music_dir: &Path) -> Result<String> {
-    // iTunes emite los tracks ordenados por Track ID ascendente y Rekordbox
-    // asume ese orden al indexar el dict: con las claves desordenadas resuelve
-    // mal cada entrada y muestra el mismo tema repetido.
+    // iTunes emits tracks ordered by ascending Track ID and Rekordbox
+    // assumes that order when indexing the dict: with unordered keys it
+    // resolves each entry wrong and shows the same track repeated.
     let mut tracks = db::list_tracks(conn)?;
     tracks.sort_by_key(|t| t.id);
     let playlists = db::list_playlists(conn)?;
@@ -65,8 +65,8 @@ pub fn generate_xml(conn: &Connection, music_dir: &Path) -> Result<String> {
         "\t<key>Library Persistent ID</key><string>{}</string>\n",
         fnv1a_hex(&music_dir.to_string_lossy())
     ));
-    // Marca que este archivo lo escribio Sway (no iTunes real). xml_sync la
-    // usa para decidir si hay que backupear antes de pisar el archivo.
+    // Marks that this file was written by Sway (not real iTunes). xml_sync
+    // uses it to decide whether to back up before overwriting the file.
     xml.push_str("\t<key>Sway Generator</key><true/>\n");
 
     xml.push_str("\t<key>Tracks</key>\n\t<dict>\n");
@@ -80,7 +80,7 @@ pub fn generate_xml(conn: &Connection, music_dir: &Path) -> Result<String> {
     xml.push_str(&ctx.blocks);
     xml.push_str("\t</array>\n");
 
-    // iTunes pone Music Folder AL FINAL, despues de Playlists (Rekordbox lo exige asi).
+    // iTunes puts Music Folder AT THE END, after Playlists (Rekordbox requires it this way).
     let music_folder = to_itunes_location(&ensure_trailing_sep(&music_dir.to_string_lossy()));
     xml.push_str(&format!(
         "\t<key>Music Folder</key><string>{}</string>\n",
@@ -134,14 +134,14 @@ impl<'a> Ctx<'a> {
         Ok(())
     }
 
-    /// Union de los track ids de TODO el subarbol de `id` (memoizado). Es el
-    /// fix que hace que Serato muestre el folder (ver dj-itunes-xml-compat).
+    /// Union of the track ids of the ENTIRE subtree of `id` (memoized). This is the
+    /// fix that makes Serato show the folder (see dj-itunes-xml-compat).
     fn descendant_track_ids(&mut self, id: i64) -> Result<Vec<i64>> {
         if let Some(v) = self.desc_cache.get(&id) {
             return Ok(v.clone());
         }
-        // Tracks asignados directamente a este nodo (defensivo: la UI hoy no
-        // agrega tracks directo a un folder, pero el schema lo permite).
+        // Tracks assigned directly to this node (defensive: the UI today doesn't
+        // add tracks directly to a folder, but the schema allows it).
         let mut ids: Vec<i64> = db::playlist_tracks(self.conn, id)?
             .iter()
             .map(|t| t.id)
@@ -225,8 +225,8 @@ fn master_playlist(tracks: &[Track]) -> String {
     let mut s = String::from("\t\t<dict>\n");
     s.push_str("\t\t\t<key>Master</key><true/>\n");
     s.push_str(&kv_integer("Playlist ID", 1000));
-    // id=0 esta reservado para la maestra: los ids reales de playlists
-    // arrancan en 1 (autoincrement de SQLite), asi que nunca choca.
+    // id=0 is reserved for the master: real playlist ids
+    // start at 1 (SQLite autoincrement), so it never collides.
     s.push_str(&kv_string("Playlist Persistent ID", &persistent_id_playlist(0)));
     s.push_str("\t\t\t<key>All Items</key><true/>\n");
     s.push_str("\t\t\t<key>Visible</key><false/>\n");
@@ -291,13 +291,13 @@ fn track_dict(t: &Track) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers de formato (sin dependencias nuevas)
+// Format helpers (no new dependencies)
 // ---------------------------------------------------------------------------
 
-/// XML 1.0 prohibe NUL y la mayoria de control chars. ID3 usa NUL para
-/// separar valores multiples y quedan crudos en los tags; Serato RECHAZA el
-/// XML entero si aparece un NUL. Colapsa runs de control chars (menos
-/// tab/LF/CR) a " / ", despues escapa & < > ".
+/// XML 1.0 forbids NUL and most control chars. ID3 uses NUL to
+/// separate multiple values and they remain raw in the tags; Serato REJECTS the
+/// entire XML if a NUL appears. Collapses runs of control chars (except
+/// tab/LF/CR) to " / ", then escapes & < > ".
 fn xml_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -329,7 +329,7 @@ fn is_illegal_ctrl(c: char) -> bool {
     (0x00..=0x08).contains(&u) || u == 0x0B || u == 0x0C || (0x0E..=0x1F).contains(&u)
 }
 
-/// Descompone un SystemTime en componentes UTC (y, m, d, hh, mm, ss).
+/// Breaks a SystemTime down into UTC components (y, m, d, hh, mm, ss).
 fn utc_parts(t: SystemTime) -> (i64, u32, u32, i64, i64, i64) {
     let dur = t.duration_since(UNIX_EPOCH).unwrap_or_default();
     let secs = dur.as_secs() as i64;
@@ -339,19 +339,19 @@ fn utc_parts(t: SystemTime) -> (i64, u32, u32, i64, i64, i64) {
     (y, m, d, secs_of_day / 3600, (secs_of_day % 3600) / 60, secs_of_day % 60)
 }
 
-/// Fecha formato iTunes: 2026-07-23T03:11:37Z (UTC, sin milisegundos).
+/// iTunes date format: 2026-07-23T03:11:37Z (UTC, no milliseconds).
 fn itunes_date(t: SystemTime) -> String {
     let (y, m, d, hh, mm, ss) = utc_parts(t);
     format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
 }
 
-/// Timestamp compacto UTC (para nombres de archivo de backup en xml_sync).
+/// Compact UTC timestamp (for backup file names in xml_sync).
 pub(crate) fn compact_timestamp(t: SystemTime) -> String {
     let (y, m, d, hh, mm, ss) = utc_parts(t);
     format!("{y:04}{m:02}{d:02}-{hh:02}{mm:02}{ss:02}")
 }
 
-/// Howard Hinnant's civil_from_days: dias desde 1970-01-01 (UTC) -> (y, m, d).
+/// Howard Hinnant's civil_from_days: days since 1970-01-01 (UTC) -> (y, m, d).
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
@@ -374,8 +374,8 @@ fn ensure_trailing_sep(s: &str) -> String {
     }
 }
 
-/// `<Location>` formato iTunes Windows: file://localhost/C:/Carpeta/archivo.flac
-/// con cada segmento percent-codificado. El ':' del drive se conserva.
+/// `<Location>` iTunes Windows format: file://localhost/C:/Folder/file.flac
+/// with each segment percent-encoded. The drive's ':' is kept as-is.
 fn to_itunes_location(path_str: &str) -> String {
     let normalized = path_str.replace('\\', "/");
     let parts: Vec<&str> = normalized.split('/').collect();
@@ -404,8 +404,8 @@ fn to_itunes_location(path_str: &str) -> String {
     }
 }
 
-/// Igual al unreserved set de encodeURIComponent en JS (lo que uso y valido
-/// el PoC): A-Z a-z 0-9 - _ . ! ~ * ' ( )
+/// Same as the unreserved set of encodeURIComponent in JS (what the PoC
+/// used and validated): A-Z a-z 0-9 - _ . ! ~ * ' ( )
 fn percent_encode_segment(seg: &str) -> String {
     let mut out = String::new();
     for b in seg.bytes() {
@@ -419,17 +419,17 @@ fn percent_encode_segment(seg: &str) -> String {
     out
 }
 
-/// Persistent ID = 16 hex uppercase. iTunes los emite con entropia plena
-/// ("8B6A141E5191AE9A"); zero-padded ("0000000000000003") Rekordbox no los
-/// distingue y colapsa toda la coleccion en el primer track. Se hashea el id
-/// de SQLite (estable entre corridas) y se fuerza el bit mas alto para que
-/// nunca queden ceros a la izquierda.
+/// Persistent ID = 16 hex uppercase. iTunes emits them with full entropy
+/// ("8B6A141E5191AE9A"); zero-padded ("0000000000000003") Rekordbox can't
+/// tell them apart and collapses the whole collection into the first track. The SQLite
+/// id is hashed (stable across runs) and the highest bit is forced so
+/// there are never leading zeros.
 fn persistent_id_track(id: i64) -> String {
     persistent_id_from_seed(&format!("track:{id}"))
 }
 
-/// Igual, con otro prefijo de seed para que el espacio de ids de playlist
-/// nunca choque con el de tracks aunque compartan el mismo numero.
+/// Same, with a different seed prefix so the playlist id space
+/// never collides with the track one even if they share the same number.
 fn persistent_id_playlist(id: i64) -> String {
     persistent_id_from_seed(&format!("playlist:{id}"))
 }
@@ -438,8 +438,8 @@ fn persistent_id_from_seed(seed: &str) -> String {
     format!("{:016X}", fnv1a(seed) | (1u64 << 63))
 }
 
-/// FNV-1a 64-bit, solo para el Library Persistent ID (un unico valor
-/// derivado de la carpeta gestionada, no necesita mas que ser estable).
+/// FNV-1a 64-bit, only for the Library Persistent ID (a single value
+/// derived from the managed folder, it just needs to be stable).
 fn fnv1a_hex(s: &str) -> String {
     format!("{:016X}", fnv1a(s))
 }
@@ -462,9 +462,9 @@ mod tests {
     fn mem() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
-        // El schema sale de db.rs, no de una copia a mano: una copia se
-        // desactualiza en silencio cada vez que se agrega una columna, y el
-        // test se cae por un motivo que no tiene nada que ver con el XML.
+        // The schema comes from db.rs, not a hand-made copy: a copy silently
+        // goes stale every time a column is added, and the test fails for a
+        // reason that has nothing to do with the XML.
         db::init_schema(&conn).unwrap();
         conn
     }
@@ -491,7 +491,7 @@ mod tests {
         let conn = mem();
         let xml = generate_xml(&conn, &PathBuf::from(r"C:\Music\Sway")).unwrap();
         let playlists_close = xml.find("</array>\n\t<key>Music Folder</key>");
-        assert!(playlists_close.is_some(), "Music Folder debe venir justo despues del cierre de Playlists");
+        assert!(playlists_close.is_some(), "Music Folder must come right after the Playlists closing tag");
     }
 
     #[test]
@@ -531,8 +531,8 @@ mod tests {
     #[test]
     fn track_dicts_are_emitted_in_ascending_track_id_order() {
         let conn = mem();
-        // Se insertan con artist vacio/desordenado a proposito: list_tracks
-        // ordena por artist, asi que el orden de insercion != orden de id.
+        // Inserted with an empty/unordered artist on purpose: list_tracks
+        // sorts by artist, so insertion order != id order.
         conn.execute(
             "INSERT INTO tracks (path, title, artist) VALUES ('C:/a.flac', 'A', 'zz')",
             [],
@@ -546,16 +546,16 @@ mod tests {
         let xml = generate_xml(&conn, &PathBuf::from(r"C:\Music\Sway")).unwrap();
         let first = xml.find("<key>Track ID</key><integer>1</integer>").unwrap();
         let second = xml.find("<key>Track ID</key><integer>2</integer>").unwrap();
-        assert!(first < second, "los tracks deben salir por id ascendente");
+        assert!(first < second, "tracks must come out in ascending id order");
     }
 
     #[test]
     fn persistent_ids_have_no_leading_zeros() {
-        // Rekordbox no distingue ids zero-padded y muestra el mismo tema repetido.
+        // Rekordbox can't tell zero-padded ids apart and shows the same track repeated.
         for id in [0i64, 1, 2, 3, 42, 9999] {
             for pid in [persistent_id_track(id), persistent_id_playlist(id)] {
                 assert_eq!(pid.len(), 16);
-                assert!(!pid.starts_with('0'), "persistent id con cero a la izquierda: {pid}");
+                assert!(!pid.starts_with('0'), "persistent id with a leading zero: {pid}");
             }
         }
         assert_ne!(persistent_id_track(1), persistent_id_playlist(1));

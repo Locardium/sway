@@ -1,18 +1,18 @@
-//! Server de archivo y sync de Sway.
+//! Sway's archive and sync server.
 //!
-//! Guarda lo que le mandan los dispositivos y se lo devuelve cuando lo piden.
-//! No importa música por su cuenta y no tiene interfaz: todo lo que tiene, se
-//! lo mandó alguien.
+//! Stores whatever devices send it and hands it back when they ask for it.
+//! It doesn't import music on its own and has no interface: everything it
+//! has, someone sent it.
 //!
-//! Para qué sirve, en dos casos concretos:
+//! What it's for, in two concrete cases:
 //!
-//! - **Sincronizar fuera de casa.** El descubrimiento por mDNS sólo ve la red
-//!   local; dos dispositivos en redes distintas no se encuentran ni se pueden
-//!   llamar (los dos están detrás de un NAT). Contra un server con dirección
-//!   pública, en cambio, los dos marcan hacia afuera — y como el server tiene
-//!   todo, nadie necesita que el otro esté prendido.
-//! - **Recuperar.** Si se pierde la biblioteca de todos los dispositivos, acá
-//!   están los archivos y la organización.
+//! - **Syncing away from home.** mDNS discovery only sees the local network;
+//!   two devices on different networks can't find each other or call each
+//!   other (both are behind a NAT). Against a server with a public address,
+//!   on the other hand, both dial out — and since the server has everything,
+//!   neither needs the other to be online.
+//! - **Recovering.** If every device's library is lost, the files and the
+//!   organization are still here.
 
 use anyhow::{Context, Result};
 use std::net::TcpListener;
@@ -24,10 +24,10 @@ use sway_server::host::ServerHost;
 use sway_server::serve;
 
 const DEFAULT_CONFIG: &str = "config.toml";
-/// El nombre anterior. Un server que ya está andando lo tiene así, y
-/// arrancar con el nombre nuevo le escribiría una configuración nueva —con
-/// OTRO token— y se apagaría sin llegar a escuchar, que bajo systemd es una
-/// caída silenciosa. Se sigue aceptando, avisando.
+/// The previous name. A server that's already running still has this one,
+/// and starting with the new name would write a fresh config —with ANOTHER
+/// token— and shut down without ever listening, which under systemd is a
+/// silent outage. It's still accepted, with a warning.
 const LEGACY_CONFIG: &str = "sway-server.toml";
 
 fn main() {
@@ -38,20 +38,22 @@ fn main() {
             1
         }
     };
-    // Lo último que pasa, salga bien o mal: si esta ventana la abrió un doble
-    // click, cerrarse acá se lleva el mensaje puesto — que en la primera
-    // corrida es justamente dónde quedó el token.
+    // The last thing that happens, whether it went well or not: if this
+    // window was opened by a double click, closing here would take the
+    // printed message with it — which on the first run is exactly where the
+    // token ended up.
     hold_window_open();
     std::process::exit(code);
 }
 
-/// Deja la ventana abierta hasta que alguien apriete Enter, **sólo** si la
-/// consola es de este proceso.
+/// Keeps the window open until someone presses Enter, **only** if the
+/// console belongs to this process.
 ///
-/// La distinción importa: en una terminal o bajo systemd nadie va a apretar
-/// nada, y un server que arranca esperando una tecla no arranca nunca. Windows
-/// lo dice contando cuántos procesos comparten la consola — si es uno solo,
-/// la creó este programa al abrirse, o sea que fue un doble click.
+/// The distinction matters: in a terminal or under systemd nobody is going
+/// to press anything, and a server that starts up waiting for a keypress
+/// never starts. Windows tells us by counting how many processes share the
+/// console — if it's just one, this program created it by opening, meaning
+/// it was a double click.
 #[cfg(windows)]
 fn hold_window_open() {
     use windows_sys::Win32::System::Console::GetConsoleProcessList;
@@ -81,28 +83,29 @@ fn run() -> Result<()> {
     };
 
     std::fs::create_dir_all(&cfg.data_dir)
-        .with_context(|| format!("no se pudo crear {}", cfg.data_dir.display()))?;
+        .with_context(|| format!("could not create {}", cfg.data_dir.display()))?;
     std::fs::create_dir_all(&cfg.music_dir)
-        .with_context(|| format!("no se pudo crear {}", cfg.music_dir.display()))?;
+        .with_context(|| format!("could not create {}", cfg.music_dir.display()))?;
 
     let db_file = cfg.data_dir.join("sway.sqlite");
-    let conn = db::open(&db_file).with_context(|| format!("no se pudo abrir {}", db_file.display()))?;
-    // El WAL se consolida desde su propia conexión, sin frenar a quien escribe.
+    let conn = db::open(&db_file).with_context(|| format!("could not open {}", db_file.display()))?;
+    // WAL checkpointing runs from its own connection, without slowing down writers.
     db::spawn_checkpointer(&db_file);
-    // El nombre sale de la config: es lo que se va a ver en la app.
+    // The name comes from the config: it's what shows up in the app.
     db::set_device_name(&conn, &cfg.name)?;
 
     let hostage = Arc::new(ServerHost::new(conn, cfg.music_dir.clone()));
-    // Genera el par de claves en la primera corrida.
+    // Generates the keypair on the first run.
     let (uid, pubkey) = hostage.with_db(|conn| {
         let (_, public) = pairing::keypair(conn)?;
         Ok((db::this_device_uid(conn)?, public))
     })?;
 
-    // El server quiere todo, en las dos direcciones, y lo declara en la fila
-    // que se replica. No alcanza con que sea el default: los dispositivos leen
-    // esa fila para decidir qué le mandan, y una fila explícita es también lo
-    // que la app muestra (en gris) cuando abrís el server en la lista.
+    // The server wants everything, in both directions, and declares it in
+    // the row that gets replicated. It's not enough for it to be the
+    // default: devices read that row to decide what to send it, and an
+    // explicit row is also what the app shows (in gray) when you open the
+    // server in the list.
     hostage.with_db(|conn| {
         let me = db::this_device_uid(conn)?;
         sway_core::scope::set_mode(conn, &me, sway_core::scope::Mode::All)?;
@@ -110,13 +113,14 @@ fn run() -> Result<()> {
         Ok(())
     })?;
 
-    // La papelera: lo que la retención ya dejó vencer se borra de verdad.
-    // Corre al arrancar y una vez por día — un server queda prendido meses, y
-    // si sólo se limpiara al arrancar no se limpiaría nunca.
+    // The trash: whatever retention has already let expire gets truly
+    // deleted. Runs on startup and once a day — a server stays up for
+    // months, and if it only cleaned up at startup it would never clean up
+    // at all.
     spawn_trash_purge(cfg.music_dir.clone(), cfg.retention_days);
 
     let listener = TcpListener::bind(&cfg.listen)
-        .with_context(|| format!("no se pudo escuchar en {}", cfg.listen))?;
+        .with_context(|| format!("could not listen on {}", cfg.listen))?;
 
     log::info!("[server] {} ({uid})", cfg.name);
     log::info!("[server] public key {}", fingerprint(&pubkey));
@@ -142,14 +146,14 @@ fn spawn_trash_purge(music_dir: PathBuf, retention_days: u64) {
 }
 
 fn config_path() -> PathBuf {
-    // Una sola opción, y por eso sin biblioteca de argumentos:
-    //   sway-server [ruta-del-config]
+    // A single option, and that's why there's no argument-parsing library:
+    //   sway-server [config-path]
     resolve_config(std::env::args().nth(1), Path::new("."))
 }
 
-/// Qué archivo de configuración usar. La ruta escrita a mano gana siempre;
-/// sin ella manda el nombre nuevo, y el viejo sólo entra si es el único que
-/// existe.
+/// Which config file to use. A hand-written path always wins; without one,
+/// the new name takes over, and the old one only counts if it's the only one
+/// that exists.
 fn resolve_config(arg: Option<String>, dir: &Path) -> PathBuf {
     if let Some(arg) = arg {
         return PathBuf::from(arg);
@@ -165,8 +169,8 @@ fn resolve_config(arg: Option<String>, dir: &Path) -> PathBuf {
     current
 }
 
-/// Los primeros bytes de la clave, para poder compararla de un vistazo con la
-/// que muestre la app si algún día no coincide.
+/// The first few bytes of the key, so it can be compared at a glance with
+/// what the app shows if the two ever stop matching.
 fn fingerprint(pubkey: &[u8]) -> String {
     pubkey
         .iter()
@@ -192,43 +196,43 @@ mod tests {
     }
 
     #[test]
-    fn sin_nada_escrito_se_usa_el_nombre_nuevo() {
+    fn with_nothing_written_it_uses_the_new_name() {
         let dir = tmp("nuevo");
         assert_eq!(resolve_config(None, &dir), dir.join(DEFAULT_CONFIG));
     }
 
-    /// Un server que ya venía andando tiene el nombre viejo. Si el renombre lo
-    /// ignorara, la primera corrida escribiría una configuración nueva con OTRO
-    /// token y se apagaría sin escuchar — y bajo systemd eso es un server caído
-    /// sin que nadie se entere.
+    /// A server that was already running has the old name. If the rename
+    /// were ignored, the first run would write a fresh config with ANOTHER
+    /// token and shut down without listening — and under systemd that's a
+    /// downed server nobody notices.
     #[test]
-    fn el_nombre_viejo_sigue_sirviendo_si_es_el_unico() {
+    fn the_old_name_still_works_if_it_is_the_only_one() {
         let dir = tmp("viejo");
         std::fs::write(dir.join(LEGACY_CONFIG), "").unwrap();
         assert_eq!(resolve_config(None, &dir), dir.join(LEGACY_CONFIG));
     }
 
-    /// Con los dos archivos, manda el nuevo: es el que el usuario acaba de
-    /// escribir, y el viejo puede ser el que quedó de antes.
+    /// With both files present, the new one wins: it's the one the user just
+    /// wrote, and the old one might just be left over from before.
     #[test]
-    fn con_los_dos_gana_el_nuevo() {
+    fn with_both_present_the_new_one_wins() {
         let dir = tmp("ambos");
         std::fs::write(dir.join(LEGACY_CONFIG), "").unwrap();
         std::fs::write(dir.join(DEFAULT_CONFIG), "").unwrap();
         assert_eq!(resolve_config(None, &dir), dir.join(DEFAULT_CONFIG));
     }
 
-    /// La ruta escrita a mano gana siempre, exista o no: es lo que permite
-    /// tener la configuración fuera del directorio de trabajo (ver el systemd
-    /// del README).
+    /// A hand-written path always wins, whether it exists or not: it's what
+    /// lets the config live outside the working directory (see the systemd
+    /// section of the README).
     #[test]
-    fn la_ruta_a_mano_le_gana_a_todo() {
+    fn the_hand_written_path_beats_everything() {
         let dir = tmp("amano");
         std::fs::write(dir.join(DEFAULT_CONFIG), "").unwrap();
-        let elegida = dir.join("otra-cosa.toml");
+        let chosen = dir.join("something-else.toml");
         assert_eq!(
-            resolve_config(Some(elegida.display().to_string()), &dir),
-            elegida
+            resolve_config(Some(chosen.display().to_string()), &dir),
+            chosen
         );
     }
 }

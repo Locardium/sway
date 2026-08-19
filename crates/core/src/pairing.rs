@@ -1,21 +1,23 @@
-//! Lo que sabe de vinculación un dispositivo sin pantalla (Fase 6.1).
+//! What a screenless device knows about pairing (Phase 6.1).
 //!
-//! La ceremonia de pairing tiene dos mitades bien distintas. Una es
-//! criptografía y filas en la base: qué clave tiene cada dispositivo, si la que
-//! llega es la que ya teníamos, y qué se guarda cuando el vínculo se concreta.
-//! La otra es una persona mirando dos pantallas y comparando seis dígitos.
+//! The pairing ceremony has two quite distinct halves. One is cryptography
+//! and database rows: which key each device has, whether the incoming one
+//! matches what we already had, and what gets saved when the link is
+//! confirmed. The other is a person looking at two screens and comparing six
+//! digits.
 //!
-//! Acá vive la primera. La segunda sigue en `app/src-tauri/src/pairing.rs`,
-//! porque necesita una ventana donde emitir eventos y alguien que los mire.
+//! This is where the first half lives. The second one still lives in
+//! `app/src-tauri/src/pairing.rs`, because it needs a window to emit events
+//! to and someone watching them.
 //!
-//! La separación no es prolijidad: el server de archivo (Fase 6.2) corre en un
-//! Ubuntu sin nadie adelante y necesita exactamente esta mitad — verificar
-//! claves, rechazar la que no coincide, dar de alta el dispositivo — mientras
-//! reemplaza la otra por un token de configuración.
+//! The separation isn't tidiness for its own sake: the file server (Phase
+//! 6.2) runs on an Ubuntu box with nobody in front of it and needs exactly
+//! this half — verifying keys, rejecting the one that doesn't match, enrolling
+//! the device — while it replaces the other half with a configuration token.
 //!
-//! **Regla que no cambia de un lado ni del otro:** una clave distinta para un
-//! uid ya conocido se rechaza y se registra. Nunca se vuelve a confiar en
-//! silencio.
+//! **Rule that doesn't change on either side:** a different key for an
+//! already-known uid is rejected and logged. Trust is never silently
+//! restored.
 
 use crate::db;
 use anyhow::Result;
@@ -23,20 +25,20 @@ use base64::Engine as _;
 use rusqlite::Connection;
 use std::time::Duration;
 
-/// Cuánto se espera para abrir una conexión con otro dispositivo.
+/// How long to wait when opening a connection to another device.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// Generoso a propósito: del otro lado puede haber alguien todavía decidiendo.
+/// Deliberately generous: someone on the other end may still be deciding.
 pub const IO_TIMEOUT: Duration = Duration::from_secs(180);
 
 const SETTING_PRIVKEY: &str = "noise_private";
 const SETTING_PUBKEY: &str = "noise_public";
 
 // ---------------------------------------------------------------------------
-// Identidad criptográfica de este dispositivo
+// This device's cryptographic identity
 // ---------------------------------------------------------------------------
 
-/// Par de claves estático, generado una sola vez. Vive en `app_settings`, o
-/// sea en la base (en Android, almacenamiento privado del paquete).
+/// Static key pair, generated once. Lives in `app_settings`, i.e. in the
+/// database (on Android, the package's private storage).
 pub fn keypair(conn: &Connection) -> Result<(Vec<u8>, Vec<u8>)> {
     let b64 = base64::engine::general_purpose::STANDARD;
     if let (Some(priv_b64), Some(pub_b64)) = (
@@ -55,15 +57,15 @@ pub fn keypair(conn: &Connection) -> Result<(Vec<u8>, Vec<u8>)> {
 }
 
 // ---------------------------------------------------------------------------
-// Estado de `devices`
+// `devices` state
 // ---------------------------------------------------------------------------
 
 pub enum Known {
-    /// Ya pareado y la clave coincide.
+    /// Already paired and the key matches.
     Trusted,
-    /// Nunca se pareó con este uid.
+    /// Never paired with this uid.
     Unknown,
-    /// Conocido pero con OTRA clave pública. Alarma, no rutina.
+    /// Known but with a DIFFERENT public key. An alarm, not routine.
     KeyMismatch,
 }
 
@@ -104,11 +106,12 @@ pub fn store_device(
     Ok(())
 }
 
-/// Dirección fija de un dispositivo que no se descubre solo (el server).
+/// Fixed address of a device that can't discover itself (the server).
 ///
-/// Va aparte del alta porque el alta la comparten los dos caminos y sólo uno
-/// de los dos tiene una dirección que valga guardar: la de un peer de la LAN
-/// cambia con el DHCP, y la que vale es la que anuncia por mDNS.
+/// Kept separate from enrollment because enrollment is shared by both paths,
+/// and only one of them has an address worth saving: a LAN peer's address
+/// changes with DHCP, and the one that matters is the one it announces over
+/// mDNS.
 pub fn set_device_address(conn: &Connection, uid: &str, address: &str) -> Result<()> {
     conn.execute(
         "UPDATE devices SET address = ?1 WHERE uid = ?2",
@@ -117,13 +120,13 @@ pub fn set_device_address(conn: &Connection, uid: &str, address: &str) -> Result
     Ok(())
 }
 
-/// Hasta dónde sabemos de la biblioteca de ese dispositivo.
+/// How far we know that device's library to be.
 ///
-/// Guardarla es lo que evita comparar las dos bibliotecas enteras cada vez que
-/// arranca la app: con la marca en la mano se pregunta "¿pasó algo desde
-/// acá?", y si no pasó nada no viaja nada. En un celular, donde el sistema
-/// mata la app cuando se le antoja, eso es la diferencia entre unas cuantas
-/// comparaciones completas por día y ninguna.
+/// Saving it is what avoids comparing the two full libraries every time the
+/// app starts: with the mark in hand, it asks "did anything happen since
+/// here?", and if nothing did, nothing travels. On a phone, where the system
+/// kills the app whenever it feels like it, that's the difference between a
+/// handful of full comparisons a day and none at all.
 pub fn watch_mark(conn: &Connection, uid: &str) -> Option<crate::wire::Mark> {
     conn.query_row(
         "SELECT watch_epoch, watch_rev FROM devices WHERE uid = ?1",
@@ -142,7 +145,7 @@ pub fn watch_mark(conn: &Connection, uid: &str) -> Option<crate::wire::Mark> {
     .flatten()
 }
 
-/// Guarda (o borra, con `None`) la marca.
+/// Saves (or clears, with `None`) the mark.
 pub fn set_watch_mark(
     conn: &Connection,
     uid: &str,
@@ -159,7 +162,7 @@ pub fn set_watch_mark(
     Ok(())
 }
 
-/// Los que tienen dirección fija: `(uid, name, platform, address)`.
+/// The ones with a fixed address: `(uid, name, platform, address)`.
 pub fn devices_with_address(conn: &Connection) -> Vec<(String, String, String, String)> {
     let mut stmt = match conn.prepare(
         "SELECT uid, name, platform, address FROM devices
@@ -180,7 +183,7 @@ pub fn forget_device(conn: &Connection, uid: &str) -> Result<()> {
     Ok(())
 }
 
-/// "Lo vi recién, y se llama así". Lo escribe cada `Hello`.
+/// "Just saw it, and it's called that." Written on every `Hello`.
 pub fn touch_device(conn: &Connection, uid: &str, name: &str) {
     let _ = conn.execute(
         "UPDATE devices SET last_seen = ?1, name = ?2 WHERE uid = ?3",
@@ -188,9 +191,9 @@ pub fn touch_device(conn: &Connection, uid: &str, name: &str) {
     );
 }
 
-/// Una clave distinta para un uid conocido puede ser una reinstalación del otro
-/// lado — o alguien haciéndose pasar por él. No se resuelve solo: queda
-/// registrado y hay que desvincular a mano para volver a parear.
+/// A different key for a known uid could be a reinstall on the other end —
+/// or someone impersonating it. It doesn't resolve itself: it gets logged,
+/// and unpairing by hand is required to pair again.
 pub fn log_key_mismatch(conn: &Connection, uid: &str, name: &str) {
     log::warn!("[pair] different key for {name} ({uid}) - connection rejected");
     let _ = conn.execute(
@@ -200,7 +203,7 @@ pub fn log_key_mismatch(conn: &Connection, uid: &str, name: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// Presentación
+// Presentation
 // ---------------------------------------------------------------------------
 
 pub fn library_counts(conn: &Connection) -> (i64, i64) {
@@ -217,15 +220,16 @@ pub fn library_counts(conn: &Connection) -> (i64, i64) {
     (tracks, playlists)
 }
 
-/// Quién soy: uid estable y nombre visible.
+/// Who am I: stable uid and visible name.
 pub fn me(conn: &Connection) -> Result<(String, String)> {
     let uid = db::this_device_uid(conn)?;
     let name = db::device_name(conn)?;
     Ok((uid, name))
 }
 
-/// En qué corro. `server` no sale de acá: lo declara el binario headless, que
-/// no es ninguna de estas plataformas a los efectos de la UI del otro lado.
+/// What platform I'm running on. `server` doesn't come out of here: it's
+/// declared by the headless binary, which isn't any of these platforms as
+/// far as the UI on the other end is concerned.
 pub fn platform() -> String {
     if cfg!(target_os = "android") {
         "android".into()
@@ -238,21 +242,22 @@ pub fn platform() -> String {
     }
 }
 
-/// Plataforma que declara el server de archivo. La UI la usa para mostrarlo
-/// distinto de un dispositivo con pantalla y para no esperar que aparezca en
-/// mDNS.
+/// Platform declared by the file server. The UI uses it to show it
+/// differently from a device with a screen, and to not expect it to show up
+/// on mDNS.
 pub const PLATFORM_SERVER: &str = "server";
 
 // ---------------------------------------------------------------------------
-// Token de vinculación (dispositivos sin pantalla)
+// Pairing token (screenless devices)
 // ---------------------------------------------------------------------------
 
-/// Compara dos secretos sin cortar en la primera diferencia.
+/// Compares two secrets without short-circuiting on the first difference.
 ///
-/// El código de 6 dígitos lo compara una persona; un token lo compara el
-/// server, y ahí sí importa cuánto tarda en decir que no: con una comparación
-/// que corta temprano, el tiempo de respuesta filtra cuántos caracteres del
-/// principio son correctos, y el token se adivina de a uno.
+/// The 6-digit code is compared by a person; a token is compared by the
+/// server, and there it does matter how long it takes to say no: with a
+/// comparison that short-circuits early, the response time leaks how many
+/// characters from the start are correct, and the token gets guessed one
+/// character at a time.
 pub fn secret_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {
@@ -277,46 +282,46 @@ mod tests {
     }
 
     #[test]
-    fn el_par_de_claves_se_genera_una_sola_vez() {
+    fn the_key_pair_is_generated_only_once() {
         let conn = db();
         let (priv1, pub1) = keypair(&conn).unwrap();
         let (priv2, pub2) = keypair(&conn).unwrap();
-        assert_eq!(priv1, priv2, "regenerar la clave privada rompe todo vínculo");
+        assert_eq!(priv1, priv2, "regenerating the private key breaks every link");
         assert_eq!(pub1, pub2);
         assert!(!priv1.is_empty());
     }
 
     #[test]
-    fn una_clave_distinta_para_un_uid_conocido_no_pasa_por_confiada() {
+    fn a_different_key_for_a_known_uid_is_not_trusted() {
         let conn = db();
-        store_device(&conn, "peer-1", "Celu", "android", b"clave-original").unwrap();
+        store_device(&conn, "peer-1", "Phone", "android", b"original-key").unwrap();
 
         assert!(matches!(
-            known_state(&conn, "peer-1", b"clave-original"),
+            known_state(&conn, "peer-1", b"original-key"),
             Known::Trusted
         ));
         assert!(matches!(
-            known_state(&conn, "peer-1", b"otra-clave"),
+            known_state(&conn, "peer-1", b"other-key"),
             Known::KeyMismatch
         ));
         assert!(matches!(
-            known_state(&conn, "peer-2", b"clave-original"),
+            known_state(&conn, "peer-2", b"original-key"),
             Known::Unknown
         ));
     }
 
     #[test]
-    fn desvincular_saca_al_dispositivo_de_los_confiados() {
+    fn unpairing_removes_the_device_from_trusted() {
         let conn = db();
-        store_device(&conn, "peer-1", "Celu", "android", b"k").unwrap();
+        store_device(&conn, "peer-1", "Phone", "android", b"k").unwrap();
         forget_device(&conn, "peer-1").unwrap();
         assert!(matches!(known_state(&conn, "peer-1", b"k"), Known::Unknown));
     }
 
     #[test]
-    fn el_pairing_queda_registrado() {
+    fn pairing_gets_logged() {
         let conn = db();
-        store_device(&conn, "peer-1", "Celu", "android", b"k").unwrap();
+        store_device(&conn, "peer-1", "Phone", "android", b"k").unwrap();
         let logged: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sync_log WHERE peer = 'peer-1' AND kind = 'paired'",
@@ -328,40 +333,40 @@ mod tests {
     }
 
     #[test]
-    fn la_direccion_fija_se_guarda_y_se_recupera() {
+    fn the_fixed_address_is_saved_and_retrieved() {
         let conn = db();
         store_device(&conn, "srv-1", "Server", PLATFORM_SERVER, b"k").unwrap();
-        store_device(&conn, "celu", "Celu", "android", b"k2").unwrap();
+        store_device(&conn, "phone", "Phone", "android", b"k2").unwrap();
         assert!(devices_with_address(&conn).is_empty());
 
-        set_device_address(&conn, "srv-1", "casa.ejemplo:7420").unwrap();
+        set_device_address(&conn, "srv-1", "home.example:7420").unwrap();
         let listed = devices_with_address(&conn);
-        assert_eq!(listed.len(), 1, "el peer de la LAN no tiene que tener dirección");
+        assert_eq!(listed.len(), 1, "the LAN peer shouldn't have an address");
         assert_eq!(listed[0].0, "srv-1");
-        assert_eq!(listed[0].3, "casa.ejemplo:7420");
+        assert_eq!(listed[0].3, "home.example:7420");
     }
 
-    /// La marca sobrevive al cierre de la app: es lo que evita comparar las
-    /// dos bibliotecas enteras en cada arranque.
+    /// The mark survives the app closing: it's what avoids comparing the two
+    /// full libraries on every startup.
     #[test]
-    fn la_marca_se_guarda_y_se_recupera() {
+    fn the_mark_is_saved_and_retrieved() {
         let conn = db();
         store_device(&conn, "srv-1", "Server", PLATFORM_SERVER, b"k").unwrap();
-        assert!(watch_mark(&conn, "srv-1").is_none(), "todavía no sabemos nada");
+        assert!(watch_mark(&conn, "srv-1").is_none(), "we don't know anything yet");
 
         let m = crate::wire::Mark { epoch: 7, rev: 42 };
         set_watch_mark(&conn, "srv-1", Some(m)).unwrap();
         assert_eq!(watch_mark(&conn, "srv-1"), Some(m));
 
         set_watch_mark(&conn, "srv-1", None).unwrap();
-        assert!(watch_mark(&conn, "srv-1").is_none(), "se tiene que poder borrar");
+        assert!(watch_mark(&conn, "srv-1").is_none(), "it must be possible to clear it");
     }
 
-    /// Y se va con el dispositivo: dejarla ahí haría que volver a vincular el
-    /// mismo server arranque creyendo que sabe algo de una biblioteca que ya
-    /// no tiene nada que ver.
+    /// And it leaves with the device: leaving it there would make repairing
+    /// the same server start out believing it knows something about a
+    /// library that has nothing to do with it anymore.
     #[test]
-    fn desvincular_se_lleva_la_marca() {
+    fn unpairing_takes_the_mark_with_it() {
         let conn = db();
         store_device(&conn, "srv-1", "Server", PLATFORM_SERVER, b"k").unwrap();
         set_watch_mark(&conn, "srv-1", Some(crate::wire::Mark { epoch: 1, rev: 2 })).unwrap();
@@ -371,16 +376,16 @@ mod tests {
     }
 
     #[test]
-    fn desvincular_el_server_se_lleva_su_direccion() {
+    fn unpairing_the_server_takes_its_address_with_it() {
         let conn = db();
         store_device(&conn, "srv-1", "Server", PLATFORM_SERVER, b"k").unwrap();
-        set_device_address(&conn, "srv-1", "casa.ejemplo:7420").unwrap();
+        set_device_address(&conn, "srv-1", "home.example:7420").unwrap();
         forget_device(&conn, "srv-1").unwrap();
         assert!(devices_with_address(&conn).is_empty());
     }
 
     #[test]
-    fn el_token_se_compara_entero() {
+    fn the_token_is_compared_in_full() {
         assert!(secret_eq("abc123", "abc123"));
         assert!(!secret_eq("abc123", "abc124"));
         assert!(!secret_eq("abc123", "abc12"));

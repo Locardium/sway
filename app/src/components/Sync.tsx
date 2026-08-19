@@ -43,15 +43,15 @@ import {
 } from '../api';
 
 interface Props {
-  /// El árbol de playlists ya cargado por App: el editor de scope necesita los
-  /// uids, que es lo único que significa algo del otro lado.
+  /// The playlist tree already loaded by App: the scope editor needs the
+  /// uids, which are the only thing that means anything on the other side.
   nodes: PlaylistNode[];
   onClose: () => void;
   onStatus: (msg: string) => void;
   onLibraryChanged: () => void | Promise<void>;
 }
 
-/// Qué pasaría (o qué está por pasar) con un dispositivo.
+/// What would happen (or is about to happen) with a device.
 function PlanSummary({ ev }: { ev: SyncPlanEvent }) {
   const p = ev.plan;
   const rows: [string, string][] = [];
@@ -100,8 +100,8 @@ function PlanSummary({ ev }: { ev: SyncPlanEvent }) {
   );
 }
 
-/// Transferencia en curso. Con archivos de 40 MB por una red doméstica, sin
-/// esto la app parece colgada.
+/// Transfer in progress. With 40 MB files over a home network, without
+/// this the app looks frozen.
 function TransferProgress({ p }: { p: SyncProgress }) {
   const pct = p.total > 0 ? Math.min(100, (p.done / p.total) * 100) : 0;
   return (
@@ -137,31 +137,33 @@ interface ScopeEditorProps {
   scope: Scope;
   onMode: (mode: string) => void;
   onDirection: (direction: string) => void;
-  /// Varias filas de una: un click en una carpeta escribe todo su subárbol.
+  /// Several rows at once: clicking a folder writes its entire subtree.
   onToggle: (changes: { uid: string; on: boolean }[]) => void;
 }
 
-/// Lo que hace un dispositivo: dirección y qué se lleva. Es lo mismo para este
-/// dispositivo y para cualquier otro — la dirección describe al dispositivo,
-/// no al vínculo, así que entre dos algo se mueve sólo si uno manda y el otro
-/// recibe.
+/// What a device does: direction and what it carries. It's the same for this
+/// device and for any other — direction describes the device, not the link,
+/// so between two devices something moves only if one sends and the other
+/// receives.
 function ScopeEditor({ nodes, scope, onMode, onDirection, onToggle }: ScopeEditorProps) {
   const selected = useMemo(() => new Set(scope.selected), [scope.selected]);
 
-  /// El árbol se recorre UNA vez por render, de abajo hacia arriba.
+  /// The tree is walked ONCE per render, bottom-up.
   ///
-  /// Antes cada nodo salía a buscar su propio subárbol, y cada paso de esa
-  /// búsqueda filtraba la lista entera de nodos. Con unas cuantas playlists eso
-  /// son millones de comparaciones por render — y hay un render al abrir el
-  /// panel y otro en cada tilde. De ahí venía el freeze, no de las consultas.
+  /// Previously each node went looking for its own subtree, and every step of
+  /// that search filtered the entire node list. With a decent number of
+  /// playlists that's millions of comparisons per render — and there's a
+  /// render on opening the panel and another on every checkbox. That was the
+  /// source of the freeze, not the queries.
   ///
-  /// Sale todo de acá:
-  /// - `kids`: hijos por padre, ya ordenados.
-  /// - `leaves`: uids de las playlists que cuelgan de cada nodo (o el suyo, si
-  ///   es una). Sólo las playlists guardan estado; una carpeta es su suma.
-  /// - `onCount`: cuántas de ésas sincronizan hoy, contando lo heredado de una
-  ///   carpeta marcada. Eso último es cómo se guardaba antes y hay bases con
-  ///   esas filas, así que hay que seguir leyéndolo bien.
+  /// Everything comes out of here:
+  /// - `kids`: children by parent, already sorted.
+  /// - `leaves`: uids of the playlists hanging off each node (or its own, if
+  ///   it is one). Only playlists hold state; a folder is their sum.
+  /// - `onCount`: how many of those sync today, counting what's inherited
+  ///   from a checked folder. That last part is how it used to be stored and
+  ///   there are databases with rows like that, so it still needs to be read
+  ///   correctly.
   const view = useMemo(() => {
     const kids = new Map<number | null, PlaylistNode[]>();
     for (const n of nodes) {
@@ -196,14 +198,15 @@ function ScopeEditor({ nodes, scope, onMode, onDirection, onToggle }: ScopeEdito
     return { kids, leaves, onCount };
   }, [nodes, selected]);
 
-  /// Un click escribe el subárbol entero, explícito, y apaga las filas de
-  /// carpeta que hubiera.
+  /// A click writes the entire subtree, explicitly, and turns off any folder
+  /// rows that existed.
   ///
-  /// Antes se guardaba la marca EN la carpeta y el subárbol salía por herencia.
-  /// Eso hacía imposible desmarcar una sola playlist de adentro: la fila de la
-  /// carpeta la volvía a incluir del lado Rust, así que el tilde no se podía
-  /// sacar y había que deshabilitar los hijos para que no mintiera. Con todo
-  /// explícito, lo que se ve en la pantalla es exactamente lo que hay guardado.
+  /// Previously the flag was stored ON the folder and the subtree followed by
+  /// inheritance. That made it impossible to uncheck a single playlist
+  /// inside: the folder row would re-include it on the Rust side, so the
+  /// checkbox couldn't be cleared and the children had to be disabled so they
+  /// wouldn't lie. With everything explicit, what's on screen is exactly
+  /// what's stored.
   function toggle(n: PlaylistNode, on: boolean) {
     const targets = new Set(view.leaves.get(n.id) ?? []);
     const wanted = new Set<string>();
@@ -214,8 +217,8 @@ function ScopeEditor({ nodes, scope, onMode, onDirection, onToggle }: ScopeEdito
     }
     const changes = [
       ...[...wanted].filter((u) => !selected.has(u)).map((uid) => ({ uid, on: true })),
-      // Acá caen también las filas de carpeta: no están en `wanted` —que es
-      // sólo de playlists— así que se apagan solas.
+      // Folder rows fall in here too: they're not in `wanted` — which is
+      // playlists only — so they turn themselves off.
       ...[...selected].filter((u) => !wanted.has(u)).map((uid) => ({ uid, on: false })),
     ];
     if (changes.length > 0) onToggle(changes);
@@ -225,8 +228,8 @@ function ScopeEditor({ nodes, scope, onMode, onDirection, onToggle }: ScopeEdito
     (view.kids.get(parentId) ?? []).map((n) => {
         const total = (view.leaves.get(n.id) ?? []).length;
         const onCount = view.onCount.get(n.id) ?? 0;
-        // La carpeta refleja a sus hijas y nada más: todas marcadas es tilde,
-        // algunas es guioncito, ninguna es vacío.
+        // The folder reflects its children and nothing else: all checked is
+        // checked, some checked is a dash, none checked is empty.
         const on = total > 0 && onCount === total;
         const partial = onCount > 0 && onCount < total;
         return (
@@ -238,8 +241,8 @@ function ScopeEditor({ nodes, scope, onMode, onDirection, onToggle }: ScopeEdito
                 ref={(el) => {
                   if (el) el.indeterminate = partial;
                 }}
-                // Una carpeta vacía no tiene nada que marcar. Los hijos de una
-                // carpeta marcada SÍ se pueden desmarcar de a uno.
+                // An empty folder has nothing to check. Children of a checked
+                // folder CAN be unchecked one at a time.
                 disabled={total === 0}
                 onChange={(e) => toggle(n, e.target.checked)}
               />
@@ -310,26 +313,26 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
   const [scanning, setScanning] = useState(false);
   const [freeing, setFreeing] = useState(false);
 
-  // Red y batería. `null` en un campo = no se sabe, que es distinto de saber
-  // que no: una PC de escritorio no tiene batería, y ahí la opción no se
-  // muestra en vez de mostrarse sin sentido.
+  // Network and battery. `null` in a field = not known, which is different
+  // from knowing it doesn't apply: a desktop PC has no battery, and there
+  // the option is hidden instead of showing up making no sense.
   const [conditions, setConditions] = useState<Conditions | null>(null);
   const [limits, setLimits] = useState<SyncLimits | null>(null);
 
-  // Server de archivo: no se descubre, se escribe. Se acuerda del host entre
-  // intentos (equivocarse en el token es lo más probable) pero nunca del
-  // token.
+  // Archive server: it isn't discovered, it's typed in. It remembers the
+  // host between attempts (getting the token wrong is the most likely
+  // mistake) but never the token.
   const [serverHost, setServerHost] = useState('');
   const [serverPort, setServerPort] = useState('7420');
   const [serverToken, setServerToken] = useState('');
   const [addingServer, setAddingServer] = useState(false);
 
-  /// Resumen por dispositivo para la lista: dirección y selección. La
-  /// dirección describe un vínculo, así que no existe para "este dispositivo"
-  /// suelto — pero sí tiene que verse sin entrar a cada uno.
+  /// Per-device summary for the list: direction and selection. Direction
+  /// describes a link, so it doesn't exist for "this device" on its own —
+  /// but it still has to be visible without opening each one.
   const [summaries, setSummaries] = useState<Record<string, string>>({});
 
-  // Detalle de un dispositivo. `null` = la lista.
+  // A single device's detail. `null` = the list.
   const [openUid, setOpenUid] = useState<string | null>(null);
   const [peerScope, setPeerScope] = useState<Scope>({
     mode: 'all',
@@ -342,17 +345,17 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
     listPeers().then(setPeers).catch(() => {});
   }, []);
 
-  /// El estado de espacio se recalcula recorriendo la biblioteca, así que no
-  /// puede correr una vez por cada `library-changed`: durante un sync llegan de
-  /// a montones y el celular se traba. Con la última alcanza.
+  /// Storage state is recalculated by walking the library, so it can't run
+  /// once per `library-changed`: during a sync those arrive in bunches and
+  /// the phone chokes. The last one is enough.
   const localTimer = useRef<ReturnType<typeof setTimeout>>();
   const reloadLocal = useCallback((immediate = false) => {
     clearTimeout(localTimer.current);
     const run = () => {
       storageStatus().then(setStorage).catch(() => {});
     };
-    // Al abrir el panel no hay nada que agrupar: la espera es puro retraso
-    // mirando un panel vacío. El respiro es para las ráfagas de después.
+    // When opening the panel there's nothing to batch: waiting is pure delay
+    // staring at an empty panel. The debounce is for the bursts that follow.
     if (immediate) run();
     else localTimer.current = setTimeout(run, 600);
   }, []);
@@ -379,8 +382,9 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
 
     const uns = [
       listen('peers-changed', reloadPeers),
-      // Envuelto: el handler recibe el evento, y pasárselo como `immediate`
-      // saltearía el respiro justo en las ráfagas para las que existe.
+      // Wrapped: the handler receives the event, and passing it as
+      // `immediate` would skip the debounce exactly during the bursts it
+      // exists for.
       listen('library-changed', () => reloadLocal()),
       listen<PairingRequest>('pairing-request', (e) => setPairing(e.payload)),
       listen<PairingDone>('pairing-done', (e) => {
@@ -406,7 +410,7 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
           delete next[uid];
           return next;
         });
-        // El plan viejo quedó obsoleto: lo que se transfirió ya no falta.
+        // The old plan is stale now: what got transferred is no longer missing.
         setPlans((p) => {
           const next = { ...p };
           delete next[uid];
@@ -435,8 +439,8 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadPeers, reloadLocal, onStatus]);
 
-  // Resumen de cada dispositivo vinculado, para no tener que entrar a todos
-  // para saber cómo está configurado.
+  // Summary for every linked device, so you don't have to open each one to
+  // see how it's configured.
   useEffect(() => {
     const paired = peers.filter((p) => p.paired).map((p) => p.uid);
     if (paired.length === 0) return;
@@ -454,7 +458,7 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
     };
   }, [peers]);
 
-  // Al abrir el detalle de un dispositivo se leen sus reglas y su scope.
+  // Opening a device's detail reads its rules and its scope.
   useEffect(() => {
     if (!openUid) return;
     getScope(openUid).then(setPeerScope).catch(() => {});
@@ -496,12 +500,14 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
     }
   }
 
-  /// El tilde se pone en el acto y el guardado va por atrás, sin `await`.
+  /// The checkbox flips instantly and the save happens in the background,
+  /// without `await`.
   ///
-  /// Esperar la ida y vuelta antes de soltar el click hacía que tildar dos
-  /// cosas seguidas se sintiera trabado, y no había nada que ganar: el estado
-  /// que mira la pantalla es el de acá, y si el guardado falla se avisa y se
-  /// recarga del backend, que es la única fuente de verdad.
+  /// Waiting for the round trip before releasing the click made checking two
+  /// things in a row feel sluggish, and there was nothing to gain: the state
+  /// the screen watches is the local one, and if the save fails it's
+  /// reported and reloaded from the backend, which is the only source of
+  /// truth.
   function changeScope(deviceUid: string, next: Scope, apply: () => Promise<void>) {
     if (deviceUid === myUid) setMyScope(next);
     else setPeerScope(next);
@@ -511,8 +517,8 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
       })
       .catch((e) => {
         onStatus(String(e));
-        // El optimismo salió mal: volver a lo que dice la DB, que es lo único
-        // que vale.
+        // The optimism didn't pay off: fall back to what the DB says, which
+        // is the only thing that counts.
         getScope(deviceUid)
           .then(deviceUid === myUid ? setMyScope : setPeerScope)
           .catch(() => {});
@@ -552,8 +558,8 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
     }
   }
 
-  // El código va sobre todo lo demás: es una decisión de seguridad y no puede
-  // quedar escondida detrás de un scroll.
+  // The code goes above everything else: it's a security decision and can't
+  // stay hidden behind a scroll.
   if (pairing) {
     return (
       <Modal
@@ -593,8 +599,8 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
           <section>
             <div className="set-row">
               <div className="set-label">
-                {/* Un server no está ni deja de estar "en esta red": vive
-                    afuera y se lo llama por su dirección. */}
+                {/* A server neither is nor isn't "on this network": it lives
+                    outside and is reached by its address. */}
                 <span>
                   {isServer
                     ? openPeer.online
@@ -648,11 +654,11 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
 
           <section>
             <h4>What {openPeer.name} does</h4>
-            {/* Un server no elige: existe para tener todo y para poder
-                devolvértelo. Dejarlo configurable sería dejarte romper el
-                respaldo en silencio — con media biblioteca seleccionada el
-                archivo queda con agujeros, y en "solo envía" el día que
-                quieras recuperar no te devuelve nada. */}
+            {/* A server doesn't choose: it exists to hold everything and be
+                able to give it back. Making it configurable would let you
+                silently break the backup — with half the library selected
+                the archive ends up with gaps, and on "only sends" the day
+                you want to restore it gives you nothing back. */}
             {isServer ? (
               <>
                 <div className="set-row">
@@ -667,9 +673,10 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
                   it still backs up everything it has. Same song from three devices takes up space
                   once: files are identified by their contents.
                 </p>
-                {/* Lo que el server acepte no alcanza: si este dispositivo no
-                    manda, no manda tampoco acá. Decirlo en el panel del server
-                    es el único lugar donde alguien lo va a leer a tiempo. */}
+                {/* What the server accepts isn't enough: if this device
+                    doesn't send, it doesn't send here either. Saying so in
+                    the server's panel is the only place someone will read
+                    it in time. */}
                 {(myScope.direction === 'receive' || myScope.direction === 'off') && (
                   <p className="set-note warn">
                     This device is set to{' '}
@@ -858,9 +865,9 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
                       <small>
                         {p.paired && summaries[p.uid]
                           ? summaries[p.uid]
-                          : // Un server nunca está "en esta red": vive afuera y
-                            // se lo llama por su dirección, así que decirlo
-                            // sería mentir en los dos estados.
+                          : // A server is never "on this network": it lives
+                            // outside and is reached by its address, so
+                            // saying it would be lying in both states.
                             p.platform === PLATFORM_SERVER
                             ? `Archive server · ${p.addrs[0] ?? '?'}:${p.port}`
                             : !p.online
@@ -885,10 +892,11 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
                           Settings <ChevronRight size={13} />
                         </button>
                       ) : p.platform === PLATFORM_SERVER ? (
-                        // Un server no se vincula con el código de seis
-                        // dígitos: hay que darle su token. Ofrecer el botón de
-                        // siempre mandaría el flujo de la red local, que no lo
-                        // lleva, y el server contestaría que el token no es.
+                        // A server doesn't pair with the six-digit code: it
+                        // needs its token instead. Offering the usual button
+                        // would send it through the local-network flow,
+                        // which it doesn't support, and the server would
+                        // reply that the token is missing.
                         <button disabled title="Add it again below, with its token">
                           Needs token
                         </button>
@@ -923,8 +931,8 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
         {limits && conditions && (conditions.metered !== null || conditions.batteryPct !== null) && (
           <section>
             <h4>When to sync automatically</h4>
-            {/* Sólo se muestra lo que este dispositivo puede medir. Una PC de
-                escritorio no tiene batería: preguntar por ella sería ruido. */}
+            {/* Only what this device can measure is shown. A desktop PC has
+                no battery: asking about it would just be noise. */}
             {conditions.metered !== null && (
               <div className="set-row">
                 <div className="set-label">
@@ -1026,8 +1034,8 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
                 setAddingServer(true);
                 pairWithServer(serverHost.trim(), port, serverToken.trim())
                   .then((name) => {
-                    // El token no se guarda ni se deja escrito: ya cumplió, y
-                    // es una contraseña.
+                    // The token isn't saved or left typed in: it's already
+                    // done its job, and it's a password.
                     setServerToken('');
                     onStatus(`${name} paired`);
                     reloadPeers();

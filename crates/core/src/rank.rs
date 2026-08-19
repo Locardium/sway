@@ -1,18 +1,18 @@
-//! Ranks fraccionales (estilo LexoRank) para el orden manual de playlists,
-//! carpetas y tracks dentro de una playlist.
+//! Fractional ranks (LexoRank-style) for the manual ordering of playlists,
+//! folders, and tracks within a playlist.
 //!
-//! Por qué no un `position INTEGER` secuencial: mover un elemento renumera a
-//! todos sus hermanos, así que dos dispositivos que reordenan la misma
-//! playlist offline producen escrituras que se pisan entre sí — la única
-//! resolución posible sería quedarse con un orden y tirar el otro entero.
+//! Why not a sequential `position INTEGER`: moving an element renumbers all
+//! of its siblings, so two devices reordering the same playlist offline
+//! produce writes that clobber each other — the only possible resolution
+//! would be to keep one order and throw away the other entirely.
 //!
-//! Con un rank fraccional, insertar entre dos vecinos genera un string
-//! intermedio y **no toca ninguna otra fila**. Dos reordenamientos
-//! concurrentes tocan filas distintas y mergean sin conflicto.
+//! With a fractional rank, inserting between two neighbors generates an
+//! intermediate string and **touches no other row**. Two concurrent
+//! reorderings touch different rows and merge without conflict.
 //!
-//! El alfabeto son 62 caracteres ASCII en orden ascendente, así que comparar
-//! los ranks como texto (colación BINARY, la default de SQLite) da el mismo
-//! resultado que compararlos dígito a dígito. `ORDER BY rank` alcanza.
+//! The alphabet is 62 ASCII characters in ascending order, so comparing
+//! ranks as text (BINARY collation, SQLite's default) gives the same result
+//! as comparing them digit by digit. `ORDER BY rank` is enough.
 
 const ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 const BASE: i32 = 62;
@@ -21,15 +21,15 @@ fn digit(c: u8) -> i32 {
     ALPHABET.iter().position(|&a| a == c).unwrap_or(0) as i32
 }
 
-/// Genera un rank estrictamente entre `prev` y `next`.
-/// `None` significa "sin vecino de ese lado" (principio o fin de la lista).
+/// Generates a rank strictly between `prev` and `next`.
+/// `None` means "no neighbor on that side" (start or end of the list).
 ///
-/// Nunca devuelve un string terminado en el dígito mínimo: sólo se emite un
-/// dígito nuevo cuando hay lugar real entre los dos vecinos, así que siempre
-/// queda espacio para insertar de nuevo a cualquiera de los dos lados.
+/// Never returns a string ending in the minimum digit: a new digit is only
+/// emitted when there's real room between the two neighbors, so there's
+/// always space to insert again on either side.
 pub fn between(prev: Option<&str>, next: Option<&str>) -> String {
-    // Orden invertido (no debería pasar): degradar a "después de prev" en vez
-    // de generar un rank inválido que rompa el orden en silencio.
+    // Inverted order (shouldn't happen): degrade to "after prev" instead of
+    // generating an invalid rank that silently breaks the order.
     if let (Some(p), Some(n)) = (prev, next) {
         if p >= n {
             return between(Some(p), None);
@@ -41,23 +41,23 @@ pub fn between(prev: Option<&str>, next: Option<&str>) -> String {
     let mut i = 0;
     loop {
         let pd = if i < p.len() { digit(p[i]) } else { 0 };
-        // Pasado el final de `next` el hueco llega hasta el tope del alfabeto;
-        // si no hay `next`, también.
+        // Past the end of `next` the gap reaches the top of the alphabet;
+        // same if there's no `next`.
         let nd = if i < n.len() { digit(n[i]) } else { BASE };
         if nd - pd > 1 {
             out.push(ALPHABET[((pd + nd) / 2) as usize]);
             break;
         }
-        // Sin lugar en este dígito: copiar el de `prev` y afinar en el
-        // siguiente. El string se alarga sólo lo necesario.
+        // No room at this digit: copy `prev`'s and refine in the next one.
+        // The string only grows as much as needed.
         out.push(if i < p.len() { p[i] } else { ALPHABET[0] });
         i += 1;
     }
-    String::from_utf8(out).expect("alfabeto ASCII")
+    String::from_utf8(out).expect("ASCII alphabet")
 }
 
-/// Ranks para una lista que se numera de cero (import inicial, migración).
-/// Espaciados para dejar lugar entre medio sin tener que alargar strings.
+/// Ranks for a list numbered from zero (initial import, migration).
+/// Spaced to leave room in between without having to lengthen strings.
 pub fn initial_ranks(count: usize) -> Vec<String> {
     let mut out = Vec::with_capacity(count);
     let mut prev: Option<String> = None;
@@ -69,7 +69,7 @@ pub fn initial_ranks(count: usize) -> Vec<String> {
     out
 }
 
-/// Rank para insertar en `index` dentro de `siblings` (ya ordenados).
+/// Rank to insert at `index` within `siblings` (already ordered).
 pub fn rank_at(siblings: &[String], index: usize) -> String {
     let index = index.min(siblings.len());
     let prev = if index == 0 { None } else { siblings.get(index - 1).map(|s| s.as_str()) };
@@ -94,8 +94,8 @@ mod tests {
 
     #[test]
     fn repeated_insertion_between_two_neighbours_keeps_order() {
-        // El peor caso: siempre meter en el mismo hueco. Los strings se
-        // alargan, pero el orden nunca se rompe.
+        // The worst case: always inserting into the same gap. The strings
+        // grow longer, but the order never breaks.
         let mut lo = between(None, None);
         let hi = between(Some(&lo), None);
         for _ in 0..200 {
@@ -130,11 +130,11 @@ mod tests {
 
     #[test]
     fn never_ends_in_min_digit() {
-        // Un rank terminado en '0' no deja lugar para insertar justo antes
-        // sin alargar indefinidamente; el generador no debe producirlos.
+        // A rank ending in '0' leaves no room to insert right before it
+        // without lengthening indefinitely; the generator must not produce them.
         let mut prev = between(None, None);
         for _ in 0..100 {
-            assert!(!prev.ends_with('0'), "rank termina en 0: {prev}");
+            assert!(!prev.ends_with('0'), "rank ends in 0: {prev}");
             prev = between(None, Some(&prev));
         }
     }

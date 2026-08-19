@@ -1,17 +1,17 @@
 #!/usr/bin/env node
-// Fase 0 PoC — Generador de "iTunes Music Library.xml"
+// Phase 0 PoC — "iTunes Music Library.xml" generator
 //
-// Escanea una carpeta de audio y emite un plist que replica el formato exacto
-// de iTunes/Music en Windows, para que TANTO Serato COMO Rekordbox lo importen
-// (Rekordbox es más estricto que Serato con el formato).
+// Scans an audio folder and emits a plist that replicates the exact format
+// of iTunes/Music on Windows, so that BOTH Serato AND Rekordbox can import it
+// (Rekordbox is stricter than Serato about the format).
 //
-// Uso:
-//   node generate.mjs "C:\\ruta\\a\\tu\\Musica" [salida.xml]
+// Usage:
+//   node generate.mjs "C:\\path\\to\\your\\Music" [output.xml]
 //
-// - Cada subcarpeta de primer nivel se convierte en una playlist, más una
-//   playlist maestra "Library" con todo.
-// - Tags (Name/Artist/Album/Genre/duración/sample rate/BPM/año) vía
-//   music-metadata; si falla, cae al nombre de archivo.
+// - Each top-level subfolder becomes a playlist, plus a
+//   master "Library" playlist with everything.
+// - Tags (Name/Artist/Album/Genre/duration/sample rate/BPM/year) via
+//   music-metadata; if it fails, falls back to the filename.
 
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -21,7 +21,7 @@ let parseFile = null;
 try {
   ({ parseFile } = await import('music-metadata'));
 } catch {
-  console.warn('[warn] music-metadata no instalado — usando nombre de archivo como título. Corré `pnpm install`.\n');
+  console.warn('[warn] music-metadata not installed — using filename as title. Run `pnpm install`.\n');
 }
 
 const AUDIO_EXT = new Set(['.flac', '.mp3', '.wav', '.m4a', '.aac', '.aif', '.aiff', '.ogg', '.opus']);
@@ -39,11 +39,11 @@ const KIND_BY_EXT = {
 };
 
 function xmlEscape(s) {
-  // XML 1.0 prohíbe NUL y la mayoría de chars de control. ID3 usa NUL para
-  // separar valores múltiples (ej. varios Album Artist), y quedan crudos en
-  // los tags. Serato RECHAZA el XML si aparece un NUL → hay que sanitizar.
-  // Colapso runs de control chars (menos tab/LF/CR) a un separador " / ".
-  // Seguro para URLs (no contienen control chars).
+  // XML 1.0 forbids NUL and most control chars. ID3 uses NUL to
+  // separate multiple values (e.g. multiple Album Artist), and they end up raw in
+  // the tags. Serato REJECTS the XML if a NUL appears → needs sanitizing.
+  // Collapse runs of control chars (except tab/LF/CR) into a " / " separator.
+  // Safe for URLs (they don't contain control chars).
   return String(s)
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]+/g, ' / ')
     .replace(/&/g, '&amp;')
@@ -52,13 +52,13 @@ function xmlEscape(s) {
     .replace(/"/g, '&quot;');
 }
 
-// Fecha en formato iTunes: 2026-07-23T03:11:37Z (UTC, sin milisegundos).
+// Date in iTunes format: 2026-07-23T03:11:37Z (UTC, no milliseconds).
 function itunesDate(d) {
   return new Date(d).toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
-// <Location> formato iTunes Windows: file://localhost/C:/Carpeta/archivo.flac
-// con cada segmento percent-codificado. El ':' del drive se conserva.
+// <Location> in iTunes Windows format: file://localhost/C:/Folder/file.flac
+// with each segment percent-encoded. The drive's ':' is kept as-is.
 function toItunesLocation(absPath) {
   const isWin = /^[a-zA-Z]:[\\/]/.test(absPath);
   const normalized = absPath.replace(/\\/g, '/');
@@ -73,7 +73,7 @@ function toItunesLocation(absPath) {
     : `file://localhost${joined.startsWith('/') ? '' : '/'}${joined}`;
 }
 
-// Persistent ID = 16 hex uppercase, estable (derivado del path).
+// Persistent ID = 16 uppercase hex chars, stable (derived from the path).
 function persistentId(seed) {
   return crypto.createHash('md5').update(seed).digest('hex').slice(0, 16).toUpperCase();
 }
@@ -84,7 +84,7 @@ async function walk(dir) {
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
   } catch (e) {
-    console.warn(`[warn] no se pudo leer ${dir}: ${e.message}`);
+    console.warn(`[warn] could not read ${dir}: ${e.message}`);
     return out;
   }
   for (const ent of entries) {
@@ -121,7 +121,7 @@ async function readMeta(file) {
       if (f.sampleRate) meta.sampleRate = f.sampleRate;
       if (f.bitrate) meta.bitRateKbps = Math.round(f.bitrate / 1000);
     } catch (e) {
-      console.warn(`[warn] tags ilegibles en ${path.basename(file)}: ${e.message}`);
+      console.warn(`[warn] unreadable tags in ${path.basename(file)}: ${e.message}`);
     }
   }
   return meta;
@@ -132,7 +132,7 @@ function kv(key, type, value) {
   return `\t\t\t<key>${xmlEscape(key)}</key><${type}>${inner}</${type}>\n`;
 }
 
-// Orden de campos calcado del export real de iTunes (Rekordbox lo espera así).
+// Field order copied from a real iTunes export (Rekordbox expects it this way).
 function trackDict(id, file, meta, stat) {
   const ext = path.extname(file).toLowerCase();
   const mtime = stat ? stat.mtime : new Date();
@@ -161,7 +161,7 @@ function trackDict(id, file, meta, stat) {
   return s;
 }
 
-// Playlist maestra "Library" (contiene todos los tracks).
+// Master "Library" playlist (contains all tracks).
 function masterPlaylist(playlistId, trackIds) {
   let s = `\t\t<dict>\n`;
   s += `\t\t\t<key>Master</key><true/>\n`;
@@ -176,9 +176,9 @@ function masterPlaylist(playlistId, trackIds) {
   return s;
 }
 
-// Bloques Smart Info/Criteria que iTunes le pone a TODA carpeta. Serato parece
-// necesitarlos para reconocer el folder. Se cargan de folder-smart-blocks.json.
-let FOLDER_SMART = null; // { smartInfo, smartCriteria } base64, o null
+// Smart Info/Criteria blocks that iTunes puts on EVERY folder. Serato seems to
+// need them to recognize the folder. Loaded from folder-smart-blocks.json.
+let FOLDER_SMART = null; // { smartInfo, smartCriteria } base64, or null
 
 function dataBlock(key, base64) {
   let s = `\t\t\t<key>${key}</key>\n\t\t\t<data>\n`;
@@ -187,9 +187,9 @@ function dataBlock(key, base64) {
   return s;
 }
 
-// Folder de iTunes. CLAVE: además de Folder=true necesita un Playlist Items
-// con los Track IDs de TODAS sus playlists descendientes (la unión). Sin eso,
-// Serato no muestra la carpeta. iTunes lo arma así en toda carpeta.
+// iTunes folder. KEY: besides Folder=true it needs a Playlist Items
+// with the Track IDs of ALL its descendant playlists (the union). Without that,
+// Serato won't show the folder. iTunes builds it this way for every folder.
 function folderEntry(name, playlistId, persistId, parentPersistId, trackIds) {
   let s = `\t\t<dict>\n`;
   s += kv('Playlist ID', 'integer', playlistId);
@@ -208,7 +208,7 @@ function folderEntry(name, playlistId, persistId, parentPersistId, trackIds) {
   return s;
 }
 
-// Playlist normal (hoja); si parentPersistId != null, va dentro de un folder.
+// Normal (leaf) playlist; if parentPersistId != null, it goes inside a folder.
 function playlistEntry(name, playlistId, persistId, parentPersistId, trackIds) {
   let s = `\t\t<dict>\n`;
   s += kv('Playlist ID', 'integer', playlistId);
@@ -225,8 +225,8 @@ function playlistEntry(name, playlistId, persistId, parentPersistId, trackIds) {
 async function main() {
   const args = process.argv.slice(2);
   const flat = args.includes('--flat');
-  // --folder-smart=minimal|full : agrega Smart Info/Criteria a los folders
-  // (iTunes lo hace en toda carpeta; Serato parece necesitarlo para mostrarlas).
+  // --folder-smart=minimal|full : adds Smart Info/Criteria to folders
+  // (iTunes does it on every folder; Serato seems to need it to show them).
   const fsArg = (args.find((a) => a.startsWith('--folder-smart=')) || '').split('=')[1];
   if (fsArg === 'minimal' || fsArg === 'full') {
     const blocks = JSON.parse(await fs.readFile(new URL('./folder-smart-blocks.json', import.meta.url), 'utf8'));
@@ -234,25 +234,25 @@ async function main() {
       smartInfo: blocks.smartInfo,
       smartCriteria: fsArg === 'full' ? blocks.smartCriteriaFull : blocks.smartCriteriaMinimal,
     };
-    console.log(`[folder-smart=${fsArg}] Smart Info/Criteria agregado a folders.`);
+    console.log(`[folder-smart=${fsArg}] Smart Info/Criteria added to folders.`);
   }
   const positional = args.filter((a) => !a.startsWith('--'));
   const root = positional[0];
   const outPath = positional[1] || path.join(process.cwd(), 'iTunes Music Library.xml');
   if (!root) {
-    console.error('Uso: node generate.mjs "C:\\\\ruta\\\\a\\\\Musica" [salida.xml] [--flat] [--folder-smart=minimal|full]');
-    console.error('  --flat: playlists planas (sin folders).');
-    console.error('  --folder-smart: agrega metadata smart a folders (compat Serato).');
+    console.error('Usage: node generate.mjs "C:\\\\path\\\\to\\\\Music" [output.xml] [--flat] [--folder-smart=minimal|full]');
+    console.error('  --flat: flat playlists (no folders).');
+    console.error('  --folder-smart: adds smart metadata to folders (Serato compat).');
     process.exit(1);
   }
   const absRoot = path.resolve(root);
-  console.log(`Escaneando: ${absRoot}`);
+  console.log(`Scanning: ${absRoot}`);
   const files = (await walk(absRoot)).sort();
   if (files.length === 0) {
-    console.error('No se encontraron archivos de audio.');
+    console.error('No audio files found.');
     process.exit(1);
   }
-  console.log(`Encontrados ${files.length} archivos. Leyendo tags...`);
+  console.log(`Found ${files.length} files. Reading tags...`);
 
   const tracks = [];
   let id = 1;
@@ -261,9 +261,9 @@ async function main() {
     tracks.push({ id: id++, file, meta, stat });
   }
 
-  // --- Construir árbol de directorios desde las rutas de los tracks ---
-  // filesByDir: dir absoluto -> [trackId] (archivos DIRECTOS en ese dir)
-  // childrenByDir: dir absoluto -> Set(subdir absoluto inmediato)
+  // --- Build the directory tree from the track paths ---
+  // filesByDir: absolute dir -> [trackId] (files DIRECTLY in that dir)
+  // childrenByDir: absolute dir -> Set(immediate absolute subdir)
   const filesByDir = new Map();
   const childrenByDir = new Map();
   const getArr = (m, k) => { if (!m.has(k)) m.set(k, []); return m.get(k); };
@@ -271,7 +271,7 @@ async function main() {
   for (const t of tracks) {
     const d = path.dirname(t.file);
     getArr(filesByDir, d).push(t.id);
-    // registrar cadena de ancestros hasta absRoot
+    // register the ancestor chain up to absRoot
     let cur = d;
     while (cur !== absRoot && cur.startsWith(absRoot + path.sep)) {
       const parent = path.dirname(cur);
@@ -280,13 +280,13 @@ async function main() {
     }
   }
 
-  // Emitir recursivamente folders + playlists. Un dir con subdirs => Folder
-  // (y si además tiene archivos directos, una playlist hija con esos archivos).
-  // Un dir hoja => playlist normal.
+  // Recursively emit folders + playlists. A dir with subdirs => Folder
+  // (and if it also has direct files, a child playlist with those files).
+  // A leaf dir => normal playlist.
   const playlistBlocks = [];
   let pid = 1001;
-  // Track IDs de TODO el subárbol de un dir (memoizado). El folder los necesita
-  // en su Playlist Items para que Serato lo muestre.
+  // Track IDs of a dir's ENTIRE subtree (memoized). The folder needs them
+  // in its Playlist Items so Serato shows it.
   const descCache = new Map();
   function descendantTrackIds(dir) {
     if (descCache.has(dir)) return descCache.get(dir);
@@ -296,7 +296,7 @@ async function main() {
     return ids;
   }
 
-  // Modo jerárquico (default): folders de iTunes anidados (Rekordbox full).
+  // Hierarchical mode (default): nested iTunes folders (Rekordbox full).
   function emitDir(dir, parentPersistId) {
     const subdirs = [...(childrenByDir.get(dir) || [])].sort();
     const directFiles = filesByDir.get(dir) || [];
@@ -312,8 +312,8 @@ async function main() {
       playlistBlocks.push(playlistEntry(name, pid++, persistentId('pl:' + dir), parentPersistId, directFiles));
     }
   }
-  // Modo plano (--flat): una playlist por dir con archivos, nombre = ruta
-  // relativa con " - "; sin folders ni Parent (para probar compat Serato).
+  // Flat mode (--flat): one playlist per dir with files, name = relative
+  // path joined with " - "; no folders or Parent (to test Serato compat).
   function emitFlat(dir) {
     const directFiles = filesByDir.get(dir) || [];
     if (directFiles.length > 0) {
@@ -323,7 +323,7 @@ async function main() {
     }
     for (const sub of [...(childrenByDir.get(dir) || [])].sort()) emitFlat(sub);
   }
-  // Nivel superior: subdirs directos de absRoot + archivos sueltos en la raíz.
+  // Top level: direct subdirs of absRoot + loose files at the root.
   if (flat) {
     emitFlat(absRoot);
   } else {
@@ -358,15 +358,15 @@ async function main() {
   for (const block of playlistBlocks) xml += block;
   xml += '\t</array>\n';
 
-  // iTunes pone Music Folder AL FINAL, después de Playlists.
+  // iTunes puts Music Folder AT THE END, after Playlists.
   xml += `\t<key>Music Folder</key><string>${xmlEscape(musicFolder)}</string>\n`;
   xml += '</dict>\n</plist>\n';
 
   await fs.writeFile(outPath, xml, 'utf8');
-  console.log(`\n✓ Escrito: ${outPath}`);
+  console.log(`\n✓ Written: ${outPath}`);
   console.log(`  ${tracks.length} tracks, ${playlistBlocks.length} folders/playlists + "Library".`);
-  console.log('\nImportá en Rekordbox (Preferencias → Advanced → Database → iTunes) y en Serato.');
-  console.log('Va a un nodo aparte del sidebar; NO toca tu Collection.');
+  console.log('\nImport it into Rekordbox (Preferences → Advanced → Database → iTunes) and into Serato.');
+  console.log("Goes into a separate sidebar node; it does NOT touch your Collection.");
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

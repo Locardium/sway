@@ -1,6 +1,6 @@
-// Reproduccion desktop con rodio (symphonia decodifica FLAC/MP3/etc).
-// El stream de audio (cpal) es !Send, asi que vive en un thread dedicado que
-// recibe comandos por un canal. La posicion se publica en un AtomicU64.
+// Desktop playback with rodio (symphonia decodes FLAC/MP3/etc).
+// The audio stream (cpal) is !Send, so it lives on a dedicated thread that
+// receives commands over a channel. Position is published in an AtomicU64.
 use rodio::{Decoder, OutputStream, Sink};
 use std::fs::File;
 use std::io::BufReader;
@@ -66,8 +66,8 @@ impl Player {
     }
 }
 
-/// Nombre del dispositivo de salida por defecto del sistema, o `None` si no
-/// hay ninguno (todos desconectados).
+/// Name of the system's default output device, or `None` if there is none
+/// (everything disconnected).
 fn default_output_name() -> Option<String> {
     use rodio::cpal::traits::{DeviceTrait, HostTrait};
     rodio::cpal::default_host()
@@ -75,13 +75,13 @@ fn default_output_name() -> Option<String> {
         .and_then(|d| d.name().ok())
 }
 
-/// Cada cuánto se comprueba si el sistema cambió de salida. Es una consulta al
-/// host de audio, no algo gratis: un segundo es imperceptible al cambiar de
-/// auriculares y no cuesta nada mientras no se toca nada.
+/// How often to check whether the system switched output. It's a query to
+/// the audio host, not a free one: one second is imperceptible when
+/// switching headphones and costs nothing while nothing changes.
 const DEVICE_POLL: Duration = Duration::from_secs(1);
 
-/// Salida abierta: el stream de cpal y su handle. El stream **tiene que
-/// seguir vivo** — si se dropea, se corta el audio.
+/// Open output: cpal's stream and its handle. The stream **has to stay
+/// alive** — if it's dropped, the audio cuts out.
 struct Output {
     _stream: OutputStream,
     handle: rodio::OutputStreamHandle,
@@ -90,17 +90,17 @@ struct Output {
 fn open_output() -> Option<Output> {
     match OutputStream::try_default() {
         Ok((stream, handle)) => {
-            eprintln!("[player] salida de audio abierta OK");
+            eprintln!("[player] audio output opened OK");
             Some(Output { _stream: stream, handle })
         }
         Err(e) => {
-            eprintln!("[player] no se pudo abrir salida de audio: {e}");
+            eprintln!("[player] could not open audio output: {e}");
             None
         }
     }
 }
 
-/// Carga un archivo en el sink, opcionalmente salteando a `from`.
+/// Loads a file into the sink, optionally skipping ahead to `from`.
 fn load(sink: &Sink, path: &std::path::Path, from: Duration) -> bool {
     let Ok(f) = File::open(path) else {
         eprintln!("[player] open fail {}", path.display());
@@ -121,20 +121,21 @@ fn load(sink: &Sink, path: &std::path::Path, from: Duration) -> bool {
     }
 }
 
-/// El stream de audio queda atado al dispositivo que era el default cuando se
-/// abrió. Si el usuario cambia de salida (enchufa auriculares, cambia el
-/// default en Windows), ese stream sigue escribiendo a un dispositivo que ya
-/// no suena: la app parece reproducir —la barra avanza— y no se escucha nada.
+/// The audio stream stays bound to whatever device was the default when it
+/// was opened. If the user switches output (plugs in headphones, changes the
+/// default in Windows), that stream keeps writing to a device that no longer
+/// plays sound: the app looks like it's playing — the bar keeps advancing —
+/// and nothing is heard.
 ///
-/// Por eso la salida no se abre una sola vez: se vigila cuál es el default y,
-/// cuando cambia, se reabre y se retoma el track donde estaba. Y si al
-/// arrancar no había ninguna salida, se reintenta en cada Play en vez de
-/// quedarse mudo para siempre.
+/// So the output isn't opened just once: what the default is gets watched,
+/// and when it changes, it's reopened and the track resumes where it was.
+/// And if there was no output at all on startup, it's retried on every Play
+/// instead of staying silent forever.
 fn run_audio(rx: Receiver<Cmd>, pos_ms: Arc<AtomicU64>) {
     let mut out = open_output();
     let mut sink = out.as_ref().and_then(|o| Sink::try_new(&o.handle).ok());
     let mut vol: f32 = 1.0;
-    // Qué está cargado, para poder retomarlo si hay que reabrir la salida.
+    // What's loaded, so it can be resumed if the output needs to be reopened.
     let mut current: Option<PathBuf> = None;
     let mut device = default_output_name();
     let mut last_check = std::time::Instant::now();
@@ -142,8 +143,8 @@ fn run_audio(rx: Receiver<Cmd>, pos_ms: Arc<AtomicU64>) {
     loop {
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(Cmd::Play(path)) => {
-                // Reintento: si al arrancar no había salida (o se cayó), este
-                // es el momento de volver a intentar.
+                // Retry: if there was no output on startup (or it dropped),
+                // this is the moment to try again.
                 if out.is_none() {
                     out = open_output();
                     device = default_output_name();
@@ -187,9 +188,9 @@ fn run_audio(rx: Receiver<Cmd>, pos_ms: Arc<AtomicU64>) {
                 if let Some(s) = &sink {
                     let _ = s.try_seek(Duration::from_secs(secs));
                 }
-                // Refleja la posicion nueva de inmediato y salta el store de
-                // abajo (get_pos puede tardar en reflejar el seek => barra
-                // saltando al valor viejo).
+                // Reflects the new position immediately and skips the store
+                // below (get_pos can be slow to reflect the seek => the bar
+                // jumping back to the old value).
                 pos_ms.store(secs * 1000, Ordering::Relaxed);
                 continue;
             }
@@ -203,12 +204,12 @@ fn run_audio(rx: Receiver<Cmd>, pos_ms: Arc<AtomicU64>) {
             Err(RecvTimeoutError::Disconnected) => break,
         }
 
-        // ¿Cambió la salida del sistema? Reabrir y retomar donde estaba.
+        // Did the system's output change? Reopen and resume where it was.
         if last_check.elapsed() >= DEVICE_POLL {
             last_check = std::time::Instant::now();
             let now_device = default_output_name();
             if now_device != device && now_device.is_some() {
-                eprintln!("[player] salida cambió: {device:?} -> {now_device:?}");
+                eprintln!("[player] output changed: {device:?} -> {now_device:?}");
                 device = now_device;
                 let was_paused = sink.as_ref().map(|s| s.is_paused()).unwrap_or(true);
                 let at = Duration::from_millis(pos_ms.load(Ordering::Relaxed));
@@ -216,8 +217,9 @@ fn run_audio(rx: Receiver<Cmd>, pos_ms: Arc<AtomicU64>) {
                     s.stop();
                 }
                 sink = None;
-                // El stream nuevo se abre antes de soltar el viejo: la
-                // asignación dropea el anterior recién cuando este ya existe.
+                // The new stream is opened before the old one is released:
+                // the assignment drops the previous one only once this one
+                // already exists.
                 out = open_output();
                 if let Some(o) = out.as_ref() {
                     sink = Sink::try_new(&o.handle).ok();

@@ -1,9 +1,9 @@
-//! Server de archivo y sync de Sway.
+//! Sway's archive and sync server.
 //!
-//! El binario es un envoltorio finito sobre esto (leer la config, abrir la
-//! base, escuchar). Está partido así para que los tests puedan levantar un
-//! server de verdad, con su socket y su base, y hablarle por el protocolo real
-//! en vez de afirmar cosas sobre funciones sueltas.
+//! The binary is a thin wrapper around this (read the config, open the
+//! database, listen). It's split this way so tests can spin up a real
+//! server, with its socket and its database, and talk to it over the real
+//! protocol instead of asserting things about loose functions.
 
 pub mod config;
 pub mod host;

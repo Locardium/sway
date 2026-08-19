@@ -1,12 +1,12 @@
-// Drag & drop propio con pointer events. HTML5 DnD no funciona dentro del
-// webview de Tauri cuando dragDropEnabled esta activo (necesario para recibir
-// archivos del OS), asi que el DnD interno se hace a mano.
+// Custom drag & drop with pointer events. HTML5 DnD doesn't work inside
+// Tauri's webview when dragDropEnabled is on (needed to receive OS files), so
+// internal DnD is done by hand.
 //
-// Los targets se anotan en el DOM:
-//   data-dnd="row"  data-idx  — fila de la tabla (insertar antes/despues)
-//   data-dnd="tail" data-idx  — zona despues de la ultima fila
-//   data-dnd="node" data-node-id data-node-kind — nodo del sidebar
-//   data-dnd="root"           — raiz del arbol de playlists
+// Targets are annotated in the DOM:
+//   data-dnd="row"  data-idx  — table row (insert before/after)
+//   data-dnd="tail" data-idx  — zone after the last row
+//   data-dnd="node" data-node-id data-node-kind — sidebar node
+//   data-dnd="root"           — root of the playlist tree
 
 export type DragPayload =
   | { kind: 'tracks'; ids: number[]; label: string }
@@ -26,8 +26,8 @@ interface Handlers {
 
 const THRESHOLD = 5;
 
-/** True mientras (o justo despues de que) un drag consumio el gesto: los
- *  onClick de las filas lo consultan para no disparar seleccion. */
+/** True while (or right after) a drag consumed the gesture: rows' onClick
+ *  handlers check this to avoid triggering selection. */
 export let didDrag = false;
 
 export function beginDrag(e: React.MouseEvent, payload: DragPayload, handlers: Handlers) {
@@ -70,7 +70,7 @@ export function beginDrag(e: React.MouseEvent, payload: DragPayload, handlers: H
     return null;
   }
 
-  // Auto-scroll cuando el cursor esta cerca del borde de un contenedor scrolleable.
+  // Auto-scroll when the cursor is near the edge of a scrollable container.
   function autoScroll(x: number, y: number) {
     cancelAnimationFrame(scrollRaf);
     const scroller = document
@@ -116,7 +116,7 @@ export function beginDrag(e: React.MouseEvent, payload: DragPayload, handlers: H
     ghost?.remove();
     document.body.classList.remove('dragging');
     handlers.onEnd();
-    // didDrag se apaga en el proximo tick para que el click posterior lo vea.
+    // didDrag turns off on the next tick so the following click can see it.
     setTimeout(() => {
       didDrag = false;
     }, 0);

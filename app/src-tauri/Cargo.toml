@@ -1,7 +1,7 @@
 [package]
 name = "sway"
 version = "0.1.0"
-description = "Sway — reproductor/organizador DJ"
+description = "Sway — DJ player/organizer"
 edition = "2021"
 
 [lib]
@@ -11,12 +11,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
-# El perfil de compilacion vive en el Cargo.toml de la raiz desde la Fase 6.0
-# (cargo ignora `[profile]` en un miembro del workspace).
+# The build profile lives in the root Cargo.toml since Phase 6.0
+# (cargo ignores `[profile]` in a workspace member).
 
 [dependencies]
-# El motor: biblioteca, identidad de archivos y sync. Sin Tauri adentro, para
-# que el server headless (Fase 6.2) pueda usar exactamente el mismo codigo.
+# The engine: library, file identity, and sync. Without Tauri inside, so
+# the headless server (Phase 6.2) can use exactly the same code.
 sway-core = { path = "../../crates/core" }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
@@ -25,7 +25,7 @@ tauri-plugin-os = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
-# Solo para las caratulas (cover.rs); los tags del import los lee sway-core.
+# Only for cover art (cover.rs); import tags are read by sway-core.
 lofty = "0.24"
 anyhow = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp"] }
@@ -33,40 +33,40 @@ base64 = "0.22"
 notify-debouncer-mini = "0.7.0"
 log = "0.4"
 
-# Descubrimiento de dispositivos en la LAN (Fase 5.1). Puro Rust, mismo
-# codigo en desktop y Android. OJO Android: sin MulticastLock no recibe NADA
-# y sin error visible (ver MainActivity.kt).
+# Device discovery on the LAN (Phase 5.1). Pure Rust, same code on desktop
+# and Android. NOTE Android: without MulticastLock it receives NOTHING and
+# with no visible error (see MainActivity.kt).
 #
-# blake3, uuid, snow y walkdir salieron de aca en la Fase 6.0: viven en
-# sway-core, que es quien los usa.
+# blake3, uuid, snow, and walkdir moved out of here in Phase 6.0: they now
+# live in sway-core, which is what uses them.
 mdns-sd = "0.20.3"
 
-# En Android eprintln! no llega a logcat; sin esto no hay forma de ver
-# errores en runtime (nos quemamos con esto: lofty fallaba en silencio en
-# import_bytes/thumb_data_url y no habia como verlo).
+# On Android eprintln! doesn't reach logcat; without this there's no way to
+# see runtime errors (we got burned by this: lofty was failing silently in
+# import_bytes/thumb_data_url and there was no way to see it).
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.14"
 
-# Si la red se paga por dato (Fase 6.7). Windows lo marca solo para un modem
-# celular; para el hotspot wifi de un telefono NO — eso lo marca el usuario una
-# vez y queda pegado a esa red. Aca solo se lee la bandera.
+# Whether the network is metered (Phase 6.7). Windows flags this only for a
+# cellular modem; for a phone's wifi hotspot it does NOT — the user marks
+# that once and it stays pinned to that network. Only the flag is read here.
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = ["Networking_Connectivity"] }
 
-# Desktop-only: symphonia/rodio decodifican audio.
+# Desktop-only: symphonia/rodio decode audio.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-# En Android los log::* van a logcat via android_logger; en desktop, sin un
-# logger instalado, NO IMPRIMEN NADA. Todo el modulo de sync usa log::*, asi
-# que sin esto la mitad de las trazas de Fase 5 eran invisibles justo donde
-# hacian falta.
+# On Android log::* goes to logcat via android_logger; on desktop, without a
+# logger installed, NOTHING PRINTS. The whole sync module uses log::*, so
+# without this half of the Phase 5 traces were invisible right where they
+# were needed.
 env_logger = "0.11.11"
 rodio = { version = "0.19", features = ["symphonia-all"] }
-# Cuanta bateria queda (Fase 6.7). En una PC de escritorio no hay ninguna, y
-# eso no es un error: es la respuesta, y con ella la pantalla sabe que no tiene
-# que ofrecer la opcion.
+# How much battery is left (Phase 6.7). A desktop PC has none, and that's
+# not an error: it's the answer, and with it the screen knows it shouldn't
+# offer the option.
 battery = { package = "starship-battery", version = "0.10" }
 
-# Reproduccion mobile: Media3/ExoPlayer via plugin nativo, controlado desde JS
-# (ver app/src/nativeAudio.ts). Validado en Fase 0.5, ver spike-android-audio/.
+# Mobile playback: Media3/ExoPlayer via native plugin, controlled from JS
+# (see app/src/nativeAudio.ts). Validated in Phase 0.5, see spike-android-audio/.
 [target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
 tauri-plugin-native-audio = "1"

@@ -1,45 +1,45 @@
-# Fase 0 — PoC generador iTunes XML
+# Phase 0 — iTunes XML generator PoC
 
-Genera un `iTunes Music Library.xml` desde una carpeta de audio, para **validar que Rekordbox y Serato lo importan** (incluyendo FLAC) antes de construir la app entera.
+Generates an `iTunes Music Library.xml` from an audio folder, to **validate that Rekordbox and Serato import it** (including FLAC) before building the entire app.
 
-## Uso
+## Usage
 
 ```bash
 cd tools/itunes-xml-poc
-pnpm install          # solo la primera vez (instala music-metadata para leer tags)
+pnpm install          # only the first time (installs music-metadata to read tags)
 node generate.mjs "C:\Users\User\Music" "iTunes Music Library.xml"
 ```
 
-- Arg 1: carpeta raíz de tu música (escanea recursivo).
-- Arg 2 (opcional): archivo de salida. Default: `iTunes Music Library.xml` en el cwd.
+- Arg 1: root folder of your music (scans recursively).
+- Arg 2 (optional): output file. Default: `iTunes Music Library.xml` in the cwd.
 
-Cada **subcarpeta de primer nivel** se convierte en una playlist, más una playlist maestra `Library` con todo.
+Each **top-level subfolder** becomes a playlist, plus a master `Library` playlist with everything.
 
-## Cómo probar el import (no afecta tu Collection actual)
+## How to test the import (does not affect your current Collection)
 
-El XML se carga en un **nodo aparte del sidebar**, separado de tu Collection. Tus playlists/cues actuales quedan intactos.
+The XML loads into a **separate sidebar node**, apart from your Collection. Your current playlists/cues remain intact.
 
 **Rekordbox:**
-1. Preferencias → Advanced → Database → **iTunes**.
-2. Marcar "Enable iTunes library sync" y apuntar al `iTunes Music Library.xml` generado.
-3. Aparece un árbol **iTunes** en el sidebar → verificás tracks, playlists, orden, y que los **FLAC reproducen**.
+1. Preferences → Advanced → Database → **iTunes**.
+2. Check "Enable iTunes library sync" and point it to the generated `iTunes Music Library.xml`.
+3. An **iTunes** tree appears in the sidebar → verify tracks, playlists, order, and that the **FLAC files play**.
 
 **Serato:**
-1. En el panel de la izquierda, expandir **iTunes** (Serato lee la librería iTunes automáticamente si el XML está en la ubicación estándar, o configurás la ruta).
-2. Verificar tracks/playlists y reproducción de FLAC.
+1. In the left panel, expand **iTunes** (Serato automatically reads the iTunes library if the XML is in the standard location, or you can set the path).
+2. Verify tracks/playlists and FLAC playback.
 
-## Qué estamos validando
+## What we're validating
 
-- [ ] Rekordbox importa el XML y muestra tracks + playlists en el orden correcto.
-- [ ] Los **FLAC** reproducen en Rekordbox.
-- [ ] Serato importa el XML y muestra lo mismo.
-- [ ] Los FLAC reproducen en Serato.
-- [ ] Rutas con espacios/caracteres especiales resuelven bien (no "file not found").
+- [ ] Rekordbox imports the XML and shows tracks + playlists in the correct order.
+- [ ] The **FLAC** files play in Rekordbox.
+- [ ] Serato imports the XML and shows the same thing.
+- [ ] The FLAC files play in Serato.
+- [ ] Paths with spaces/special characters resolve correctly (no "file not found").
 
-Si algo falla, anotamos el quirk del dialecto acá y ajustamos el generador. Este código es **throwaway** (PoC): la versión de producción va en Rust dentro del core (Fase 2).
+If something fails, we note the dialect quirk here and adjust the generator. This code is **throwaway** (PoC): the production version goes in Rust inside the core (Phase 2).
 
-## Notas
+## Notes
 
-- Formato de `<Location>`: `file://localhost/C:/...` con cada segmento percent-codificado (igual que iTunes en Windows).
-- `Persistent ID` se deriva del path (estable entre corridas).
-- Si `music-metadata` no está instalado, cae al nombre de archivo como título (el PoC igual corre).
+- `<Location>` format: `file://localhost/C:/...` with each segment percent-encoded (same as iTunes on Windows).
+- `Persistent ID` is derived from the path (stable across runs).
+- If `music-metadata` isn't installed, it falls back to the filename as the title (the PoC still runs).

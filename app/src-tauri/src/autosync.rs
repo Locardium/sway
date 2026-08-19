@@ -1,75 +1,79 @@
-//! Sincronización automática.
+//! Automatic synchronization.
 //!
-//! Un sync que hay que pedir a mano no sirve para el caso real: importás una
-//! canción en la PC y querés encontrarla en el celular sin acordarte de nada.
+//! A sync that has to be requested by hand doesn't work for the real use
+//! case: you import a song on the PC and want to find it on the phone
+//! without having to remember to do anything.
 //!
-//! Se dispara por tres motivos, cada uno cubriendo un agujero del anterior:
+//! It's triggered for three reasons, each one covering a gap left by the
+//! previous one:
 //!
-//! - **Cambió algo acá** (import, playlist editada, track movido). Con un
-//!   respiro de unos segundos: importar una carpeta son cientos de cambios
-//!   seguidos y sincronizar en cada uno sería absurdo.
-//! - **Apareció un dispositivo**. El celular estuvo sin wifi toda la tarde;
-//!   cuando vuelve hay que ponerse al día sin esperar a que cambie algo más.
-//! - **Cada tanto**, como red de contención por si se perdió alguno de los
-//!   dos anteriores.
+//! - **Something changed here** (import, edited playlist, moved track). With
+//!   a few seconds of breathing room: importing a folder is hundreds of
+//!   changes in a row, and syncing on every single one would be absurd.
+//! - **A device showed up**. The phone was off wifi all afternoon; when it
+//!   comes back it has to catch up without waiting for something else to
+//!   change.
+//! - **Every so often**, as a safety net in case either of the two above got
+//!   missed.
 //!
-//! El bucle infinito se corta solo: aplicar cambios del otro lado dispara su
-//! propio "cambió algo", pero ese sync ya no encuentra nada que hacer y
-//! termina sin volver a disparar nada.
+//! The infinite loop cuts itself off: applying changes from the other side
+//! triggers its own "something changed", but that sync no longer finds
+//! anything to do and ends without triggering anything again.
 
 use crate::AppState;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 
-/// Cuánto se espera desde el último cambio antes de sincronizar.
+/// How long to wait since the last change before syncing.
 ///
-/// Medio segundo alcanza: las operaciones grandes ya entran como UN comando
-/// (importar una carpeta, arrastrar veinte tracks a una playlist), así que
-/// esto sólo junta comandos separados disparados casi juntos. Y el costo de
-/// un sync de más es barato — un manifest que vuelve sin nada que hacer —
-/// mientras que la espera se nota en la cara.
+/// Half a second is enough: large operations already come in as ONE command
+/// (importing a folder, dragging twenty tracks into a playlist), so this
+/// only coalesces separate commands fired almost together. And the cost of
+/// an extra sync is cheap — a manifest that comes back with nothing to do —
+/// while the wait itself is noticeable.
 const QUIET_PERIOD_MS: i64 = 500;
-/// Red de contención.
+/// Safety net.
 const PERIODIC: Duration = Duration::from_secs(10 * 60);
-/// Cuánto se le da a la red local antes de sincronizar con el server igual.
+/// How long the local network gets before syncing with the server anyway.
 ///
-/// Es un techo, no una espera: en cuanto la LAN termina, sigue. Existe para
-/// que una transferencia grande —o un peer que se durmió a la mitad— no deje
-/// al server sin sincronizar por el resto del día.
+/// It's a ceiling, not a wait: as soon as the LAN finishes, it moves on. It
+/// exists so a large transfer — or a peer that fell asleep halfway through —
+/// doesn't leave the server unsynced for the rest of the day.
 pub(crate) const LAN_FIRST_MAX_WAIT: Duration = Duration::from_secs(15 * 60);
-/// Sumado al respiro, es el techo de lo que tarda en arrancar un sync.
+/// Added to the breathing room, this is the ceiling on how long it takes a
+/// sync to start.
 const TICK: Duration = Duration::from_millis(250);
-/// Cada cuánto se reintenta cuando hay un cambio para propagar pero no hay
-/// ningún dispositivo disponible.
+/// How often to retry when there's a change to propagate but no device is
+/// available.
 ///
-/// Sin esto, lo pendiente **no se limpia** (a propósito: un cambio hecho con
-/// el celular apagado tiene que viajar cuando vuelva), así que el bucle se
-/// daba por despierto en cada tick: cuatro veces por segundo tomaba el lock de
-/// la DB para listar dispositivos, escribía una línea de log, y volvía a
-/// empezar — para nada. Contra el mismo lock que necesita la UI. Y si el peer
-/// estaba marcado offline, el cambio recién salía en la red de contención de
-/// 10 minutos.
+/// Without this, the pending flag **isn't cleared** (on purpose: a change
+/// made with the phone off has to travel when it comes back), so the loop
+/// would consider itself awake on every tick: four times a second it would
+/// take the DB lock to list devices, write a log line, and start over — for
+/// nothing. Against the same lock the UI needs. And if the peer was marked
+/// offline, the change would only go out on the 10-minute safety net.
 const RETRY_WHEN_ALONE: Duration = Duration::from_secs(15);
 
 #[derive(Default)]
 pub struct AutoSync {
-    /// Momento del último cambio local sin sincronizar. 0 = nada pendiente.
+    /// Timestamp of the last unsynced local change. 0 = nothing pending.
     pending_since: AtomicI64,
 }
 
-/// Marca en la base de que hay algo local sin propagar.
+/// Records in the DB that there's something local not yet propagated.
 ///
-/// Lo pendiente vivía sólo en memoria, y eso alcanzaba mientras cada arranque
-/// empezara comparando las dos bibliotecas enteras. Desde que eso no pasa (ver
-/// `watch.rs`), un cambio hecho sin señal y con la app cerrada después no
-/// tenía quién lo empujara: el otro lado no sabe que existe, así que no avisa
-/// nada, y del lado de acá no quedaba rastro de que faltaba mandarlo.
+/// The pending flag used to live only in memory, and that was enough as long
+/// as every startup began by comparing the two whole libraries. Since that no
+/// longer happens (see `watch.rs`), a change made with no one listening and
+/// the app closed afterward had no one to push it: the other side doesn't
+/// know it exists, so it never asks, and this side kept no trace that it
+/// still needed to be sent.
 const PENDING: &str = "autosync_pending";
 
 impl AutoSync {
-    /// Lo llama cualquier cosa que modifique la biblioteca. Devuelve `true` si
-    /// no había nada pendiente hasta recién — o sea, si hay que anotarlo.
+    /// Called by anything that modifies the library. Returns `true` if there
+    /// was nothing pending until just now — i.e. if it needs to be recorded.
     pub fn note_change(&self) -> bool {
         let before = self
             .pending_since
@@ -82,16 +86,16 @@ impl AutoSync {
         self.pending_since.load(Ordering::Relaxed)
     }
 
-    /// Hay un cambio pendiente y ya pasó el respiro. No lo consume: recién
-    /// se limpia cuando se pudo mandar a alguien, así un cambio hecho con el
-    /// celular apagado no se pierde.
+    /// There's a pending change and the quiet period has already passed. It
+    /// doesn't consume it: it's only cleared once it could be sent to
+    /// someone, so a change made with the phone off isn't lost.
     fn is_settled(&self) -> bool {
         let since = self.pending_since.load(Ordering::Relaxed);
         since != 0 && crate::db::now_ms() - since >= QUIET_PERIOD_MS
     }
 
-    /// Devuelve `true` si de verdad había algo, para no escribir en la base
-    /// en cada vuelta del bucle.
+    /// Returns `true` if there really was something, so we don't write to the
+    /// DB on every loop iteration.
     fn clear(&self) -> bool {
         self.pending_since.swap(0, Ordering::Relaxed) != 0
     }
@@ -109,12 +113,13 @@ pub fn set_enabled(conn: &rusqlite::Connection, on: bool) -> rusqlite::Result<()
     crate::db::set_setting(conn, "auto_sync_p2p", if on { "1" } else { "0" })
 }
 
-/// Aviso de que algo cambió en esta biblioteca.
+/// Notice that something changed in this library.
 pub fn note_change(handle: &AppHandle) {
     log::info!("[autosync] local change noted");
     let state = handle.state::<AppState>();
-    // Sólo en el primero de una tanda: importar una carpeta son cientos de
-    // avisos seguidos y no hace falta escribir la misma marca cientos de veces.
+    // Only on the first of a batch: importing a folder is hundreds of
+    // notices in a row, and there's no need to write the same flag hundreds
+    // of times.
     if state.autosync.note_change() {
         if let Ok(conn) = state.db.lock() {
             let _ = crate::db::set_setting(&conn, PENDING, "1");
@@ -122,10 +127,10 @@ pub fn note_change(handle: &AppHandle) {
     }
 }
 
-/// Lo pendiente que quedó de la corrida anterior.
+/// Whatever was left pending from the previous run.
 ///
-/// Se llama al arrancar: un cambio que no llegó a salir tiene que salir ahora,
-/// y nadie más se va a acordar de él.
+/// Called on startup: a change that didn't make it out has to go out now,
+/// and no one else is going to remember it.
 fn restore_pending(handle: &AppHandle) {
     let state = handle.state::<AppState>();
     let pending = {
@@ -142,13 +147,13 @@ fn restore_pending(handle: &AppHandle) {
     }
 }
 
-/// Un dispositivo volvió a estar disponible: ponerse al día.
+/// A device became available again: catch up.
 ///
-/// Se llama desde dos lados, porque ninguno cubre al otro: el sondeo TCP ve
-/// al que estaba offline y volvió, y el descubrimiento ve al que apareció en
-/// la red por primera vez (ese nace `online`, así que no hay transición que
-/// sondear). Filtra los no vinculados acá para que ninguno de los dos tenga
-/// que acordarse.
+/// Called from two places, because neither one covers the other: the TCP
+/// probe sees the one that was offline and came back, and discovery sees the
+/// one that showed up on the network for the first time (that one is born
+/// `online`, so there's no transition to probe). Unpaired devices are
+/// filtered out here so neither caller has to remember to.
 pub fn peer_came_online(handle: &AppHandle, uid: &str) {
     let state = handle.state::<AppState>();
     let platform: String = {
@@ -162,15 +167,15 @@ pub fn peer_came_online(handle: &AppHandle, uid: &str) {
                 r.get(0)
             })
             .ok();
-        // No vinculado: no hay nada que sincronizar con él.
+        // Not paired: there's nothing to sync with it.
         let Some(platform) = found else { return };
         platform
     };
     let remote = platform == sway_core::pairing::PLATFORM_SERVER;
-    // Un server con watcher se pone al día solo, y mejor: pregunta con la
-    // revisión que conocía y sincroniza sólo si de verdad se perdió algo.
-    // Lanzar además el sync de acá sería una corrida completa contra el
-    // archivo cada vez que el server vuelve a aparecer.
+    // A server with a watcher catches up on its own, and better: it asks
+    // with the revision it already knew and syncs only if something was
+    // really missed. Also launching the sync here would mean a full run
+    // against the file server every time it shows up again.
     if remote && state.watchers.is_watched(uid) {
         log::debug!("[autosync] {uid} is being watched: leaving the catch-up to the watcher");
         return;
@@ -187,10 +192,11 @@ pub fn peer_came_online(handle: &AppHandle, uid: &str) {
     }
     log::info!("[autosync] {uid} is available: catching up");
 
-    // Un server que aparece espera a la red local, por lo mismo que en el
-    // bucle de abajo: al arrancar la app suelen aparecer los dos a la vez, y
-    // bajar por la LAN lo que después el server ya no va a tener que mandar
-    // es la diferencia entre un segundo y varios minutos de internet.
+    // A server that shows up waits for the local network, for the same
+    // reason as in the loop below: when the app starts, both usually show
+    // up at once, and downloading over the LAN what the server won't then
+    // have to send is the difference between a second and several minutes
+    // of internet.
     if remote {
         let handle = handle.clone();
         let uid = uid.to_string();
@@ -204,7 +210,7 @@ pub fn peer_came_online(handle: &AppHandle, uid: &str) {
     crate::pairing::sync_files_auto(handle.clone(), uid.to_string());
 }
 
-/// Los dispositivos vinculados y disponibles que no son un server.
+/// The paired and available devices that aren't a server.
 pub(crate) fn lan_peers(handle: &AppHandle) -> Vec<String> {
     let state = handle.state::<AppState>();
     let guard = state.db.lock();
@@ -222,8 +228,8 @@ pub fn spawn(handle: AppHandle) {
     std::thread::spawn(move || {
         restore_pending(&handle);
         let mut since_periodic = std::time::Instant::now();
-        // Antes de este momento no se vuelve a intentar propagar. Sólo se
-        // mueve cuando un intento no encontró a nadie.
+        // Before this moment, propagation isn't retried. It only moves
+        // forward when an attempt found no one.
         let mut next_try = std::time::Instant::now();
         loop {
             std::thread::sleep(TICK);
@@ -248,6 +254,7 @@ pub fn spawn(handle: AppHandle) {
                     log::debug!("[autosync] turned off in settings");
                     continue;
                 }
+
                 state
                     .peers
                     .merged_list(&conn)
@@ -257,15 +264,15 @@ pub fn spawn(handle: AppHandle) {
                     .collect()
             };
             if peers.is_empty() {
-                // No se limpia lo pendiente: un cambio hecho con el otro
-                // dispositivo apagado tiene que viajar cuando vuelva, no
-                // perderse acá. Pero se espera antes de volver a mirar, o esto
-                // es un bucle ocupado contra el lock de la DB.
+                // The pending flag isn't cleared: a change made while the
+                // other device is off has to travel when it comes back, not
+                // get lost here. But it waits before looking again, or this
+                // is a busy loop against the DB lock.
                 next_try = std::time::Instant::now() + RETRY_WHEN_ALONE;
-                // Distinguir los dos casos: acá se llega tanto con algo
-                // pendiente como en la pasada periódica sin nada que hacer, y
-                // decir siempre "hay cambios para propagar" hace perder tiempo
-                // leyendo el log.
+                // Distinguish the two cases: this is reached both with
+                // something pending and on the periodic pass with nothing to
+                // do, and always saying "there are changes to propagate"
+                // wastes time when reading the log.
                 if due_change {
                     log::info!(
                         "[autosync] there are changes to propagate but no paired device is available"
@@ -273,8 +280,8 @@ pub fn spawn(handle: AppHandle) {
                 } else {
                     log::debug!("[autosync] no paired device available");
                 }
-                // Puede estar marcado offline por un sondeo viejo: preguntar de
-                // nuevo ahora en vez de esperar la red de contención.
+                // It could be marked offline from a stale probe: ask again
+                // now instead of waiting for the safety net.
                 let h = handle.clone();
                 std::thread::spawn(move || crate::discovery::probe_once(&h));
                 continue;
@@ -287,9 +294,9 @@ pub fn spawn(handle: AppHandle) {
                 log::info!("[autosync] local changes -> {} device(s)", peers.len());
             }
 
-            // Red y batería. Un sync automático puede esperar; uno pedido a
-            // mano no pasa por acá, y es la salida cuando el sistema operativo
-            // se equivoca sobre la red.
+            // Network and battery. An automatic sync can wait; one requested
+            // by hand doesn't go through here, and it's the fallback for
+            // when the OS gets the network wrong.
             let (conditions, limits) = {
                 let now = crate::power::current(&state);
                 let guard = state.db.lock();
@@ -297,28 +304,29 @@ pub fn spawn(handle: AppHandle) {
                 (now, crate::power::Limits::load(&conn))
             };
 
-            // La red local primero, el server después.
+            // The local network first, the server after.
             //
-            // No es "uno u otro": el server necesita los bytes igual, es el
-            // archivo. Es en qué orden. La LAN mueve un track en un segundo y
-            // sin gastar internet; cuando después le toca al server, el
-            // inventario ya cuenta lo que acaba de llegar y le pide sólo lo
-            // que de verdad falta. Al revés, lo mismo se bajaba dos veces y la
-            // primera por el camino lento.
+            // It's not "one or the other": the server needs the bytes too,
+            // it's the file server. It's about the order. The LAN moves a
+            // track in a second and without spending internet; when it's
+            // later the server's turn, the inventory already counts what
+            // just arrived and asks only for what's really missing. The
+            // other way around, the same thing would download twice, the
+            // first time over the slow path.
             let (servers, lan): (Vec<_>, Vec<_>) = peers
                 .into_iter()
                 .partition(|(_, platform)| platform == sway_core::pairing::PLATFORM_SERVER);
             let mut servers: Vec<String> = servers.into_iter().map(|(uid, _)| uid).collect();
             let lan: Vec<String> = lan.into_iter().map(|(uid, _)| uid).collect();
 
-            // La red de contención no cubre a quien ya tiene a alguien
-            // mirándolo. Con la conexión de espera abierta (ver `watch.rs`) el
-            // server avisa de cualquier cosa en el momento, así que esta
-            // pasada sólo puede terminar en "no había nada que hacer" — y
-            // averiguarlo cuesta el inventario entero: con 5000 temas son 4 MB
-            // cada diez minutos, 576 MB por día, por dispositivo y por
-            // internet. Se saltea sólo la pasada periódica: un cambio local
-            // hay que empujarlo igual, lo esté mirando alguien o no.
+            // The safety net doesn't cover a device someone is already
+            // watching. With the standing connection open (see `watch.rs`)
+            // the server announces anything as it happens, so this pass can
+            // only end in "there was nothing to do" — and finding that out
+            // costs the whole inventory: with 5000 tracks that's 4 MB every
+            // ten minutes, 576 MB a day, per device and over the internet.
+            // Only the periodic pass is skipped: a local change has to be
+            // pushed regardless of whether someone is watching it or not.
             if !due_change {
                 servers.retain(|uid| {
                     let watched = state.watchers.is_live(uid);
@@ -367,20 +375,20 @@ mod tests {
     #[test]
     fn a_change_waits_for_the_quiet_period() {
         let a = AutoSync::default();
-        assert!(!a.is_settled(), "sin cambios no hay nada que hacer");
+        assert!(!a.is_settled(), "no changes, nothing to do");
 
-        assert!(a.note_change(), "el primero hay que anotarlo");
-        assert!(!a.note_change(), "el segundo ya está anotado");
-        assert!(!a.is_settled(), "recién cambió: hay que esperar");
+        assert!(a.note_change(), "the first one has to be recorded");
+        assert!(!a.note_change(), "the second one is already recorded");
+        assert!(!a.is_settled(), "just changed: has to wait");
 
-        // Simula que pasó el respiro.
+        // Simulates that the quiet period has passed.
         a.pending_since
             .store(crate::db::now_ms() - QUIET_PERIOD_MS - 1, Ordering::Relaxed);
         assert!(a.is_settled());
     }
 
-    /// Importar una carpeta son cientos de cambios seguidos: cada uno reinicia
-    /// la espera para que salga un solo sync al final.
+    /// Importing a folder is hundreds of changes in a row: each one restarts
+    /// the wait so only one sync fires at the end.
     #[test]
     fn a_new_change_restarts_the_wait() {
         let a = AutoSync::default();
@@ -391,18 +399,18 @@ mod tests {
         assert!(!a.is_settled());
     }
 
-    /// Lo pendiente no se consume al mirarlo: si no hay a quién mandárselo,
-    /// tiene que seguir pendiente hasta que aparezca un dispositivo.
+    /// Checking the pending change doesn't consume it: if there's no one to
+    /// send it to, it has to stay pending until a device shows up.
     #[test]
     fn checking_does_not_consume_the_pending_change() {
         let a = AutoSync::default();
         a.pending_since
             .store(crate::db::now_ms() - QUIET_PERIOD_MS - 1, Ordering::Relaxed);
         assert!(a.is_settled());
-        assert!(a.is_settled(), "mirarlo dos veces no lo borra");
+        assert!(a.is_settled(), "checking it twice doesn't clear it");
         assert_ne!(a.pending(), 0);
-        assert!(a.clear(), "había algo que limpiar");
-        assert!(!a.clear(), "y limpiar de nuevo no vuelve a escribir");
+        assert!(a.clear(), "there was something to clear");
+        assert!(!a.clear(), "and clearing again doesn't write again");
         assert!(!a.is_settled());
     }
 }

@@ -1,10 +1,10 @@
-//! Vinculación contra el server, hablándole por el protocolo real.
+//! Pairing against the server, talking to it over the real protocol.
 //!
-//! El server se levanta de verdad —su socket, su base, su hilo— y del otro
-//! lado hay un cliente que hace exactamente lo que hace la app: handshake
-//! Noise, `PairRequest`, presentación. Nada de llamar funciones sueltas y
-//! afirmar sobre el resultado: lo que importa es que un dispositivo con el
-//! token entre y uno sin el token no.
+//! The server is brought up for real —its socket, its database, its
+//! thread— and on the other side there's a client doing exactly what the
+//! app does: Noise handshake, `PairRequest`, introduction. No calling loose
+//! functions and asserting on the result: what matters is that a device with
+//! the token gets in and one without it doesn't.
 
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -16,9 +16,9 @@ use sway_core::wire::{generate_keypair, Msg, Session};
 use sway_server::host::ServerHost;
 use sway_server::serve::{self, Server};
 
-const TOKEN: &str = "un-token-de-prueba";
-/// Si algo se queda esperando es un bug: vale más un error que una suite
-/// colgada.
+const TOKEN: &str = "a-test-token";
+/// If something is left waiting it's a bug: an error is worth more than a
+/// suite that hangs.
 const IO_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn tmpdir(tag: &str) -> PathBuf {
@@ -32,13 +32,13 @@ fn tmpdir(tag: &str) -> PathBuf {
     dir
 }
 
-/// Levanta un server con base en memoria y devuelve a dónde conectarse.
+/// Brings up a server with an in-memory database and returns where to connect to it.
 fn start(tag: &str) -> (Arc<Server>, String) {
     let dir = tmpdir(tag);
     let conn = sway_core::rusqlite::Connection::open_in_memory().unwrap();
     db::init_schema(&conn).unwrap();
     db::this_device_uid(&conn).unwrap();
-    db::set_device_name(&conn, "Server de prueba").unwrap();
+    db::set_device_name(&conn, "Test Server").unwrap();
 
     let server = Arc::new(Server {
         host: Arc::new(ServerHost::new(conn, dir)),
@@ -53,7 +53,7 @@ fn start(tag: &str) -> (Arc<Server>, String) {
     (server, addr)
 }
 
-/// El lado de la app: abre el canal cifrado y queda listo para hablar.
+/// The app's side: opens the encrypted channel and is ready to talk.
 fn connect(addr: &str) -> Session {
     let stream = TcpStream::connect(addr).unwrap();
     stream.set_read_timeout(Some(IO_TIMEOUT)).unwrap();
@@ -65,7 +65,7 @@ fn connect(addr: &str) -> Session {
 fn pair_request(token: Option<&str>) -> Msg {
     Msg::PairRequest {
         uid: "device-1".into(),
-        name: "Celu".into(),
+        name: "Phone".into(),
         platform: "android".into(),
         token: token.map(|t| t.to_string()),
     }
@@ -74,7 +74,7 @@ fn pair_request(token: Option<&str>) -> Msg {
 fn hello() -> Msg {
     Msg::Hello {
         uid: "device-1".into(),
-        name: "Celu".into(),
+        name: "Phone".into(),
         platform: "android".into(),
         tracks: 3,
         playlists: 1,
@@ -82,7 +82,7 @@ fn hello() -> Msg {
     }
 }
 
-/// Cuántos dispositivos tiene guardados el server.
+/// How many devices the server has stored.
 fn devices(server: &Server) -> i64 {
     server
         .host
@@ -95,18 +95,18 @@ fn devices(server: &Server) -> i64 {
 }
 
 #[test]
-fn con_el_token_correcto_el_dispositivo_queda_vinculado() {
+fn with_the_right_token_the_device_gets_paired() {
     let (server, addr) = start("ok");
     let mut sess = connect(&addr);
 
     sess.send(&pair_request(Some(TOKEN))).unwrap();
     match sess.recv().unwrap() {
-        Msg::PairResponse { accepted } => assert!(accepted, "el server rechazó el token bueno"),
-        other => panic!("se esperaba PairResponse, llegó {other:?}"),
+        Msg::PairResponse { accepted } => assert!(accepted, "the server rejected the correct token"),
+        other => panic!("expected PairResponse, got {other:?}"),
     }
     sess.send(&Msg::PairAck { accepted: true }).unwrap();
 
-    // Presentación mutua: el server manda el suyo y espera el nuestro.
+    // Mutual introduction: the server sends its own and waits for ours.
     match sess.recv().unwrap() {
         Msg::Hello { platform, .. } => assert_eq!(platform, "server"),
         other => panic!("expected Hello, got {other:?}"),
@@ -114,43 +114,43 @@ fn con_el_token_correcto_el_dispositivo_queda_vinculado() {
     sess.send(&hello()).unwrap();
     drop(sess);
 
-    // La fila se escribe en el hilo del server, después de mandar el Hello.
+    // The row is written on the server's thread, after sending the Hello.
     for _ in 0..100 {
         if devices(&server) == 1 {
             break;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert_eq!(devices(&server), 1, "el dispositivo no quedó guardado");
+    assert_eq!(devices(&server), 1, "the device did not get stored");
 }
 
 #[test]
-fn sin_el_token_no_entra() {
+fn without_the_token_it_does_not_get_in() {
     let (server, addr) = start("mal");
     let mut sess = connect(&addr);
 
-    sess.send(&pair_request(Some("token-equivocado"))).unwrap();
+    sess.send(&pair_request(Some("wrong-token"))).unwrap();
     match sess.recv().unwrap() {
-        Msg::PairResponse { accepted } => assert!(!accepted, "entró con un token que no es"),
-        other => panic!("se esperaba PairResponse, llegó {other:?}"),
+        Msg::PairResponse { accepted } => assert!(!accepted, "got in with the wrong token"),
+        other => panic!("expected PairResponse, got {other:?}"),
     }
     drop(sess);
     std::thread::sleep(Duration::from_millis(100));
-    assert_eq!(devices(&server), 0, "guardó un dispositivo que no probó nada");
+    assert_eq!(devices(&server), 0, "stored a device that proved nothing");
 }
 
 #[test]
-fn un_pair_request_sin_token_tampoco_entra() {
+fn a_pair_request_without_a_token_does_not_get_in_either() {
     let (server, addr) = start("vacio");
     let mut sess = connect(&addr);
 
-    // Es lo que manda la app cuando se vincula con otro dispositivo con
-    // pantalla: allá alcanza el código de seis dígitos, acá no hay quién lo
-    // mire, así que tiene que ser un no.
+    // This is what the app sends when pairing with another device that has a
+    // screen: there it's enough with the six-digit code, but here there's
+    // nobody to look at it, so it has to be a no.
     sess.send(&pair_request(None)).unwrap();
     match sess.recv().unwrap() {
-        Msg::PairResponse { accepted } => assert!(!accepted, "vinculó sin ninguna prueba"),
-        other => panic!("se esperaba PairResponse, llegó {other:?}"),
+        Msg::PairResponse { accepted } => assert!(!accepted, "paired without any proof"),
+        other => panic!("expected PairResponse, got {other:?}"),
     }
     drop(sess);
     std::thread::sleep(Duration::from_millis(100));
@@ -158,37 +158,37 @@ fn un_pair_request_sin_token_tampoco_entra() {
 }
 
 #[test]
-fn un_desconocido_que_saluda_se_entera_de_que_no_esta_vinculado() {
+fn a_stranger_that_says_hello_finds_out_it_is_not_paired() {
     let (_server, addr) = start("hola");
     let mut sess = connect(&addr);
 
     sess.send(&hello()).unwrap();
     match sess.recv().unwrap() {
         Msg::NotPaired => {}
-        other => panic!("se esperaba NotPaired, llegó {other:?}"),
+        other => panic!("expected NotPaired, got {other:?}"),
     }
 }
 
 #[test]
-fn una_clave_distinta_para_un_uid_conocido_se_rechaza() {
+fn a_different_key_for_a_known_uid_gets_rejected() {
     let (server, addr) = start("clave");
 
-    // Ya vinculado, con una clave que no es la que va a presentar el impostor.
+    // Already paired, with a key different from the one the impostor is about to present.
     server
         .host
         .with_db(|conn| {
-            sway_core::pairing::store_device(conn, "device-1", "Celu", "android", b"la-original")
+            sway_core::pairing::store_device(conn, "device-1", "Phone", "android", b"the-original")
         })
         .unwrap();
 
     let mut sess = connect(&addr);
     sess.send(&hello()).unwrap();
     match sess.recv().unwrap() {
-        Msg::Reject { reason } => assert!(reason.contains("different key"), "motivo: {reason}"),
-        other => panic!("se esperaba Reject, llegó {other:?}"),
+        Msg::Reject { reason } => assert!(reason.contains("different key"), "reason: {reason}"),
+        other => panic!("expected Reject, got {other:?}"),
     }
 
-    // Y queda anotado: una clave que cambia no se resuelve sola.
+    // And it gets logged: a key that changes doesn't resolve itself.
     let logged: i64 = server
         .host
         .with_db(|conn| {
@@ -205,22 +205,23 @@ fn una_clave_distinta_para_un_uid_conocido_se_rechaza() {
 }
 
 #[test]
-fn el_token_no_alcanza_si_la_clave_no_coincide() {
+fn the_token_is_not_enough_if_the_key_does_not_match() {
     let (server, addr) = start("token-clave");
     server
         .host
         .with_db(|conn| {
-            sway_core::pairing::store_device(conn, "device-1", "Celu", "android", b"la-original")
+            sway_core::pairing::store_device(conn, "device-1", "Phone", "android", b"the-original")
         })
         .unwrap();
 
-    // Tiene el token bueno, pero se presenta con el uid de un dispositivo ya
-    // vinculado y otra clave: es exactamente la forma del ataque que el token
-    // no puede resolver, y por eso la clave se mira primero.
+    // It has the right token, but presents itself with the uid of an
+    // already-paired device and a different key: this is exactly the shape
+    // of the attack the token cannot solve, which is why the key is checked
+    // first.
     let mut sess = connect(&addr);
     sess.send(&pair_request(Some(TOKEN))).unwrap();
     match sess.recv().unwrap() {
-        Msg::Reject { reason } => assert!(reason.contains("different key"), "motivo: {reason}"),
-        other => panic!("se esperaba Reject, llegó {other:?}"),
+        Msg::Reject { reason } => assert!(reason.contains("different key"), "reason: {reason}"),
+        other => panic!("expected Reject, got {other:?}"),
     }
 }

@@ -1,15 +1,15 @@
-//! Lo que hace el server con una conexión entrante.
+//! What the server does with an incoming connection.
 //!
-//! Es la misma ceremonia que corre la app (ver `app/src-tauri/src/pairing.rs`)
-//! con una sola diferencia, y es la que justifica que exista este archivo:
-//! cuando llega un `PairRequest`, la app le muestra seis dígitos a una persona
-//! y espera; acá no hay persona, así que la prueba es el token de la config.
+//! It's the same ceremony the app runs (see `app/src-tauri/src/pairing.rs`)
+//! with a single difference, and it's the one that justifies this file's
+//! existence: when a `PairRequest` arrives, the app shows a person six digits
+//! and waits; here there's no person, so the proof is the config's token.
 //!
-//! Todo lo demás —verificar la clave contra la que ya teníamos, rechazar la
-//! que no coincide, dar de alta el dispositivo, servir el manifiesto y los
-//! archivos— es literalmente el código de `sway_core`. Una copia propia del
-//! protocolo acá sería una segunda implementación para mantener al día, y la
-//! que se quede atrás corrompe bibliotecas.
+//! Everything else — verifying the key against the one already stored,
+//! rejecting one that doesn't match, registering the device, serving the
+//! manifest and the files — is literally `sway_core`'s code. A separate copy
+//! of the protocol here would be a second implementation to keep up to date,
+//! and the one that falls behind corrupts libraries.
 
 use crate::host::ServerHost;
 use anyhow::{anyhow, Result};
@@ -42,8 +42,9 @@ pub fn run(server: Arc<Server>, listener: TcpListener) -> Result<()> {
                 .map(|a| a.to_string())
                 .unwrap_or_else(|_| "?".into());
             if let Err(e) = serve(&server, stream) {
-                // Conectar y cortar sin decir nada es lo que hace el sondeo de
-                // alcanzabilidad de la app: tráfico esperado, no un error.
+                // Connecting and hanging up without saying anything is what
+                // the app's reachability probe does: expected traffic, not
+                // an error.
                 if is_disconnect(&e) {
                     log::debug!("[server] {peer} disconnected without saying anything");
                 } else {
@@ -83,10 +84,10 @@ fn serve(server: &Server, stream: TcpStream) -> Result<()> {
             match known {
                 Known::Trusted => {}
                 Known::KeyMismatch => {
-                    // Se registra ANTES de contestar: si la conexión se corta
-                    // al mandar el rechazo, el intento tiene que quedar
-                    // anotado igual. Un evento de seguridad no depende de que
-                    // el otro lado llegue a escuchar.
+                    // Logged BEFORE answering: if the connection drops while
+                    // sending the rejection, the attempt still has to be
+                    // recorded. A security event doesn't depend on the other
+                    // side sticking around to listen.
                     server
                         .host
                         .with_db(|conn| Ok(pair::log_key_mismatch(conn, &uid, &name)))?;
@@ -96,8 +97,8 @@ fn serve(server: &Server, stream: TcpStream) -> Result<()> {
                     return Err(anyhow!("different key for {uid}"));
                 }
                 Known::Unknown => {
-                    // Que se entere y limpie su fila, en vez de seguir
-                    // intentando contra un server que no lo tiene.
+                    // Let it find out and clean up its own row, instead of
+                    // continuing to try against a server that doesn't have it.
                     let _ = sess.send(&Msg::NotPaired);
                     return Ok(());
                 }
@@ -109,10 +110,10 @@ fn serve(server: &Server, stream: TcpStream) -> Result<()> {
                 .with_db(|conn| Ok(pair::touch_device(conn, &uid, &name)))?;
             log::info!("[server] {name} connected ({tracks} tracks, {playlists} playlists)");
             let stats = engine::serve_requests(&*server.host, &mut sess, &uid)?;
-            // El que atiende no decide nada: responde pedidos. Sin este
-            // resumen su log es una tira de líneas sueltas y no hay forma de
-            // leer de un vistazo si la corrida movió algo — y acá no hay
-            // ninguna pantalla donde mirarlo de otra manera.
+            // Whoever handles this doesn't decide anything: it just answers
+            // requests. Without this summary its log is a string of loose
+            // lines with no way to tell at a glance whether the run moved
+            // anything — and there's no screen here to check it another way.
             if stats.moved_something() {
                 log::info!(
                     "[server] {name}: {} received, {} sent, {} organization, {} deleted",
@@ -127,8 +128,9 @@ fn serve(server: &Server, stream: TcpStream) -> Result<()> {
             Ok(())
         }
 
-        // Lo sacaron de la lista del otro lado. Sólo vale si su clave es la que
-        // teníamos guardada — o sea, si el handshake probó que es él.
+        // They removed it from the list on the other side. Only valid if its
+        // key is the one we had stored — that is, if the handshake proved
+        // it's really them.
         Msg::Unpair { uid } => {
             let known = server
                 .host
@@ -147,7 +149,7 @@ fn serve(server: &Server, stream: TcpStream) -> Result<()> {
     }
 }
 
-/// Vinculación sin pantalla: el token hace lo que allá hacen los seis dígitos.
+/// Pairing without a screen: the token does what the six digits do over there.
 fn pair_device(
     server: &Server,
     sess: &mut Session,
@@ -160,7 +162,7 @@ fn pair_device(
         .host
         .with_db(|conn| Ok(pair::known_state(conn, uid, &sess.peer_pubkey)))?;
     if let Known::KeyMismatch = known {
-        // Igual que arriba: primero queda anotado, después se contesta.
+        // Same as above: logged first, answered after.
         server
             .host
             .with_db(|conn| Ok(pair::log_key_mismatch(conn, uid, name)))?;
@@ -170,9 +172,9 @@ fn pair_device(
         return Err(anyhow!("different key for {uid}"));
     }
 
-    // El token se compara entero (ver `pair::secret_eq`): con una comparación
-    // que corta en la primera diferencia, el tiempo de respuesta filtra cuántos
-    // caracteres del principio son correctos.
+    // The token is compared in full (see `pair::secret_eq`): with a
+    // comparison that short-circuits on the first mismatch, response time
+    // leaks how many characters at the start are correct.
     let ok = token.map(|t| pair::secret_eq(t, &server.token)).unwrap_or(false);
     if !ok {
         let _ = sess.send(&Msg::PairResponse { accepted: false });
@@ -181,8 +183,8 @@ fn pair_device(
     }
 
     sess.send(&Msg::PairResponse { accepted: true })?;
-    // El otro lado también tiene que aceptar: alcanza con que uno solo diga que
-    // no para que no haya vínculo.
+    // The other side also has to accept: it's enough for just one of them to
+    // say no for there to be no pairing.
     match sess.recv()? {
         Msg::PairAck { accepted: true } => {}
         Msg::PairAck { accepted: false } => {
@@ -201,8 +203,8 @@ fn pair_device(
         .with_db(|conn| pair::store_device(conn, uid, name, platform, &sess.peer_pubkey))?;
     log::info!("[server] {name} ({platform}) paired");
 
-    // Presentación mutua, igual que entre dos dispositivos: los dos mandan
-    // primero y después esperan, así que no se traban.
+    // Mutual introduction, just like between two devices: both send first
+    // and wait afterward, so neither gets stuck.
     hello_back(server, sess)?;
     match sess.recv()? {
         Msg::Hello { clock_ms, .. } => {
@@ -229,8 +231,9 @@ fn hello_back(server: &Server, sess: &mut Session) -> Result<()> {
     })
 }
 
-/// Un reloj corrido elige mal en el merge por LWW, y en un server que nadie
-/// mira es exactamente el tipo de cosa que no se descubre hasta que ya pasó.
+/// A clock that's off picks the wrong side in an LWW merge, and on a server
+/// nobody watches that's exactly the kind of thing that isn't discovered
+/// until it's already happened.
 fn report_clock(name: &str, their_clock: i64) {
     let skew = their_clock - db::now_ms();
     if skew.abs() > 5 * 60 * 1000 {

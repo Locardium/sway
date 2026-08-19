@@ -1,28 +1,28 @@
-//! Papelera propia de la biblioteca.
+//! The library's own trash.
 //!
-//! Un borrado que llega por sync no destruye bytes. El archivo se mueve a
-//! `<música>/.sway-trash/` y se queda ahí un tiempo largo antes de
-//! desaparecer de verdad.
+//! A deletion that arrives via sync doesn't destroy bytes. The file gets
+//! moved to `<music>/.sway-trash/` and stays there for a long while before
+//! actually disappearing.
 //!
-//! El motivo es el requisito duro de toda la Fase 5: nunca perder música. Un
-//! borrado local lo hiciste vos mirando la pantalla; uno que llega por la red
-//! puede venir de un dispositivo desincronizado, de un tombstone viejo o de un
-//! bug. La papelera es lo que hace que ese caso sea recuperable en vez de
-//! definitivo.
+//! The reason is the hard requirement of all of Phase 5: never lose music. A
+//! local deletion you did yourself while looking at the screen; one that
+//! arrives over the network could come from an out-of-sync device, an old
+//! tombstone, or a bug. The trash is what makes that case recoverable instead
+//! of final.
 
 use std::path::{Path, PathBuf};
 
-/// Cuánto sobrevive un archivo borrado antes de que se limpie de verdad.
+/// How long a deleted file survives before it's actually cleaned up.
 pub const RETENTION_DAYS: u64 = 30;
 
 pub fn trash_dir(music_dir: &Path) -> PathBuf {
     music_dir.join(".sway-trash")
 }
 
-/// Manda un archivo a la papelera. Devuelve dónde quedó.
+/// Sends a file to the trash. Returns where it ended up.
 ///
-/// Nunca pisa: si ya hay algo con ese nombre (borraste dos archivos que se
-/// llamaban igual), desambigua.
+/// Never overwrites: if something with that name already exists (you deleted
+/// two files with the same name), it disambiguates.
 pub fn move_to_trash(music_dir: &Path, path: &Path) -> std::io::Result<PathBuf> {
     let dir = trash_dir(music_dir);
     std::fs::create_dir_all(&dir)?;
@@ -45,8 +45,8 @@ pub fn move_to_trash(music_dir: &Path, path: &Path) -> std::io::Result<PathBuf> 
         };
         i += 1;
     }
-    // `rename` es lo barato y lo atómico; el fallback cubre el caso de que la
-    // papelera termine en otro volumen que el archivo.
+    // `rename` is cheap and atomic; the fallback covers the case where the
+    // trash ends up on a different volume than the file.
     match std::fs::rename(path, &dest) {
         Ok(()) => Ok(dest),
         Err(_) => {
@@ -57,7 +57,7 @@ pub fn move_to_trash(music_dir: &Path, path: &Path) -> std::io::Result<PathBuf> 
     }
 }
 
-/// Borra de verdad lo que ya cumplió la retención. Se corre al arrancar.
+/// Actually deletes what has already met the retention period. Runs at startup.
 pub fn purge_old(music_dir: &Path, retention_days: u64) -> usize {
     let dir = trash_dir(music_dir);
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -72,7 +72,7 @@ pub fn purge_old(music_dir: &Path, retention_days: u64) -> usize {
         if !meta.is_file() {
             continue;
         }
-        // Sin fecha legible se conserva: ante la duda, no borrar.
+        // With no readable date, it's kept: when in doubt, don't delete.
         let Ok(modified) = meta.modified() else { continue };
         if modified < cutoff && std::fs::remove_file(entry.path()).is_ok() {
             removed += 1;
@@ -105,19 +105,19 @@ mod tests {
         std::fs::write(&f, b"audio").unwrap();
 
         let dest = move_to_trash(&music, &f).unwrap();
-        assert!(!f.exists(), "sale de la biblioteca");
-        assert!(dest.exists(), "pero sigue existiendo");
+        assert!(!f.exists(), "leaves the library");
+        assert!(dest.exists(), "but still exists");
         assert_eq!(std::fs::read(&dest).unwrap(), b"audio");
         std::fs::remove_dir_all(&music).ok();
     }
 
-    /// Dos archivos distintos que se llamaban igual tienen que sobrevivir los
-    /// dos: la papelera no puede pisar lo que ya rescató.
+    /// Two different files that had the same name both have to survive:
+    /// the trash can't overwrite what it already rescued.
     #[test]
     fn a_name_collision_in_the_trash_does_not_overwrite() {
         let music = tmpdir("collide");
-        for content in [b"primero".as_slice(), b"segundo".as_slice()] {
-            let f = music.join("mismo.flac");
+        for content in [b"first".as_slice(), b"second".as_slice()] {
+            let f = music.join("same.flac");
             std::fs::write(&f, content).unwrap();
             move_to_trash(&music, &f).unwrap();
         }
@@ -132,13 +132,13 @@ mod tests {
     #[test]
     fn purge_keeps_recent_files() {
         let music = tmpdir("purge");
-        let f = music.join("nuevo.flac");
+        let f = music.join("new.flac");
         std::fs::write(&f, b"x").unwrap();
         move_to_trash(&music, &f).unwrap();
 
-        // Recién borrado: la retención lo protege.
+        // Just deleted: retention protects it.
         assert_eq!(purge_old(&music, RETENTION_DAYS), 0);
-        // Con retención cero, se va.
+        // With zero retention, it goes.
         assert_eq!(purge_old(&music, 0), 1);
         std::fs::remove_dir_all(&music).ok();
     }

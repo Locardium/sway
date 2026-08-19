@@ -1,6 +1,6 @@
 import { platform } from '@tauri-apps/plugin-os';
 
-// Fuera de Tauri (browser normal en dev sin webview) platform() no aplica.
+// Outside Tauri (a regular browser in dev without a webview), platform() doesn't apply.
 export const isAndroid = (): boolean => {
   if (!('__TAURI_INTERNALS__' in window)) return false;
   try {

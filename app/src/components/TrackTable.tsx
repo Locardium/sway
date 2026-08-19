@@ -9,7 +9,7 @@ export type ColKey = 'title' | 'artist' | 'album' | 'genre' | 'bpm' | 'duration'
 interface ColDef {
   key: ColKey;
   label: string;
-  weight: number; // ancho relativo (proporcional al viewport)
+  weight: number; // relative width (proportional to the viewport)
   visible: boolean;
   numeric?: boolean;
 }
@@ -30,7 +30,7 @@ const MIN_WEIGHT = 0.4;
 function loadCols(): ColDef[] {
   try {
     const saved: Partial<ColDef>[] = JSON.parse(localStorage.getItem(COLS_STORAGE) ?? '');
-    // Respeta el orden guardado.
+    // Respects the saved order.
     const byKey = new Map(DEFAULT_COLS.map((d) => [d.key, d]));
     const ordered: ColDef[] = [];
     for (const s of saved) {
@@ -40,7 +40,7 @@ function loadCols(): ColDef[] {
         byKey.delete(s.key as ColKey);
       }
     }
-    for (const d of byKey.values()) ordered.push(d); // columnas nuevas al final
+    for (const d of byKey.values()) ordered.push(d); // new columns go at the end
     return ordered.length ? ordered : DEFAULT_COLS;
   } catch {
     return DEFAULT_COLS;
@@ -108,7 +108,7 @@ function TrackTable({
     );
   }, [cols]);
 
-  // Resize de columnas (proporcional: cambia el peso => todas se re-reparten).
+  // Column resize (proportional: changes the weight => all get redistributed).
   useEffect(() => {
     function onMove(e: MouseEvent) {
       const r = resizing.current;
@@ -145,7 +145,7 @@ function TrackTable({
     document.body.classList.add('col-resizing');
   }
 
-  // Reorden de columnas arrastrando el header.
+  // Reorder columns by dragging the header.
   function startColDrag(e: React.MouseEvent, key: ColKey) {
     if ((e.target as HTMLElement).closest('.col-handle')) return;
     e.preventDefault();
@@ -199,8 +199,8 @@ function TrackTable({
     } else {
       onSelectedChange(new Set([t.id]));
       onInspect(t.id);
-      // En Android no hay double-tap ni right-click para "Play" - un tap
-      // simple ya reproduce (ver App.tsx, prop tapToPlay).
+      // On Android there's no double-tap or right-click for "Play" — a single
+      // tap already plays (see App.tsx, tapToPlay prop).
       if (tapToPlay) onPlay(t.id);
     }
     setAnchor(t.id);
@@ -277,11 +277,11 @@ function TrackTable({
               className={[
                 t.id === currentId ? 'playing' : '',
                 selected.has(t.id) ? 'selected' : '',
-                // Sin archivo en este dispositivo (sync selectiva): se sigue
-                // viendo y se puede organizar, pero no suena.
+                // No file on this device (selective sync): it still shows up
+                // and can be organized, but it won't play.
                 t.present === false ? 'absent' : '',
-                // Su playlist no esta marcada para este dispositivo: el
-                // archivo que ya esta no se toca, pero no se sincroniza mas.
+                // Its playlist isn't checked for this device: the file that's
+                // already here is left alone, but it won't sync anymore.
                 t.inScope === false ? 'out-scope' : '',
                 dropInsertIndex === idx ? 'drop-before' : '',
                 dropInsertIndex === idx + 1 && idx === tracks.length - 1 ? 'drop-after' : '',

@@ -1,5 +1,5 @@
-// Caratulas embebidas en los tags: se extraen con lofty, se reducen a thumb
-// y se devuelven como data-URL (el frontend las cachea por track id).
+// Cover art embedded in tags: extracted with lofty, downscaled to a thumb
+// and returned as a data URL (the frontend caches it by track id).
 use crate::id3_sanitize::sanitize_id3v2_date_frames;
 use base64::Engine;
 use lofty::file::{TaggedFile, TaggedFileExt};
@@ -13,9 +13,9 @@ fn read_tagged(path: &Path) -> Option<TaggedFile> {
     match lofty::read_from_path(path) {
         Ok(t) => Some(t),
         Err(e) => {
-            // Mismo caso que import.rs::read_meta: un frame de fecha ID3
-            // corrupto tira el tag entero. Sanitizar y reintentar en memoria
-            // antes de rendirse (ver id3_sanitize.rs).
+            // Same case as import.rs::read_meta: a corrupt ID3 date frame
+            // takes down the whole tag. Sanitize and retry in memory before
+            // giving up (see id3_sanitize.rs).
             log::warn!("cover: lofty read_from_path failed for {}: {e}", path.display());
             let bytes = std::fs::read(path).ok()?;
             let patched = sanitize_id3v2_date_frames(&bytes)?;

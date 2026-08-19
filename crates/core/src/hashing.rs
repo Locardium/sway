@@ -1,15 +1,15 @@
-//! Hash de contenido (blake3) de los archivos de la biblioteca.
+//! Content hash (blake3) of the library files.
 //!
-//! El hash es la identidad de los BYTES: es lo que se pide en una
-//! transferencia, lo que se verifica al terminarla y lo que permite darse
-//! cuenta de que dos dispositivos ya tienen el mismo archivo aunque lo hayan
-//! importado por separado con nombres distintos.
+//! The hash is the identity of the BYTES: it's what gets requested in a
+//! transfer, what gets verified when it finishes, and what allows detecting
+//! that two devices already have the same file even if they imported it
+//! separately under different names.
 //!
-//! Restricciones que dan forma a este modulo:
-//! - Bibliotecas de 100+ GB. Nunca leer un archivo entero en memoria, y el
-//!   backfill inicial no puede bloquear la UI.
-//! - Rehashear en cada arranque seria inaceptable: `(size, mtime)` funciona de
-//!   cache. Si ninguno cambio, el hash guardado sigue valiendo.
+//! Constraints that shape this module:
+//! - Libraries of 100+ GB. Never read an entire file into memory, and the
+//!   initial backfill can't block the UI.
+//! - Rehashing on every startup would be unacceptable: `(size, mtime)` acts as
+//!   a cache. If neither changed, the stored hash is still valid.
 
 use rusqlite::Connection;
 use std::io::Read;
@@ -17,7 +17,7 @@ use std::path::Path;
 
 const CHUNK: usize = 256 * 1024;
 
-/// blake3 del archivo, leido de a pedazos.
+/// blake3 of the file, read in chunks.
 pub fn hash_file(path: &Path) -> std::io::Result<String> {
     let mut f = std::fs::File::open(path)?;
     let mut hasher = blake3::Hasher::new();
@@ -32,7 +32,7 @@ pub fn hash_file(path: &Path) -> std::io::Result<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-/// `(tamaño, mtime en ms)` del archivo.
+/// `(size, mtime in ms)` of the file.
 pub fn file_stamp(path: &Path) -> std::io::Result<(i64, i64)> {
     let md = std::fs::metadata(path)?;
     let mtime = md
@@ -44,19 +44,19 @@ pub fn file_stamp(path: &Path) -> std::io::Result<(i64, i64)> {
     Ok((md.len() as i64, mtime))
 }
 
-/// Hashea un track y guarda hash + stamp. No-op si el stamp guardado coincide
-/// con el del archivo (nada cambio desde la ultima vez).
+/// Hashes a track and stores hash + stamp. No-op if the stored stamp matches
+/// the file's (nothing changed since last time).
 ///
-/// El backfill de arranque (`spawn_hash_backfill` en lib.rs) no lo usa a
-/// proposito: necesita calcular el hash FUERA del lock de la DB para no
-/// congelar la UI. Este es el camino de un solo track, y es el que va a usar
-/// la verificacion post-transferencia en 5.4.
+/// The startup backfill (`spawn_hash_backfill` in lib.rs) intentionally
+/// doesn't use it: it needs to compute the hash OUTSIDE the DB lock so it
+/// doesn't freeze the UI. This is the single-track path, and it's the one
+/// the post-transfer verification in 5.4 will use.
 #[allow(dead_code)]
 pub fn hash_track(conn: &Connection, id: i64, path: &Path) -> anyhow::Result<Option<String>> {
     let (size, mtime) = match file_stamp(path) {
         Ok(v) => v,
-        // Archivo faltante: no es un error fatal — puede ser un track legacy
-        // fuera de la carpeta gestionada, o un blob todavia no transferido.
+        // Missing file: not a fatal error — could be a legacy track outside
+        // the managed folder, or a blob not yet transferred.
         Err(_) => return Ok(None),
     };
     let current: (Option<String>, Option<i64>, Option<i64>) = conn.query_row(
@@ -77,8 +77,8 @@ pub fn hash_track(conn: &Connection, id: i64, path: &Path) -> anyhow::Result<Opt
     Ok(Some(hash))
 }
 
-/// Tracks que todavia no tienen hash valido (nunca se hasheo, o el archivo
-/// cambio de tamaño/fecha desde la ultima vez).
+/// Tracks that don't yet have a valid hash (never hashed, or the file's
+/// size/date changed since last time).
 pub fn pending(conn: &Connection) -> rusqlite::Result<Vec<(i64, String)>> {
     let mut stmt = conn.prepare(
         "SELECT id, path FROM tracks
@@ -98,7 +98,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("a.bin");
         let b = dir.join("b.bin");
-        // Mas grande que un chunk, para ejercitar el loop de lectura.
+        // Larger than a chunk, to exercise the read loop.
         let data: Vec<u8> = (0..(CHUNK * 2 + 7)).map(|i| (i % 251) as u8).collect();
         std::fs::write(&a, &data).unwrap();
         std::fs::write(&b, &data).unwrap();
@@ -123,18 +123,18 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sway-stamp-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("t.bin");
-        std::fs::write(&f, b"hola").unwrap();
+        std::fs::write(&f, b"hello").unwrap();
         conn.execute("INSERT INTO tracks (id, path) VALUES (1, ?1)", [f.to_str().unwrap()])
             .unwrap();
 
         let first = hash_track(&conn, 1, &f).unwrap().unwrap();
         assert!(pending(&conn).unwrap().is_empty());
 
-        // Mismo stamp -> devuelve el guardado sin releer.
+        // Same stamp -> returns the stored value without rereading.
         assert_eq!(hash_track(&conn, 1, &f).unwrap().unwrap(), first);
 
-        // Contenido distinto -> stamp distinto -> rehashea.
-        std::fs::write(&f, b"otra cosa mariposa").unwrap();
+        // Different content -> different stamp -> rehashes.
+        std::fs::write(&f, b"totally different content").unwrap();
         let second = hash_track(&conn, 1, &f).unwrap().unwrap();
         assert_ne!(first, second);
         std::fs::remove_dir_all(&dir).ok();
@@ -146,9 +146,9 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE tracks (id INTEGER PRIMARY KEY, path TEXT, content_hash TEXT,
                 size_bytes INTEGER, mtime_ms INTEGER);
-             INSERT INTO tracks (id, path) VALUES (1, '/no/existe.flac');",
+             INSERT INTO tracks (id, path) VALUES (1, '/no/exists.flac');",
         )
         .unwrap();
-        assert!(hash_track(&conn, 1, Path::new("/no/existe.flac")).unwrap().is_none());
+        assert!(hash_track(&conn, 1, Path::new("/no/exists.flac")).unwrap().is_none());
     }
 }

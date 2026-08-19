@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.1",
   "type": "module",
-  "description": "Fase 0.5 spike: probar reproduccion de FLAC en Android via Tauri (webview <audio>).",
+  "description": "Phase 0.5 spike: test FLAC playback on Android via Tauri (webview <audio>).",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

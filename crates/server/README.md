@@ -1,36 +1,36 @@
 # sway-server
 
-Server de archivo y sync de Sway. Guarda lo que le mandan los dispositivos y se
-lo devuelve cuando lo piden. **No importa música por su cuenta y no tiene
-interfaz**: todo lo que tiene, se lo mandó alguien.
+Sway's archive and sync server. Stores whatever devices send it and hands it
+back when they ask for it. **It doesn't import music on its own and has no
+interface**: everything it has, someone sent it.
 
-Para qué sirve, en dos casos concretos:
+What it's for, in two concrete cases:
 
-- **Sincronizar fuera de casa.** El descubrimiento por mDNS sólo ve la red
-  local, y dos dispositivos en redes distintas tampoco se pueden llamar entre
-  sí: los dos están detrás de un NAT. Contra un server con dirección pública,
-  en cambio, los dos marcan hacia afuera. Y como el server tiene todo, ninguno
-  necesita que el otro esté prendido.
-- **Recuperar.** Si se pierde la biblioteca de todos los dispositivos, acá están
-  los archivos y la organización.
+- **Syncing away from home.** mDNS discovery only sees the local network, and
+  two devices on different networks can't call each other either: both are
+  behind a NAT. Against a server with a public address, on the other hand,
+  both dial out. And since the server has everything, neither needs the other
+  to be online.
+- **Recovering.** If every device's library is lost, the files and the
+  organization are still here.
 
-## Compilar
+## Building
 
 ```
 cargo build --release -p sway-server
 ```
 
-El binario queda en `target/release/sway-server` (`.exe` en Windows). No
-depende de nada del sistema: ni entorno gráfico, ni webview, ni SQLite
-instalado.
+The binary ends up in `target/release/sway-server` (`.exe` on Windows). It
+doesn't depend on anything from the system: no graphical environment, no
+webview, no SQLite installation needed.
 
-### Para Linux, desde Windows
+### For Linux, from Windows
 
-Un binario sirve para un solo sistema operativo: el `.exe` no corre en el
-server. Esto compila el de Linux sin salir de Windows y sin instalar nada en
-el server — ni Rust, ni el código fuente.
+A binary works for a single operating system: the `.exe` won't run on the
+server. This builds the Linux one without leaving Windows and without
+installing anything on the server — no Rust, no source code.
 
-Una vez:
+Once:
 
 ```
 winget install zig.zig
@@ -38,35 +38,35 @@ cargo install cargo-zigbuild
 rustup target add x86_64-unknown-linux-musl
 ```
 
-Cada vez:
+Each time:
 
 ```
 cargo zigbuild --release -p sway-server --target x86_64-unknown-linux-musl
 ```
 
-Sale un único archivo en
-`target/x86_64-unknown-linux-musl/release/sway-server`, y es lo único que hay
-que copiar.
+A single file comes out at
+`target/x86_64-unknown-linux-musl/release/sway-server`, and it's the only
+thing that needs to be copied over.
 
-**musl y no gnu** a propósito: el binario queda estáticamente enlazado, con
-SQLite adentro, así que no le importa qué versión de glibc tenga el server ni
-qué distribución sea. Con `gnu`, un binario compilado contra una glibc más
-nueva que la del server no arranca — y el error no dice eso, dice que no
-encuentra el archivo.
+**musl and not gnu** on purpose: the binary ends up statically linked, with
+SQLite bundled in, so it doesn't matter what glibc version the server has or
+which distribution it is. With `gnu`, a binary built against a newer glibc
+than the server's won't start — and the error won't say that, it'll say it
+can't find the file.
 
-`zig` acá no es el lenguaje: es su compilador de C, que sabe apuntarle a otro
-sistema. Hace falta porque SQLite viaja como código C y hay que compilarlo
-para el destino.
+`zig` here isn't the language: it's its C compiler, which knows how to target
+another system. It's needed because SQLite ships as C code and has to be
+compiled for the target.
 
-## Correr
+## Running
 
 ```
-./sway-server [ruta-del-config]
+./sway-server [config-path]
 ```
 
-Sin argumento usa `config.toml` del directorio actual. La primera corrida
-escribe ese archivo con un token nuevo y termina, para que lo revises antes de
-abrir el puerto:
+With no argument it uses `config.toml` from the current directory. The first
+run writes that file with a new token and exits, so you can review it before
+opening the port:
 
 ```toml
 listen = "0.0.0.0:7420"
@@ -77,68 +77,70 @@ retention_days = 90
 pair_token = "..."
 ```
 
-- `music_dir` es lo que crece: apuntalo al disco grande, no al del sistema.
-  **En Windows la barra invertida es un escape en TOML**: se pone `'D:\Musica'`
-  con comillas simples, o `"D:/Musica"` con barras normales.
-- `retention_days` es cuántos días sobrevive en la papelera del server un
-  archivo borrado. Un borrado viaja: lo borrás en un dispositivo y desaparece
-  de todos, server incluido. Esto es lo único que hace que se pueda rescatar
-  después. En `0` se destruye en el acto — espejo exacto de tus dispositivos,
-  sin red debajo.
-- `pair_token` es lo que hay que poner en la app para vincular un dispositivo.
-  Reemplaza al código de seis dígitos, porque acá no hay pantalla donde
-  compararlo. **Tratalo como una contraseña.** Cambiarlo no desvincula lo que ya
-  está vinculado: las claves ya están guardadas. También se puede pasar por
-  la variable de entorno `SWAY_SERVER_TOKEN`, que pisa la del archivo: en un
-  despliegue conviene que el secreto no viva en un archivo que puede terminar
-  en un repo.
+- `music_dir` is what grows: point it at the big disk, not the system one.
+  **On Windows a backslash is an escape in TOML**: use `'D:\Music'` with
+  single quotes, or `"D:/Music"` with forward slashes.
+- `retention_days` is how many days a deleted file survives in the server's
+  trash. A deletion travels: you delete it on one device and it disappears
+  from all of them, server included. This is the only thing that makes it
+  recoverable afterward. At `0` it's destroyed on the spot — an exact mirror
+  of your devices, with no safety net.
+- `pair_token` is what you type into the app to pair a device. It replaces
+  the six-digit code, because there's no screen here to compare it against.
+  **Treat it like a password.** Changing it doesn't unpair what's already
+  paired: the keys are already stored. It can also be passed via the
+  `SWAY_SERVER_TOKEN` environment variable, which overrides the file's value:
+  in a deployment it's best for the secret not to live in a file that could
+  end up in a repo.
 
-## Qué guarda
+## What it stores
 
-Todo. El server no elige: cada dispositivo le manda lo que tiene y se lleva lo
-que le falta. La misma canción mandada por tres dispositivos ocupa **una sola
-vez** — los archivos se identifican por su contenido, no por su nombre.
+Everything. The server doesn't pick and choose: each device sends it what it
+has and takes back what it's missing. The same song sent by three devices
+takes up **only one copy** — files are identified by their content, not by
+their name.
 
-Por eso su configuración de sync no se puede editar desde la app: un archivo
-con agujeros no es un archivo, y un server en "solo envía" no te devuelve nada
-el día que lo necesitás.
+That's why its sync configuration can't be edited from the app: a file with
+holes isn't a file, and a server set to "send only" won't give you anything
+back the day you need it.
 
-## Avisos de cambios
+## Change notifications
 
-El sync lo maneja siempre el dispositivo: el server atiende y no llama a nadie
-—no puede, y es a propósito: así no hace falta que los dispositivos sean
-alcanzables desde internet—. Para que un cambio hecho afuera de casa no tarde
-en notarse, cada dispositivo deja **una conexión abierta esperando**, y el
-server contesta por ahí en cuanto su biblioteca se mueve. El que esperaba
-sincroniza; al que causó el cambio no se le avisa.
+Sync is always driven by the device: the server just responds and doesn't
+call anyone —it can't, and that's on purpose: this way devices don't need to
+be reachable from the internet—. So a change made away from home isn't slow
+to be noticed, each device leaves **one connection open, waiting**, and the
+server answers over it as soon as its library moves. Whoever was waiting
+syncs; whoever caused the change isn't notified.
 
-Importa para quien ponga algo en el medio (un proxy TCP, un NAT): esas
-conexiones están calladas casi todo el tiempo. El server manda un latido cada
-45 segundos para mantenerlas vivas, así que cualquier plazo de inactividad en
-el camino tiene que ser mayor a eso — el default de los Streams de Nginx Proxy
-Manager son 10 minutos y alcanza de sobra.
+This matters for anything sitting in the middle (a TCP proxy, a NAT): those
+connections stay quiet almost all the time. The server sends a heartbeat
+every 45 seconds to keep them alive, so any inactivity timeout along the way
+has to be longer than that — the default for Nginx Proxy Manager's Streams is
+10 minutes, which is more than enough.
 
-Cuarenta y cinco segundos y no más porque el plazo que manda no es el del
-proxy: es el del NAT de la operadora, que en datos móviles corta lo que está
-callado entre los 30 y los 60 segundos. Que la conexión se caiga igual no es
-grave —el dispositivo reconecta diciendo qué revisión conocía y el server le
-contesta si se perdió algo—, pero cada caída deja al server un rato hablándole
-a un muerto hasta que le falla el latido.
+Forty-five seconds and no more because the deadline that matters isn't the
+proxy's: it's the carrier's mobile-data NAT, which drops anything quiet for
+between 30 and 60 seconds. The connection dropping anyway isn't a big deal
+—the device reconnects saying which revision it knew about and the server
+tells it whether it missed something—, but each drop leaves the server
+talking to a dead connection for a while until its heartbeat fails.
 
-Un server anterior a esto corta la conexión al recibir el pedido de espera. La
-app lo detecta después de tres intentos y vuelve a la pasada periódica, así que
-no se rompe nada; sólo que los cambios remotos tardan como antes. Conviene
-actualizar el server antes que la app.
+A server older than this cuts the connection when it receives the wait
+request. The app detects that after three attempts and falls back to
+periodic polling, so nothing breaks; it's just that remote changes take as
+long as they used to. It's best to update the server before the app.
 
-## Seguridad
+## Security
 
-- Todo el tráfico va por un canal cifrado (Noise XX sobre TCP, el mismo que usan
-  los dispositivos entre sí). No hace falta poner nada adelante ni montar TLS.
-- Un dispositivo con una clave distinta a la que el server ya tenía para ese uid
-  **se rechaza y queda registrado**, tenga el token que tenga. Volver a
-  vincularlo requiere desvincularlo primero, a mano.
-- El puerto tiene que llegar desde afuera: reenvío en el router o una IP
-  pública. Es lo único que hay que exponer.
+- All traffic goes over an encrypted channel (Noise XX over TCP, the same one
+  devices use with each other). No need to put anything in front of it or set
+  up TLS.
+- A device with a key different from the one the server already had for that
+  uid **is rejected and logged**, whatever token it presents. Pairing it
+  again requires unpairing it first, by hand.
+- The port needs to be reachable from outside: port forwarding on the router
+  or a public IP. That's the only thing that needs to be exposed.
 
 ## systemd
 

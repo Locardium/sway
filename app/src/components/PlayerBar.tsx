@@ -15,8 +15,8 @@ import {
 import { Track } from '../api';
 import Cover from './Cover';
 
-/// `track` = repite la actual hasta que lo apagues. `once` = la repite una
-/// vez mas y se apaga solo, siguiendo despues con la cola.
+/// `track` = repeats the current one until you turn it off. `once` = repeats
+/// it one more time and turns itself off, then continues with the queue.
 export type RepeatMode = 'off' | 'track' | 'once';
 
 export const REPEAT_LABEL: Record<RepeatMode, string> = {
@@ -75,9 +75,9 @@ export default function PlayerBar({
   showVolume = true,
 }: Props) {
   const barRef = useRef<HTMLDivElement>(null);
-  // Mientras se arrastra, la barra muestra la posicion del dedo/mouse y el
-  // seek real recien se manda al soltar (un seek por cada pixel movido hace
-  // trabajar de mas al backend y se ve peor).
+  // While dragging, the bar shows the finger/mouse position and the actual
+  // seek is only sent on release (a seek per pixel moved overworks the
+  // backend and looks worse).
   const [dragMs, setDragMs] = useState<number | null>(null);
   const shownMs = dragMs ?? posMs;
   const pct = track.durationMs > 0 ? Math.min(100, (shownMs / track.durationMs) * 100) : 0;

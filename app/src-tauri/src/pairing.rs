@@ -1,18 +1,19 @@
-//! Vinculación de dispositivos (Fase 5.2).
+//! Device pairing (Phase 5.2).
 //!
-//! El handshake Noise deja un canal cifrado con *alguien*; el pairing es lo
-//! que lo convierte en un canal cifrado con *este dispositivo*. Los dos lados
-//! muestran el mismo código de 6 dígitos y el usuario confirma en ambas
-//! pantallas — recién ahí se fija la clave pública del otro en `devices`.
+//! The Noise handshake leaves an encrypted channel with *someone*; pairing
+//! is what turns it into an encrypted channel with *this specific device*.
+//! Both sides show the same 6-digit code and the user confirms on both
+//! screens — only then does the other side's public key get fixed in
+//! `devices`.
 //!
-//! Reglas duras:
-//! - El pairing necesita que **los dos** acepten. Que uno solo vea un código
-//!   distinto alcanza para cortar.
-//! - Una clave distinta para un uid ya conocido **se rechaza y se avisa**.
-//!   Nunca se vuelve a confiar en silencio: eso sería exactamente lo que
-//!   haría un intermediario para hacerse pasar por un dispositivo tuyo.
-//! - Un dispositivo sin parear no recibe ningún dato de la biblioteca. El
-//!   `Hello` con los conteos va después del pairing, nunca antes.
+//! Hard rules:
+//! - Pairing needs **both** sides to accept. Just one side seeing a
+//!   different code is enough to abort.
+//! - A different key for an already-known uid **gets rejected and flagged**.
+//!   Trust is never silently re-established: that's exactly what a
+//!   man-in-the-middle would do to impersonate one of your devices.
+//! - An unpaired device receives no library data at all. The `Hello` with
+//!   the counts comes after pairing, never before.
 
 use crate::db;
 use crate::engine::{self, is_disconnect};
@@ -27,12 +28,11 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
-/// Cada `library-changed` hace que el frontend recargue la biblioteca ENTERA
-/// por IPC. Emitirlo por archivo recibido significa, en una corrida de 100
-/// archivos, 100 recargas completas peleando por el mismo lock de SQLite que
-/// está usando la transferencia — en el celular la app se traba y no se puede
-/// ni abrir una pantalla. Se emite como mucho una vez cada esto; el final de
-/// la corrida siempre emite.
+/// Every `library-changed` makes the frontend reload the ENTIRE library over
+/// IPC. Emitting it per received file would mean, in a run of 100 files, 100
+/// full reloads fighting for the same SQLite lock the transfer is using — on
+/// the phone the app freezes and not even a screen can be opened. It's
+/// emitted at most once per this interval; the end of the run always emits.
 const LIBRARY_EVENT_MIN_MS: i64 = 1500;
 static LAST_LIBRARY_EVENT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
@@ -46,29 +46,30 @@ pub fn emit_library_changed(handle: &AppHandle, force: bool) {
     let _ = handle.emit("library-changed", ());
 }
 
-/// Cuánto se espera a que una persona mire la pantalla y confirme.
+/// How long to wait for a person to look at the screen and confirm.
 const DECISION_TIMEOUT: Duration = Duration::from_secs(120);
 
-// Lo que no necesita pantalla vive en `sway_core::pairing` desde la Fase 6.1:
-// claves, estado de `devices`, conteos y timeouts. Acá queda la ceremonia —
-// mostrar el código y esperar a que alguien lo mire — y los eventos de ventana.
-// Las funciones de abajo son la misma operación con el `AppHandle` puesto.
+// Whatever doesn't need a screen lives in `sway_core::pairing` since Phase
+// 6.1: keys, `devices` state, counts, and timeouts. What's left here is the
+// ceremony — showing the code and waiting for someone to look at it — and
+// the window events. The functions below are the same operation with the
+// `AppHandle` plugged in.
 use sway_core::pairing as core_pair;
 use sway_core::pairing::{platform, Known, CONNECT_TIMEOUT, IO_TIMEOUT};
 
-/// Decisiones de pairing pendientes, por uid del peer. El hilo de la conexión
-/// espera en el receptor; el comando `confirm_pairing` manda la respuesta.
+/// Pending pairing decisions, keyed by peer uid. The connection thread waits
+/// on the receiver; the `confirm_pairing` command sends the answer.
 #[derive(Default)]
 pub struct Pairing {
     pending: Mutex<HashMap<String, Sender<bool>>>,
-    /// Syncs en curso, por uid. Con el sync automático hay varios
-    /// disparadores (cambio local, peer que aparece, periódico) que pueden
-    /// caer casi juntos: dos corridas simultáneas contra el mismo
-    /// dispositivo se pisarían los archivos a medio bajar.
+    /// Syncs in progress, by uid. With automatic sync there are several
+    /// triggers (local change, peer showing up, periodic) that can fire
+    /// almost together: two simultaneous runs against the same device
+    /// would step on each other's half-downloaded files.
     active: Mutex<HashSet<String>>,
 }
 
-/// Marca un sync en curso; al soltarse lo desmarca pase lo que pase.
+/// Marks a sync in progress; unmarks it on drop no matter what.
 struct SyncGuard(AppHandle, String);
 
 impl SyncGuard {
@@ -76,7 +77,7 @@ impl SyncGuard {
         let state = handle.state::<AppState>();
         let mut active = state.pairing.active.lock().ok()?;
         if !active.insert(uid.to_string()) {
-            return None; // ya hay uno corriendo con este peer
+            return None; // one is already running with this peer
         }
         Some(SyncGuard(handle.clone(), uid.to_string()))
     }
@@ -85,8 +86,8 @@ impl SyncGuard {
 impl Drop for SyncGuard {
     fn drop(&mut self) {
         let state = self.0.state::<AppState>();
-        // El guard va a una variable propia: como binding del `if let` sería
-        // un temporario que vive más que `state`, y no compila.
+        // The guard goes into its own variable: as an `if let` binding it
+        // would be a temporary that outlives `state`, and it wouldn't compile.
         let active = state.pairing.active.lock();
         if let Ok(mut active) = active {
             active.remove(&self.1);
@@ -110,7 +111,7 @@ struct PairingRequestEvent {
     name: String,
     platform: String,
     code: String,
-    /// `true` si el otro dispositivo inició el pairing.
+    /// `true` if the other device initiated the pairing.
     incoming: bool,
 }
 
@@ -130,13 +131,13 @@ pub struct PeerHelloEvent {
     pub name: String,
     pub tracks: i64,
     pub playlists: i64,
-    /// Diferencia de reloj con el otro dispositivo, en ms. Importa para el
-    /// merge por LWW de 5.5: con relojes corridos, "el último gana" elige mal.
+    /// Clock difference with the other device, in ms. Matters for the LWW
+    /// merge from 5.5: with clocks off, "last write wins" picks wrong.
     pub clock_skew_ms: i64,
 }
 
 // ---------------------------------------------------------------------------
-// Identidad criptográfica de este dispositivo
+// This device's cryptographic identity
 // ---------------------------------------------------------------------------
 
 fn private_key(handle: &AppHandle) -> Result<Vec<u8>> {
@@ -146,7 +147,7 @@ fn private_key(handle: &AppHandle) -> Result<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------------------
-// Estado de `devices`
+// `devices` state
 // ---------------------------------------------------------------------------
 
 fn known_state(handle: &AppHandle, uid: &str, pubkey: &[u8]) -> Known {
@@ -166,8 +167,8 @@ fn store_device(handle: &AppHandle, uid: &str, name: &str, platform: &str, pubke
 
 fn library_counts(handle: &AppHandle) -> (i64, i64) {
     let state = handle.state::<AppState>();
-    // El guard va a una variable propia: como binding del `match` sería un
-    // temporario que vive más que `state`, y no compila.
+    // The guard goes into its own variable: as a `match` binding it would be
+    // a temporary that outlives `state`, and it wouldn't compile.
     let db = state.db.lock();
     match db {
         Ok(conn) => core_pair::library_counts(&conn),
@@ -182,11 +183,12 @@ fn me(handle: &AppHandle) -> Result<(String, String)> {
 }
 
 // ---------------------------------------------------------------------------
-// Confirmación del usuario
+// User confirmation
 // ---------------------------------------------------------------------------
 
-/// Muestra el código y espera a que la persona decida. El timeout evita que
-/// un hilo (y una conexión) queden colgados si nadie mira la pantalla.
+/// Shows the code and waits for the person to decide. The timeout prevents a
+/// thread (and a connection) from being left hanging if nobody looks at the
+/// screen.
 fn ask_user(handle: &AppHandle, ev: PairingRequestEvent) -> bool {
     let (tx, rx) = channel();
     {
@@ -201,16 +203,16 @@ fn ask_user(handle: &AppHandle, ev: PairingRequestEvent) -> bool {
     answer
 }
 
-/// Lo llama el comando `confirm_pairing` desde la UI.
+/// Called by the `confirm_pairing` command from the UI.
 pub fn resolve_decision(handle: &AppHandle, uid: &str, accepted: bool) -> bool {
     handle.state::<AppState>().pairing.resolve(uid, accepted)
 }
 
 // ---------------------------------------------------------------------------
-// Lado que acepta conexiones
+// Side that accepts connections
 // ---------------------------------------------------------------------------
 
-/// Escucha en el puerto que 5.1 reservó y anunció por mDNS.
+/// Listens on the port 5.1 reserved and announced via mDNS.
 pub fn spawn_server(handle: AppHandle, listener: TcpListener) {
     std::thread::spawn(move || {
         log::info!("[pair] listening on {:?}", listener.local_addr());
@@ -225,9 +227,10 @@ pub fn spawn_server(handle: AppHandle, listener: TcpListener) {
             let handle = handle.clone();
             std::thread::spawn(move || {
                 if let Err(e) = serve(&handle, stream) {
-                    // Los sondeos de alcanzabilidad (ver discovery::spawn_prober)
-                    // conectan y cortan sin mandar nada: es trafico esperado,
-                    // no un error que valga la pena reportar cada 10 segundos.
+                    // Reachability probes (see discovery::spawn_prober)
+                    // connect and disconnect without sending anything: it's
+                    // expected traffic, not an error worth reporting every
+                    // 10 seconds.
                     if is_disconnect(&e) {
                         log::debug!("[pair] reachability probe");
                     } else {
@@ -246,9 +249,9 @@ fn serve(handle: &AppHandle, stream: TcpStream) -> Result<()> {
     let mut sess = Session::accept(stream, &private)?;
 
     match sess.recv()? {
-        // El token que trae un `PairRequest` es para los dispositivos sin
-        // pantalla. Acá hay una: la prueba la da la persona comparando el
-        // código, así que el token se ignora aunque venga.
+        // The token a `PairRequest` carries is for devices without a screen.
+        // There's one here: the proof comes from the person comparing the
+        // code, so the token is ignored even if it's present.
         Msg::PairRequest { uid, name, platform, token: _ } => {
             match known_state(handle, &uid, &sess.peer_pubkey) {
                 Known::KeyMismatch => {
@@ -278,7 +281,7 @@ fn serve(handle: &AppHandle, stream: TcpStream) -> Result<()> {
                 emit_done(handle, &uid, &name, false, Some("rejected on this device"));
                 return Ok(());
             }
-            // El otro lado también tiene que haber aceptado.
+            // The other side also has to have accepted.
             let accepted_there = match sess.recv()? {
                 Msg::PairAck { accepted } => accepted,
                 Msg::Reject { reason } => {
@@ -314,8 +317,8 @@ fn serve(handle: &AppHandle, stream: TcpStream) -> Result<()> {
                     return Err(anyhow!("different key for {uid}"));
                 }
                 Known::Unknown => {
-                    // No es un error del otro lado: probablemente lo
-                    // desvinculamos nosotros. Que se entere y limpie su fila.
+                    // Not an error on the other side: we probably unpaired
+                    // it. Let it know so it can clear its row.
                     let _ = sess.send(&Msg::NotPaired);
                     return Ok(());
                 }
@@ -331,14 +334,14 @@ fn serve(handle: &AppHandle, stream: TcpStream) -> Result<()> {
                 clock_ms: db::now_ms(),
             })?;
             report_hello(handle, &uid, &name, tracks, playlists, clock_ms);
-            // Los totales le sirven a quien no tiene pantalla (el server, ver
-            // `crates/server/src/serve.rs`); acá lo que pasó ya se vio salir
-            // por los eventos de progreso.
+            // The totals are useful to whoever has no screen (the server,
+            // see `crates/server/src/serve.rs`); here what happened has
+            // already gone out through the progress events.
             engine::serve_requests(&crate::AppHost(handle), &mut sess, &uid).map(|_| ())
         }
-        // El otro lado nos sacó de sus dispositivos. Solo se acepta si su
-        // clave es la que teníamos guardada — o sea, si el handshake probó
-        // que es realmente él y no alguien pidiendo que nos desvinculemos.
+        // The other side removed us from its devices. Only accepted if its
+        // key is the one we had stored — i.e. if the handshake proved it's
+        // really them and not someone asking to unpair us.
         Msg::Unpair { uid } => {
             match known_state(handle, &uid, &sess.peer_pubkey) {
                 Known::Trusted => {
@@ -355,22 +358,22 @@ fn serve(handle: &AppHandle, stream: TcpStream) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Lado que llama
+// Calling side
 // ---------------------------------------------------------------------------
 
-/// Conecta con un peer: lo parea si hace falta, y si ya está pareado
-/// intercambia `Hello`. Corre en su propio hilo — del otro lado puede haber
-/// una persona tardando en confirmar.
+/// Connects to a peer: pairs it if needed, and if already paired exchanges
+/// `Hello`. Runs on its own thread — the other side might have a person
+/// taking a while to confirm.
 pub fn connect_peer(handle: AppHandle, uid: String) {
     std::thread::spawn(move || {
         let name = peer_name(&handle, &uid);
         if let Err(e) = connect_inner(&handle, &uid) {
             log::warn!("[pair] connection with {uid} failed: {e}");
-            // Solo los fallos de RED apagan la fila: que diga "conectado"
-            // justo después de un timeout es la peor combinación posible.
-            // Un rechazo lógico (no vinculado, clave distinta) no significa
-            // que el dispositivo no esté ahí — pintarlo de gris sería mentir
-            // igual, en la otra dirección.
+            // Only NETWORK failures grey out the row: saying "connected"
+            // right after a timeout is the worst possible combination. A
+            // logical rejection (not paired, different key) doesn't mean the
+            // device isn't there — greying it out would be lying too, just
+            // in the other direction.
             if e.downcast_ref::<std::io::Error>().is_some() {
                 let state = handle.state::<AppState>();
                 if state.peers.mark_unreachable(&uid) {
@@ -448,9 +451,9 @@ fn connect_inner(handle: &AppHandle, uid: &str) -> Result<()> {
                     report_hello(handle, &their_uid, &their_name, tracks, playlists, clock_ms);
                     Ok(())
                 }
-                // Nos desvincularon del otro lado. Es creíble: el handshake ya
-                // probó que la clave es la que teníamos guardada. Seguir
-                // mostrando "Paired" sería mentir.
+                // We got unpaired from the other side. It's credible: the
+                // handshake already proved the key is the one we had
+                // stored. Still showing "Paired" would be a lie.
                 Msg::NotPaired => {
                     forget_device(handle, uid)?;
                     let _ = handle.emit("peers-changed", ());
@@ -465,8 +468,9 @@ fn connect_inner(handle: &AppHandle, uid: &str) -> Result<()> {
                 uid: my_uid,
                 name: my_name,
                 platform: platform(),
-                // Vincularse con otro dispositivo con pantalla: el código de
-                // seis dígitos alcanza. El token es para el server (Fase 6.3).
+                // Pairing with another device that has a screen: the
+                // six-digit code is enough. The token is for the server
+                // (Phase 6.3).
                 token: None,
             })?;
             let accepted_here = ask_user(
@@ -480,8 +484,9 @@ fn connect_inner(handle: &AppHandle, uid: &str) -> Result<()> {
                 },
             );
             if !accepted_here {
-                // Cortar acá y no esperar la respuesta del otro: puede haber
-                // alguien mirando la pantalla hasta que expire el timeout.
+                // Cut it off here without waiting for the other side's
+                // answer: there could be someone looking at the screen until
+                // the timeout expires.
                 let _ = sess.send(&Msg::Reject {
                     reason: "rejected on the other device".into(),
                 });
@@ -512,21 +517,21 @@ fn connect_inner(handle: &AppHandle, uid: &str) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Server de archivo (Fase 6.3)
+// File server (Phase 6.3)
 // ---------------------------------------------------------------------------
 
-/// Cuánto se espera al server. Los 180 s de `IO_TIMEOUT` son para el otro
-/// caso, donde puede haber una persona decidiendo; acá contesta una máquina, y
-/// esta llamada bloquea la pantalla mientras tanto.
+/// How long to wait for the server. `IO_TIMEOUT`'s 180 s are for the other
+/// case, where a person might be deciding; here a machine answers, and this
+/// call blocks the screen in the meantime.
 const SERVER_IO_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Vincula con un server de archivo, que no se descubre solo y no tiene
-/// pantalla donde comparar un código.
+/// Pairs with a file server, which isn't discovered on its own and has no
+/// screen to compare a code on.
 ///
-/// Devuelve el nombre que declaró el server. A diferencia del pairing entre
-/// dispositivos, esto NO vuelve enseguida: del otro lado no hay nadie que
-/// tarde en decidir, así que la respuesta llega en el mismo viaje y la UI
-/// puede mostrar el resultado sin esperar un evento.
+/// Returns the name the server declared. Unlike pairing between devices,
+/// this does NOT return right away: there's no one on the other side who
+/// might take a while to decide, so the response arrives on the same trip
+/// and the UI can show the result without waiting for an event.
 pub fn pair_with_server(handle: &AppHandle, host: &str, port: u16, token: &str) -> Result<String> {
     let (host, port) = split_host_port(host, port);
     let host = host.as_str();
@@ -555,9 +560,9 @@ pub fn pair_with_server(handle: &AppHandle, host: &str, port: u16, token: &str) 
     }
     sess.send(&Msg::PairAck { accepted: true })?;
 
-    // Recién acá se sabe con qué uid se está hablando: a un server se lo llama
-    // por dirección, no por identidad. Por eso la comprobación de clave viene
-    // después y no antes — pero viene, y antes de guardar nada.
+    // Only here do we learn which uid we're talking to: a server is called
+    // by address, not by identity. That's why the key check comes after and
+    // not before — but it does come, and before anything is stored.
     let (their_uid, their_name, their_platform) = match sess.recv()? {
         Msg::Hello {
             uid, name, platform, ..
@@ -589,8 +594,8 @@ pub fn pair_with_server(handle: &AppHandle, host: &str, port: u16, token: &str) 
         let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
         core_pair::set_device_address(&conn, &their_uid, &format!("{host}:{port}"))?;
     }
-    // Entra a la misma lista que los peers de mDNS: de acá para abajo es un
-    // dispositivo más.
+    // Enters the same list as mDNS peers: from here down it's just another
+    // device.
     handle
         .state::<AppState>()
         .peers
@@ -600,9 +605,9 @@ pub fn pair_with_server(handle: &AppHandle, host: &str, port: u16, token: &str) 
     Ok(their_name)
 }
 
-/// Vuelve a poner en la lista los dispositivos con dirección fija. Los de la
-/// LAN los repone mDNS solo; a estos no los anuncia nadie, así que sin esto
-/// desaparecen en cada arranque.
+/// Puts the fixed-address devices back on the list. The LAN ones are
+/// restored by mDNS on its own; nobody announces these, so without this they
+/// disappear on every startup.
 pub fn restore_manual_peers(handle: &AppHandle) {
     let state = handle.state::<AppState>();
     let Ok(conn) = state.db.lock() else { return };
@@ -615,49 +620,51 @@ pub fn restore_manual_peers(handle: &AppHandle) {
     }
 }
 
-/// Lo que la persona escribió, convertido en algo que se pueda resolver.
+/// What the person typed, turned into something resolvable.
 ///
-/// El campo pide un nombre o una IP, pero lo que uno tiene a mano es la URL del
-/// server, y pegarla es lo que cualquiera haría. Sin esto, `https://casa.com/`
-/// se pasaba tal cual a la resolución de nombres y fallaba con un
-/// "could not resolve" que parecía un problema de DNS.
+/// The field asks for a name or an IP, but what people have at hand is the
+/// server's URL, and pasting it is what anyone would do. Without this,
+/// `https://home.com/` would get passed as-is to name resolution and fail
+/// with a "could not resolve" that looked like a DNS problem.
 ///
-/// Si el texto trae su propio puerto, ese gana: es más específico que el del
-/// campo de al lado, y es el que la persona acaba de leer en algún lado.
+/// If the text carries its own port, that one wins: it's more specific than
+/// the one in the field next to it, and it's the one the person just read
+/// somewhere.
 fn split_host_port(input: &str, default_port: u16) -> (String, u16) {
     let mut s = input.trim();
-    // Esquema: `https://`, `http://`, `sway://`, lo que sea.
+    // Scheme: `https://`, `http://`, `sway://`, whatever.
     if let Some((_, rest)) = s.split_once("://") {
         s = rest;
     }
-    // Credenciales, por si vienen pegadas de una URL.
+    // Credentials, in case they came pasted from a URL.
     if let Some((_, rest)) = s.rsplit_once('@') {
         s = rest;
     }
-    // Ruta, query o fragmento: nada de eso es parte del host.
+    // Path, query, or fragment: none of that is part of the host.
     s = s.split(['/', '?', '#']).next().unwrap_or(s);
 
-    // IPv6 entre corchetes: `[fd00::1]:7420`.
+    // IPv6 in brackets: `[fd00::1]:7420`.
     if let Some(rest) = s.strip_prefix('[') {
         if let Some((addr, tail)) = rest.split_once(']') {
             let port = tail.strip_prefix(':').and_then(|p| p.parse().ok());
             return (addr.to_string(), port.unwrap_or(default_port));
         }
     }
-    // Un solo `:` es host:puerto. Varios son un IPv6 escrito sin corchetes, y
-    // ahí no hay puerto que separar.
+    // A single `:` is host:port. Several are an IPv6 written without
+    // brackets, and there's no port to split off there.
     if s.matches(':').count() == 1 {
         if let Some((h, p)) = s.split_once(':') {
-            // Un puerto que no es número es un typo. Se queda el host y se usa
-            // el del campo: vale más intentar que fallar con un "no se pudo
-            // resolver casa.ejemplo:puerto", que manda a mirar el DNS.
+            // A port that isn't a number is a typo. The host is kept and the
+            // one from the field is used: better to try than to fail with a
+            // "could not resolve home.example:port", which sends people off
+            // to check DNS.
             return (h.to_string(), p.parse().unwrap_or(default_port));
         }
     }
     (s.to_string(), default_port)
 }
 
-/// `host:puerto`, con el host pudiendo ser un nombre o un IPv6 entre corchetes.
+/// `host:port`, with the host possibly being a name or an IPv6 in brackets.
 fn split_addr(address: &str) -> Option<(&str, u16)> {
     let (host, port) = address.rsplit_once(':')?;
     let host = host.trim_start_matches('[').trim_end_matches(']');
@@ -674,8 +681,8 @@ pub struct SyncPlanEvent {
     pub bytes_out: i64,
 }
 
-/// Simulacro de sync (Fase 5.3): pide el inventario del otro lado, lo compara
-/// con el propio y publica lo que pasaría. **No escribe nada.**
+/// Sync dry run (Phase 5.3): asks the other side for its inventory, compares
+/// it with its own, and publishes what would happen. **Writes nothing.**
 pub fn preview_sync(handle: AppHandle, uid: String) {
     std::thread::spawn(move || {
         let name = peer_name(&handle, &uid);
@@ -703,15 +710,16 @@ pub fn preview_sync(handle: AppHandle, uid: String) {
     });
 }
 
-/// Abre una sesión con un dispositivo ya vinculado y se presenta.
+/// Opens a session with an already paired device and introduces itself.
 fn open_session(handle: &AppHandle, uid: &str) -> Result<Session> {
     open_session_with(handle, uid, IO_TIMEOUT)
 }
 
-/// Igual, con el plazo de lectura a elección.
+/// Same, with the read timeout chosen by the caller.
 ///
-/// Lo necesita la conexión que espera novedades (`watch.rs`): ahí el silencio
-/// es lo normal, no un síntoma, y `IO_TIMEOUT` la cortaría entre dos latidos.
+/// Needed by the connection that waits for updates (`watch.rs`): there,
+/// silence is normal, not a symptom, and `IO_TIMEOUT` would cut it off
+/// between two heartbeats.
 pub(crate) fn open_session_with(
     handle: &AppHandle,
     uid: &str,
@@ -768,41 +776,42 @@ struct SyncDoneEvent {
     sent: usize,
     failed: usize,
     bytes: u64,
-    /// Registros de organización (metadata, playlists, membresías) aplicados
-    /// entre los dos lados. Sin esto, un sync que sólo movió playlists
-    /// reportaría "nada que transferir", que es falso.
+    /// Organization records (metadata, playlists, memberships) applied
+    /// between the two sides. Without this, a sync that only moved
+    /// playlists would report "nothing to transfer", which is false.
     organized: usize,
-    /// Lo disparó el sync automático, no el usuario. La UI no avisa de los
-    /// automáticos que no hicieron nada: serían un cartel cada pocos minutos.
+    /// Triggered by automatic sync, not the user. The UI doesn't notify for
+    /// automatic runs that did nothing: that would be a banner every few
+    /// minutes.
     auto: bool,
     error: Option<String>,
 }
 
-/// Ejecuta la transferencia de archivos del plan (Fase 5.4).
+/// Runs the file transfer for the plan (Phase 5.4).
 ///
-/// Sólo archivos: metadata, playlists y borrados son 5.5 y 5.6. Un archivo
-/// que falla no corta la corrida — se cuenta y se sigue con el siguiente,
-/// porque quedarse a mitad por un archivo ilegible sería peor que terminar
-/// con un faltante.
+/// Files only: metadata, playlists, and deletions are 5.5 and 5.6. A file
+/// that fails doesn't stop the run — it's counted and the run continues with
+/// the next one, because stopping halfway over one unreadable file would be
+/// worse than finishing with something missing.
 pub fn sync_files(handle: AppHandle, uid: String) {
     run_sync(handle, uid, false)
 }
 
-/// Igual, pero disparado por el sync automático.
+/// Same, but triggered by automatic sync.
 pub fn sync_files_auto(handle: AppHandle, uid: String) {
     run_sync(handle, uid, true)
 }
 
-/// Espera a que terminen los syncs con esos dispositivos.
+/// Waits for syncs with those devices to finish.
 ///
-/// Es lo que deja poner al server siempre después de la red local: la LAN
-/// mueve los archivos rápido y sin internet, y cuando después le toca al
-/// server, el inventario ya cuenta lo que acaba de llegar — así que le pide
-/// sólo lo que de verdad falta y nada viaja dos veces.
+/// This is what always keeps the server after the local network: the LAN
+/// moves files fast and without internet, and when it's later the server's
+/// turn, the inventory already counts what just arrived — so it only asks
+/// for what's really missing and nothing travels twice.
 ///
-/// El respiro del principio no es de más: `sync_files_auto` toma su marca
-/// recién adentro del hilo que lanza, así que preguntar en el acto encuentra
-/// todo quieto y la espera no espera nada.
+/// The initial breathing room isn't wasted: `sync_files_auto` only takes its
+/// mark inside the thread it launches, so asking right away would find
+/// everything quiet and the wait would wait for nothing.
 pub fn wait_until_idle(handle: &AppHandle, uids: &[String], max: Duration) {
     const GRACE: Duration = Duration::from_millis(800);
     const POLL: Duration = Duration::from_millis(250);
@@ -829,11 +838,11 @@ fn run_sync(handle: AppHandle, uid: String, auto: bool) {
     std::thread::spawn(move || run_sync_blocking(handle, uid, auto));
 }
 
-/// Igual, en el hilo de quien llama.
+/// Same, on the caller's own thread.
 ///
-/// Lo necesita el watcher (`watch.rs`): tiene que ponerse al día **antes** de
-/// quedarse esperando novedades, y si no espera a que la corrida termine se
-/// pone a esperar contra un estado que él mismo está por cambiar.
+/// Needed by the watcher (`watch.rs`): it has to catch up **before** it
+/// starts waiting for updates, and if it doesn't wait for the run to finish
+/// it would end up waiting against a state it's about to change itself.
 pub(crate) fn run_sync_blocking(handle: AppHandle, uid: String, auto: bool) {
     {
         let Some(_guard) = SyncGuard::acquire(&handle, &uid) else {
@@ -860,15 +869,16 @@ pub(crate) fn run_sync_blocking(handle: AppHandle, uid: String, auto: bool) {
                         error: None,
                     },
                 );
-                // Fin de la corrida: acá sí, siempre.
+                // End of the run: yes, always here.
                 emit_library_changed(&handle, true);
             }
             Err(e) => {
                 log::warn!("[sync] {name} failed: {e}");
-                // Que se corte la conexión no es una falla que valga un cartel:
-                // el celular se durmió, cambió de red, o se cerró la app del
-                // otro lado. El sync automático lo reintenta solo. Se avisa
-                // igual cuando el sync lo pidió una persona, que está mirando.
+                // A dropped connection isn't a failure worth a banner: the
+                // phone went to sleep, switched networks, or the app closed
+                // on the other side. Automatic sync retries on its own. It's
+                // still reported when a person requested the sync and is
+                // watching.
                 let cut = is_disconnect(&e);
                 let error = if cut {
                     if auto {
@@ -898,11 +908,11 @@ pub(crate) fn run_sync_blocking(handle: AppHandle, uid: String, auto: bool) {
     }
 }
 
-/// Una corrida completa contra un dispositivo ya vinculado.
+/// A full run against an already paired device.
 ///
-/// Abrir la sesion es lo unico que sigue siendo asunto de la app (direccion,
-/// claves, dispositivos conocidos); de ahi para adentro trabaja el motor, que
-/// es el mismo codigo que ejercita la suite de integridad (ver engine.rs).
+/// Opening the session is the only part still handled by the app (address,
+/// keys, known devices); from there on the engine takes over, the same code
+/// exercised by the integrity test suite (see engine.rs).
 fn sync_inner(handle: &AppHandle, uid: &str) -> Result<engine::SyncResult> {
     let mut sess = open_session(handle, uid)?;
     engine::sync(&crate::AppHost(handle), &mut sess, uid)
@@ -920,12 +930,12 @@ fn platform_of(handle: &AppHandle, uid: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Comunes
+// Shared
 // ---------------------------------------------------------------------------
 
-/// Prueba de que el canal quedó vivo: cada lado le dice al otro cuánta
-/// biblioteca tiene. Es lo primero que se ve funcionar de punta a punta sin
-/// haber movido un solo byte de audio.
+/// Proof that the channel stayed alive: each side tells the other how much
+/// library it has. It's the first thing seen working end to end without
+/// having moved a single byte of audio.
 fn exchange_hello(handle: &AppHandle, sess: &mut Session, uid: &str, name: &str) -> Result<()> {
     let (my_uid, my_name) = me(handle)?;
     let (tracks, playlists) = library_counts(handle);
@@ -965,8 +975,8 @@ fn report_hello(
     }
     {
         let state = handle.state::<AppState>();
-        // El guard va a una variable propia: como binding del `if let` sería
-        // un temporario que vive más que `state`, y no compila.
+        // The guard goes into its own variable: as an `if let` binding it
+        // would be a temporary that outlives `state`, and it wouldn't compile.
         let db = state.db.lock();
         if let Ok(conn) = db {
             core_pair::touch_device(&conn, uid, name);
@@ -996,14 +1006,14 @@ fn emit_done(handle: &AppHandle, uid: &str, name: &str, ok: bool, error: Option<
     );
 }
 
-/// Una clave distinta para un uid conocido puede ser una reinstalación del
-/// otro lado — o alguien haciéndose pasar por él. No se resuelve solo: queda
-/// registrado y el usuario tiene que desvincular a mano para volver a parear.
+/// A different key for a known uid could be a reinstall on the other side —
+/// or someone impersonating it. It doesn't resolve itself: it gets logged
+/// and the user has to unpair by hand to pair again.
 fn warn_key_mismatch(handle: &AppHandle, uid: &str, name: &str) {
     {
         let state = handle.state::<AppState>();
-        // El guard va a una variable propia: como binding del `if let` sería
-        // un temporario que vive más que `state`, y no compila.
+        // The guard goes into its own variable: as an `if let` binding it
+        // would be a temporary that outlives `state`, and it wouldn't compile.
         let db = state.db.lock();
         if let Ok(conn) = db {
             core_pair::log_key_mismatch(&conn, uid, name);
@@ -1024,20 +1034,20 @@ fn forget_device(handle: &AppHandle, uid: &str) -> Result<()> {
     core_pair::forget_device(&conn, uid)
 }
 
-/// Saca un dispositivo de la lista de confiados y **le avisa**.
+/// Removes a device from the trusted list and **notifies it**.
 ///
-/// El pairing se guarda de los dos lados. Sin el aviso, desvincular acá dejaba
-/// al otro mostrando "Paired" para siempre, y ningún Refresh lo iba a
-/// corregir: la lista de dispositivos no tiene nada que ver con lo que ve
-/// mDNS. El aviso es best-effort — si el otro está apagado, se entera solo la
-/// próxima vez que intente conectarse y reciba `NotPaired`.
+/// Pairing is stored on both sides. Without the notification, unpairing here
+/// would leave the other side showing "Paired" forever, and no Refresh was
+/// going to fix it: the device list has nothing to do with what mDNS sees.
+/// The notification is best-effort — if the other side is off, it finds out
+/// only the next time it tries to connect and gets `NotPaired`.
 pub fn unpair(handle: &AppHandle, uid: &str) -> Result<()> {
     let addr = peer_addr(handle, uid).ok();
-    // Si tenía dirección fija (un server), también sale de la lista en
-    // pantalla. A un peer de la LAN lo vuelve a anunciar mDNS en segundos; a
-    // este no lo anuncia nadie, así que quedaba ahí para siempre con un botón
-    // de "Pair" que no puede funcionar — ese botón manda el flujo de la red
-    // local, sin token, y un server sin token contesta que no.
+    // If it had a fixed address (a server), it also leaves the on-screen
+    // list. A LAN peer gets re-announced by mDNS within seconds; nobody
+    // announces this one, so it would stay there forever with a "Pair"
+    // button that can't work — that button drives the local-network flow,
+    // with no token, and a server with no token says no.
     let manual = {
         let state = handle.state::<AppState>();
         let db = state.db.lock();
@@ -1079,25 +1089,25 @@ mod tests {
     use super::{split_addr, split_host_port};
 
     #[test]
-    fn pegar_la_url_del_server_funciona() {
-        // Es lo que uno tiene a mano y lo que cualquiera va a pegar.
+    fn pasting_the_server_url_works() {
+        // It's what people have at hand and what anyone would paste.
         assert_eq!(
-            split_host_port("https://sway.ejemplo.com/", 7420),
-            ("sway.ejemplo.com".into(), 7420)
+            split_host_port("https://sway.example.com/", 7420),
+            ("sway.example.com".into(), 7420)
         );
         assert_eq!(
-            split_host_port("http://sway.ejemplo.com:9000/algo?x=1", 7420),
-            ("sway.ejemplo.com".into(), 9000)
+            split_host_port("http://sway.example.com:9000/something?x=1", 7420),
+            ("sway.example.com".into(), 9000)
         );
         assert_eq!(
-            split_host_port("  sway.ejemplo.com  ", 7420),
-            ("sway.ejemplo.com".into(), 7420)
+            split_host_port("  sway.example.com  ", 7420),
+            ("sway.example.com".into(), 7420)
         );
     }
 
     #[test]
-    fn el_puerto_escrito_le_gana_al_del_campo() {
-        // Más específico, y es el que la persona acaba de leer en algún lado.
+    fn the_written_port_wins_over_the_field() {
+        // More specific, and it's the one the person just read somewhere.
         assert_eq!(
             split_host_port("192.168.0.10:9999", 7420),
             ("192.168.0.10".into(), 9999)
@@ -1105,8 +1115,8 @@ mod tests {
     }
 
     #[test]
-    fn un_ipv6_no_se_confunde_con_un_puerto() {
-        // Los `:` de un IPv6 no separan nada: sin corchetes no hay puerto.
+    fn an_ipv6_is_not_confused_with_a_port() {
+        // The `:` in an IPv6 don't separate anything: no brackets, no port.
         assert_eq!(split_host_port("fd00::1", 7420), ("fd00::1".into(), 7420));
         assert_eq!(
             split_host_port("[fd00::1]:9000", 7420),
@@ -1116,28 +1126,28 @@ mod tests {
     }
 
     #[test]
-    fn un_puerto_que_no_es_numero_no_se_lleva_puesto_el_host() {
-        // Vale más intentar con el puerto del campo que fallar por un typo.
+    fn a_non_numeric_port_does_not_take_the_host_down_with_it() {
+        // Better to try with the field's port than to fail over a typo.
         assert_eq!(
-            split_host_port("casa.ejemplo:puerto", 7420),
-            ("casa.ejemplo".into(), 7420)
+            split_host_port("home.example:port", 7420),
+            ("home.example".into(), 7420)
         );
     }
 
     #[test]
-    fn la_direccion_guardada_se_parte_en_host_y_puerto() {
-        assert_eq!(split_addr("casa.ejemplo:7420"), Some(("casa.ejemplo", 7420)));
+    fn the_stored_address_splits_into_host_and_port() {
+        assert_eq!(split_addr("home.example:7420"), Some(("home.example", 7420)));
         assert_eq!(split_addr("192.168.0.10:7420"), Some(("192.168.0.10", 7420)));
-        // IPv6: el host va entre corchetes justamente porque adentro hay `:`.
+        // IPv6: the host goes in brackets precisely because it contains `:`.
         assert_eq!(split_addr("[fd00::1]:7420"), Some(("fd00::1", 7420)));
     }
 
     #[test]
-    fn una_direccion_sin_puerto_no_se_inventa_uno() {
-        // Vale más quedarse sin el peer que sondear un puerto que nadie eligió.
-        assert_eq!(split_addr("casa.ejemplo"), None);
-        assert_eq!(split_addr("casa.ejemplo:"), None);
-        assert_eq!(split_addr("casa.ejemplo:puerto"), None);
+    fn an_address_without_a_port_does_not_invent_one() {
+        // Better to end up without the peer than to probe a port nobody chose.
+        assert_eq!(split_addr("home.example"), None);
+        assert_eq!(split_addr("home.example:"), None);
+        assert_eq!(split_addr("home.example:port"), None);
         assert_eq!(split_addr(""), None);
     }
 }

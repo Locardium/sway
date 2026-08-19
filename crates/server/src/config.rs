@@ -1,4 +1,4 @@
-//! Configuración del server, en un TOML que se edita por SSH.
+//! Server configuration, in a TOML file edited over SSH.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -6,41 +6,42 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
-    /// Dónde escuchar. `0.0.0.0` para aceptar desde afuera de la máquina.
+    /// Where to listen. `0.0.0.0` to accept connections from outside the machine.
     #[serde(default = "default_listen")]
     pub listen: String,
 
-    /// Nombre visible en la lista de dispositivos de la app.
+    /// Name shown in the app's device list.
     #[serde(default = "default_name")]
     pub name: String,
 
-    /// La base: quién es cada track, las playlists y qué dispositivo tiene qué.
+    /// The database: identity of every track, playlists, and which device has what.
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
 
-    /// Los archivos de audio. Es lo que crece; conviene que sea el disco
-    /// grande y no el del sistema.
+    /// The audio files. This is what grows; it should live on the big disk,
+    /// not the system one.
     #[serde(default = "default_music_dir")]
     pub music_dir: PathBuf,
 
-    /// Cuántos días sobrevive en la papelera del server un archivo borrado.
+    /// How many days a deleted file survives in the server's trash.
     ///
-    /// Un borrado viaja: lo borrás en un dispositivo y desaparece de todos,
-    /// server incluido. Esto es lo único que hace que el archivo se pueda
-    /// rescatar después — sin esto, un borrado por error se lleva puesta
-    /// también la copia de respaldo, que es justo la que tenía que sobrevivir.
+    /// A deletion travels: you delete it on one device and it disappears
+    /// from all of them, server included. This is the only thing that makes
+    /// the file recoverable afterward — without it, an accidental deletion
+    /// takes down the backup copy too, which is exactly the one that had to
+    /// survive.
     ///
-    /// `0` destruye en el acto: espejo exacto de tus dispositivos, sin red
-    /// debajo.
+    /// `0` destroys it on the spot: an exact mirror of your devices, with no
+    /// safety net.
     #[serde(default = "default_retention_days")]
     pub retention_days: u64,
 
-    /// Lo que un dispositivo tiene que presentar para vincularse.
+    /// What a device has to present in order to pair.
     ///
-    /// Reemplaza al código de seis dígitos: acá no hay ninguna pantalla donde
-    /// compararlo. Se genera solo la primera vez. Cambiarlo no desvincula a
-    /// nadie que ya esté vinculado — las claves ya están guardadas — así que
-    /// se puede rotar sin romper nada.
+    /// Replaces the six-digit code: there's no screen here to compare it
+    /// against. Generated only the first time. Changing it doesn't unpair
+    /// anyone already paired — their keys are already stored — so it can be
+    /// rotated without breaking anything.
     pub pair_token: String,
 }
 
@@ -61,18 +62,20 @@ fn default_retention_days() -> u64 {
 }
 
 impl Config {
-    /// Variable que pisa al `pair_token` del archivo. En un despliegue conviene
-    /// que el secreto no viva en un archivo que puede terminar en un repo.
+    /// Environment variable that overrides the file's `pair_token`. In a
+    /// deployment it's best for the secret not to live in a file that could
+    /// end up in a repo.
     pub const TOKEN_ENV: &'static str = "SWAY_SERVER_TOKEN";
 
-    /// Carga el archivo. Si no existe lo escribe con un token nuevo y devuelve
-    /// `None`: la primera corrida no arranca a escuchar, imprime qué hacer.
+    /// Loads the file. If it doesn't exist, writes it with a new token and
+    /// returns `None`: the first run doesn't start listening, it just prints
+    /// what to do.
     pub fn load_or_create(path: &Path) -> Result<Option<Self>> {
         if path.exists() {
             let text = std::fs::read_to_string(path)
-                .with_context(|| format!("no se pudo leer {}", path.display()))?;
+                .with_context(|| format!("could not read {}", path.display()))?;
             let mut cfg: Config = toml::from_str(&text)
-                .with_context(|| format!("{} no es un TOML válido", path.display()))?;
+                .with_context(|| format!("{} is not valid TOML", path.display()))?;
             if let Some(from_env) = std::env::var(Self::TOKEN_ENV)
                 .ok()
                 .map(|s| s.trim().to_string())
@@ -82,19 +85,19 @@ impl Config {
                 cfg.pair_token = from_env;
             }
             if cfg.pair_token.trim().is_empty() {
-                anyhow::bail!("`pair_token` está vacío en {}", path.display());
+                anyhow::bail!("`pair_token` is empty in {}", path.display());
             }
             return Ok(Some(cfg));
         }
         let token = uuid::Uuid::new_v4().simple().to_string();
         std::fs::write(path, template(&token))
-            .with_context(|| format!("no se pudo escribir {}", path.display()))?;
+            .with_context(|| format!("could not write {}", path.display()))?;
         Ok(None)
     }
 }
 
-/// Se escribe a mano y no con `toml::to_string` para poder dejar los
-/// comentarios: el archivo lo va a leer una persona que no vio este código.
+/// Written by hand instead of with `toml::to_string` so the comments can
+/// stay: this file will be read by a person who never saw this code.
 fn template(token: &str) -> String {
     format!(
         r#"# Sway archive and sync server.
@@ -149,23 +152,23 @@ mod tests {
     }
 
     #[test]
-    fn la_primera_corrida_escribe_el_archivo_y_no_arranca() {
+    fn the_first_run_writes_the_file_and_does_not_start() {
         let path = tmp("nuevo");
         assert!(
             Config::load_or_create(&path).unwrap().is_none(),
-            "no puede ponerse a escuchar antes de que alguien mire el archivo"
+            "can't start listening before someone looks at the file"
         );
         assert!(path.exists());
 
-        // Y lo que escribió tiene que poder volver a leerse.
+        // And what it wrote has to be readable again.
         let cfg = Config::load_or_create(&path).unwrap().unwrap();
         assert_eq!(cfg.listen, "0.0.0.0:7420");
         assert_eq!(cfg.retention_days, 90);
-        assert_eq!(cfg.pair_token.len(), 32, "token: uuid v4 en hex");
+        assert_eq!(cfg.pair_token.len(), 32, "token: uuid v4 in hex");
     }
 
     #[test]
-    fn dos_servers_no_nacen_con_el_mismo_token() {
+    fn two_servers_are_not_born_with_the_same_token() {
         let a = tmp("tok-a");
         let b = tmp("tok-b");
         Config::load_or_create(&a).unwrap();
@@ -176,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn un_archivo_viejo_sin_retencion_se_lee_con_el_default() {
+    fn an_old_file_without_retention_reads_with_the_default() {
         let path = tmp("viejo");
         std::fs::write(
             &path,
@@ -189,11 +192,11 @@ mod tests {
     }
 
     #[test]
-    fn un_token_vacio_no_arranca_el_server() {
+    fn an_empty_token_does_not_start_the_server() {
         let path = tmp("vacio");
         std::fs::write(&path, "pair_token = \"\"\n").unwrap();
-        // Sin esto, cualquiera que llegue al puerto se vincula: `secret_eq("",
-        // "")` es true.
+        // Without this, anyone reaching the port pairs: `secret_eq("",
+        // "")` is true.
         assert!(Config::load_or_create(&path).is_err());
     }
 }

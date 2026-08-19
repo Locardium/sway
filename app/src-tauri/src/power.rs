@@ -1,38 +1,39 @@
-//! En qué condiciones está este dispositivo para sincronizar (Fase 6.7).
+//! What condition this device is in for syncing (Phase 6.7).
 //!
-//! Dos cosas, y ninguna de las dos se puede saber siempre:
+//! Two things, and neither one can always be known:
 //!
-//! - **Si la red se paga por dato.** El sistema operativo lo sabe para un
-//!   módem celular, y lo marca solo. Para el hotspot de un teléfono por Wi-Fi
-//!   **no**: ahí Windows ve una red más, y la única forma de que sepa es que
-//!   alguien la marque a mano una vez (Configuración → Red → Wi-Fi →
-//!   propiedades → "Conexión de uso medido"). Queda pegado a esa red, así que
-//!   se hace una sola vez por red.
-//! - **Cuánta batería queda.** Una PC de escritorio no tiene, y eso no es un
-//!   error: es la respuesta. Por eso todo es `Option` — `None` significa "no
-//!   se sabe" o "no aplica", y nunca se traduce en frenar el sync. Frenar por
-//!   algo que no se pudo medir sería lo peor de los dos mundos.
+//! - **Whether the network is metered.** The operating system knows this for
+//!   a cellular modem, and flags it on its own. For a phone's Wi-Fi hotspot
+//!   it does **not**: Windows just sees another network there, and the only
+//!   way it finds out is if someone marks it by hand once (Settings → Network
+//!   → Wi-Fi → properties → "Metered connection"). It stays stuck to that
+//!   network, so it's done once per network.
+//! - **How much battery is left.** A desktop PC has none, and that's not an
+//!   error: it's the answer. That's why everything is an `Option` — `None`
+//!   means "unknown" or "not applicable", and it never translates into
+//!   blocking the sync. Blocking on something that couldn't be measured
+//!   would be the worst of both worlds.
 //!
-//! En Android nada de esto se puede leer desde Rust (ver `device_info.rs`: el
-//! contexto de JNI no está inicializado). Lo reporta la pantalla, que sí tiene
-//! `navigator.getBattery()` y `navigator.connection`, con el comando
-//! `report_conditions`.
+//! On Android none of this can be read from Rust (see `device_info.rs`: the
+//! JNI context isn't initialized there). The screen reports it instead, since
+//! it does have `navigator.getBattery()` and `navigator.connection`, via the
+//! `report_conditions` command.
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Conditions {
-    /// `true` = la red se paga por dato. `None` = no se pudo averiguar.
+    /// `true` = the network is metered. `None` = couldn't find out.
     pub metered: Option<bool>,
-    /// 0–100. `None` = no hay batería (una PC de escritorio) o no se sabe.
+    /// 0–100. `None` = no battery (a desktop PC) or unknown.
     pub battery_pct: Option<u8>,
     pub charging: Option<bool>,
 }
 
 impl Conditions {
-    /// Lo que este dispositivo puede averiguar por su cuenta. En Android
-    /// devuelve todo en `None`: lo llena la pantalla.
+    /// What this device can figure out on its own. On Android returns
+    /// everything as `None`: the screen fills it in.
     pub fn read() -> Self {
         Conditions {
             metered: metered(),
@@ -42,26 +43,26 @@ impl Conditions {
 }
 
 // ---------------------------------------------------------------------------
-// Red medida
+// Metered network
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
 fn metered() -> Option<bool> {
     use windows::Networking::Connectivity::{NetworkCostType, NetworkInformation};
 
-    // Sin perfil de internet no hay red: no es "no medida", es que no se sabe.
+    // No internet profile means no network: that's not "not metered", it's unknown.
     let profile = NetworkInformation::GetInternetConnectionProfile().ok()?;
     let cost = profile.GetConnectionCost().ok()?;
 
-    // Roaming y pasado del límite son caros aunque el plan sea fijo.
+    // Roaming and over the data limit are expensive even on a fixed plan.
     if cost.Roaming().unwrap_or(false) || cost.OverDataLimit().unwrap_or(false) {
         return Some(true);
     }
     match cost.NetworkCostType().ok()? {
-        // `Fixed` es un plan con tope; `Variable` se paga por megabyte.
+        // `Fixed` is a capped plan; `Variable` is billed per megabyte.
         NetworkCostType::Fixed | NetworkCostType::Variable => Some(true),
         NetworkCostType::Unrestricted => Some(false),
-        // `Unknown` es literalmente eso.
+        // `Unknown` is literally that.
         _ => None,
     }
 }
@@ -72,7 +73,7 @@ fn metered() -> Option<bool> {
 }
 
 // ---------------------------------------------------------------------------
-// Batería
+// Battery
 // ---------------------------------------------------------------------------
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -83,8 +84,8 @@ fn battery() -> Conditions {
     let Ok(mut batteries) = manager.batteries() else {
         return Conditions::default();
     };
-    // Sin batería: una PC de escritorio. La respuesta es `None`, y con eso la
-    // pantalla sabe que no tiene que ofrecer la opción.
+    // No battery: a desktop PC. The answer is `None`, and that tells the
+    // screen it doesn't need to offer the option.
     let Some(Ok(b)) = batteries.next() else {
         return Conditions::default();
     };
@@ -101,12 +102,13 @@ fn battery() -> Conditions {
     Conditions::default()
 }
 
-/// Lo que sabe este dispositivo ahora mismo, venga de donde venga.
+/// What this device knows right now, wherever it comes from.
 ///
-/// En desktop se mide en el momento (es barato y siempre está al día); en
-/// Android se devuelve lo último que reportó la pantalla. Cuando la medición
-/// nativa no sabe algo, gana lo reportado: preferir un `None` propio sobre un
-/// dato real del otro lado sería tirar la única respuesta que hay.
+/// On desktop it's measured on the spot (it's cheap and always up to date);
+/// on Android it returns the last thing the screen reported. When the native
+/// measurement doesn't know something, the reported value wins: preferring
+/// our own `None` over real data from the other side would throw away the
+/// only answer available.
 pub fn current(state: &crate::AppState) -> Conditions {
     let reported = state.conditions.lock().map(|c| *c).unwrap_or_default();
     let native = Conditions::read();
@@ -118,24 +120,24 @@ pub fn current(state: &crate::AppState) -> Conditions {
 }
 
 // ---------------------------------------------------------------------------
-// La decisión
+// The decision
 // ---------------------------------------------------------------------------
 
-/// Preferencias de este dispositivo. Locales: describen dónde está y con qué
-/// batería, que no es asunto de ningún otro dispositivo.
+/// This device's preferences. Local: they describe where it is and how much
+/// battery it has, which is no other device's business.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Limits {
-    /// Sincronizar con el server aunque la red se pague por dato.
+    /// Sync with the server even if the network is metered.
     pub on_metered: bool,
-    /// Debajo de este porcentaje no se sincroniza solo. `0` = sin límite.
+    /// Below this percentage, don't sync automatically. `0` = no limit.
     pub min_battery: u8,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        // Gastar datos sin permiso es de las pocas cosas que le cuestan plata a
-        // alguien, así que el default es no.
+        // Spending data without permission is one of the few things that
+        // costs someone money, so the default is no.
         Limits { on_metered: false, min_battery: 20 }
     }
 }
@@ -168,7 +170,7 @@ impl Limits {
     }
 }
 
-/// Por qué no se sincroniza ahora.
+/// Why sync isn't running right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hold {
     Metered,
@@ -184,16 +186,17 @@ impl Hold {
     }
 }
 
-/// Si el sync **automático** tiene que esperar.
+/// Whether **automatic** sync has to wait.
 ///
-/// `remote` distingue los dos límites, y la distinción importa: mover un
-/// archivo a otro dispositivo de la misma red no gasta un solo byte del plan
-/// de datos, aunque la red esté marcada como medida. Lo que se paga es salir a
-/// internet, o sea el server. La batería, en cambio, se gasta igual.
+/// `remote` distinguishes the two limits, and the distinction matters:
+/// moving a file to another device on the same network doesn't spend a
+/// single byte of the data plan, even if the network is flagged as metered.
+/// What costs money is going out to the internet, i.e. the server. Battery,
+/// on the other hand, gets spent either way.
 ///
-/// Un sync pedido a mano nunca pasa por acá: lo estás pidiendo vos, mirando la
-/// pantalla, y es la salida de emergencia cuando el sistema operativo se
-/// equivoca sobre la red.
+/// A manually requested sync never goes through here: you're the one asking
+/// for it, looking at the screen, and it's the emergency exit for when the
+/// operating system gets the network wrong.
 pub fn hold(c: &Conditions, l: &Limits, remote: bool) -> Option<Hold> {
     if let (Some(pct), Some(false)) = (c.battery_pct, c.charging.or(Some(false))) {
         if l.min_battery > 0 && pct < l.min_battery {
@@ -215,33 +218,34 @@ mod tests {
     }
 
     #[test]
-    fn sin_saber_nada_no_se_frena() {
-        // Una PC de escritorio con la red sin identificar. Frenar por algo que
-        // no se pudo medir dejaría al sync sin correr nunca y sin decir por qué.
+    fn knowing_nothing_does_not_hold() {
+        // A desktop PC with an unidentified network. Blocking on something
+        // that couldn't be measured would leave sync never running and never
+        // saying why.
         assert_eq!(hold(&Conditions::default(), &Limits::default(), true), None);
     }
 
     #[test]
-    fn la_red_medida_frena_el_server_pero_no_la_red_local() {
+    fn metered_network_holds_the_server_but_not_the_local_network() {
         let c = cond(Some(true), None, None);
         let l = Limits::default();
         assert_eq!(hold(&c, &l, true), Some(Hold::Metered));
         assert_eq!(
             hold(&c, &l, false),
             None,
-            "mover un archivo dentro de la misma red no gasta datos"
+            "moving a file within the same network doesn't spend data"
         );
     }
 
     #[test]
-    fn con_el_permiso_puesto_la_red_medida_no_frena() {
+    fn with_permission_set_metered_network_does_not_hold() {
         let c = cond(Some(true), None, None);
         let l = Limits { on_metered: true, ..Limits::default() };
         assert_eq!(hold(&c, &l, true), None);
     }
 
     #[test]
-    fn poca_bateria_frena_todo_no_solo_el_server() {
+    fn low_battery_holds_everything_not_just_the_server() {
         let c = cond(Some(false), Some(9), Some(false));
         let l = Limits::default();
         assert_eq!(hold(&c, &l, true), Some(Hold::Battery));
@@ -249,22 +253,22 @@ mod tests {
     }
 
     #[test]
-    fn enchufado_no_importa_cuanta_bateria_queda() {
+    fn plugged_in_battery_left_does_not_matter() {
         let c = cond(Some(false), Some(3), Some(true));
         assert_eq!(hold(&c, &Limits::default(), true), None);
     }
 
     #[test]
-    fn en_cero_el_limite_de_bateria_esta_apagado() {
+    fn at_zero_the_battery_limit_is_off() {
         let c = cond(Some(false), Some(1), Some(false));
         let l = Limits { min_battery: 0, ..Limits::default() };
         assert_eq!(hold(&c, &l, true), None);
     }
 
     #[test]
-    fn la_bateria_gana_cuando_las_dos_cosas_aplican() {
-        // El motivo que se muestra tiene que ser el más urgente: quedarse sin
-        // batería a la mitad de una transferencia es peor que gastar datos.
+    fn battery_wins_when_both_apply() {
+        // The reason shown has to be the most urgent one: running out of
+        // battery mid-transfer is worse than spending data.
         let c = cond(Some(true), Some(5), Some(false));
         assert_eq!(hold(&c, &Limits::default(), true), Some(Hold::Battery));
     }

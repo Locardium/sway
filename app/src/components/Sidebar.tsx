@@ -9,14 +9,14 @@ export type NodeDropHint = { nodeId: number; zone: 'before' | 'after' | 'into' }
 interface Props {
   nodes: PlaylistNode[];
   selection: Selection;
-  /** Hint de drop activo (drag interno o de archivos del OS). */
+  /** Active drop hint (internal drag or OS file drag). */
   dropHint: NodeDropHint;
   rootHover: boolean;
   onSelect: (sel: Selection) => void;
   onCreate: (kind: NodeKind, parentId: number | null) => void;
   onRename: (id: number, name: string) => void;
   onDelete: (id: number) => void;
-  /** mousedown que puede iniciar drag de un nodo (App + dnd.ts). */
+  /** mousedown that can start dragging a node (App + dnd.ts). */
   onNodeMouseDown: (e: React.MouseEvent, id: number) => void;
   wasDrag: () => boolean;
 }
@@ -53,9 +53,9 @@ export default function Sidebar({
     };
   }, [menu]);
 
-  // Hijos por padre, armados una vez. Filtrar la lista entera por cada nodo
-  // mientras se dibuja el árbol es cuadrático, y el árbol se redibuja en cada
-  // cambio de la biblioteca — en el celular eso se siente.
+  // Children by parent, built once. Filtering the whole list for each node
+  // while drawing the tree is quadratic, and the tree redraws on every
+  // library change — on mobile that's noticeable.
   const byParent = useMemo(() => {
     const m = new Map<number | null, PlaylistNode[]>();
     for (const n of nodes) {
@@ -89,9 +89,8 @@ export default function Sidebar({
             'tree-row',
             active ? 'active' : '',
             hint ? `drop-${hint}` : '',
-            // Desmarcada pero todavía ocupando lugar. Sigue en el árbol hasta
-            // que se libere el espacio; apagada para que se vea que está de
-            // salida.
+            // Unchecked but still taking up space. Stays in the tree until
+            // the space is freed; dimmed to show it's on its way out.
             node.inScope ? '' : 'out-scope',
           ].join(' ')}
           title={node.inScope ? undefined : 'Not synced to this device — still taking up space'}
@@ -137,9 +136,9 @@ export default function Sidebar({
           ) : (
             <span className="tree-name">{node.name}</span>
           )}
-          {/* En una desmarcada el número es el de lo que todavía tiene archivo
-              acá, que es lo que se va a ver al abrirla. El total entero diría
-              un número que no coincide con la lista. */}
+          {/* In an unchecked one, the number is what still has a file here,
+              which is what you'll see when opening it. The full total would
+              show a number that doesn't match the list. */}
           {!isFolder && (
             <span className="tree-count">
               {(node.inScope ? node.trackCount : node.presentCount) || ''}

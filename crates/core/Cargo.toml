@@ -1,12 +1,12 @@
 [package]
 name = "sway-core"
 version = "0.1.0"
-description = "Motor de biblioteca y sync de Sway, sin interfaz"
+description = "Sway's library and sync engine, no UI"
 edition = "2021"
 
 [dependencies]
 anyhow = "1"
-# Las claves Noise se guardan en texto en `app_settings`.
+# Noise keys are stored as plain text in `app_settings`.
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -15,30 +15,31 @@ lofty = "0.24"
 walkdir = "2"
 log = "0.4"
 
-# blake3 = identidad de los bytes de cada archivo: elegido sobre sha256 por
-# velocidad (importa con bibliotecas de 100+ GB) y porque su arbol interno
-# permite verificar por chunk, no solo al final del archivo.
-# uuid = identidad logica de tracks/playlists, estable entre dispositivos
-# (los `id` INTEGER son locales y no significan nada del otro lado).
+# blake3 = identity of each file's bytes: chosen over sha256 for speed
+# (matters with 100+ GB libraries) and because its internal tree allows
+# verifying per chunk, not just at the end of the file.
+# uuid = logical identity of tracks/playlists, stable across devices
+# (the `id` INTEGERs are local and mean nothing on the other side).
 blake3 = "1"
 uuid = { version = "1", features = ["v4"] }
 
-# El inventario del sync viaja como JSON, y es lo mas comprimible que hay:
-# claves repetidas en cada fila, uuids y hashes en hexa. Con 5000 temas son
-# 4 MB por cada comparacion, y esas comparaciones salen por internet desde un
-# celular. Sin features por default a proposito: el backend de C (`zlib`) es
-# un problema mas en el cross-compile a Android y a musl, y `rust_backend`
-# (miniz_oxide) es Rust puro.
+# The sync inventory travels as JSON, and it's about as compressible as it
+# gets: repeated keys on every row, uuids and hashes in hex. With 5000
+# tracks that's 4 MB per comparison, and those comparisons go out over the
+# internet from a phone. No default features on purpose: the C backend
+# (`zlib`) is one more problem in cross-compiling to Android and musl, and
+# `rust_backend` (miniz_oxide) is pure Rust.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
-# Canal cifrado del sync (Fase 5.2): handshake Noise XX. Sin features por
-# default a proposito — el set completo arrastra `ring` (C/asm, un problema
-# mas en el cross-compile a Android) y AES, que no se usa. Esto deja
-# exactamente lo que pide Noise_XX_25519_ChaChaPoly_BLAKE2s, todo Rust puro.
+# Encrypted sync channel (Phase 5.2): Noise XX handshake. No default
+# features on purpose — the full set drags in `ring` (C/asm, one more
+# problem in cross-compiling to Android) and AES, which isn't used. This
+# leaves exactly what Noise_XX_25519_ChaChaPoly_BLAKE2s needs, all pure
+# Rust.
 #
-# OJO: tampoco va la feature "std". En snow 0.10 esta declarada como
-# `std = [..., "ring/std"]` (sin el `?`), asi que prenderla FUERZA la
-# dependencia opcional `ring` aunque no se use ningun resolver de ring.
+# NOTE: the "std" feature isn't enabled either. In snow 0.10 it's declared
+# as `std = [..., "ring/std"]` (without the `?`), so turning it on FORCES
+# the optional `ring` dependency even though no ring resolver is used.
 snow = { version = "0.10", default-features = false, features = [
     "default-resolver",
     "use-curve25519",
@@ -48,8 +49,8 @@ snow = { version = "0.10", default-features = false, features = [
     "use-getrandom",
 ] }
 
-# La papelera del OS no existe en Android (ver db.rs::delete_tracks, que ahi
-# borra directo). El resto de la papelera de Sway es nuestra y es puro
-# filesystem (trash.rs), asi que funciona en todos lados.
+# The OS trash doesn't exist on Android (see db.rs::delete_tracks, which
+# deletes directly there). The rest of Sway's trash is our own and pure
+# filesystem (trash.rs), so it works everywhere.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 trash = "5.2.6"

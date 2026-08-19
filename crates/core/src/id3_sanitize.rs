@@ -1,14 +1,14 @@
-//! Neutraliza frames de fecha ID3v2 con contenido invalido (no son digitos ni
-//! separadores de fecha) que hacen que lofty descarte el tag ENTERO por un
-//! solo campo corrupto.
+//! Neutralizes ID3v2 date frames with invalid content (not digits or date
+//! separators) that make lofty discard the ENTIRE tag over a single
+//! corrupted field.
 //!
-//! Caso real que motivo esto: un track traia el frame `TORY` (Original
-//! Release Year) con el texto "Cmp3.eu" en vez de un año — pisado por la
-//! herramienta de tagging de un sitio de descargas — y `lofty::read_from_path`
-//! tira `BadTimestamp` y no devuelve NADA (ni titulo, ni artista, ni
-//! caratula, ni duracion), aunque el resto del tag este perfecto.
-//! `ParsingMode::Relaxed` no ayuda: ese es de los pocos errores que lofty
-//! trata como duros sin importar el modo.
+//! Real case that motivated this: a track had the `TORY` frame (Original
+//! Release Year) with the text "Cmp3.eu" instead of a year — overwritten by
+//! the tagging tool of a download site — and `lofty::read_from_path` throws
+//! `BadTimestamp` and returns NOTHING (no title, no artist, no cover art, no
+//! duration), even though the rest of the tag is perfectly fine.
+//! `ParsingMode::Relaxed` doesn't help: this is one of the few errors lofty
+//! treats as hard regardless of mode.
 
 const DATE_FRAMES: &[[u8; 4]] = &[
     *b"TYER", *b"TDAT", *b"TIME", *b"TORY", *b"TRDA", *b"TDRC", *b"TDOR", *b"TDRL", *b"TDEN", *b"TDTG",
@@ -26,9 +26,9 @@ fn syncsafe_u32(b: &[u8]) -> Option<u32> {
     )
 }
 
-/// True si el contenido de un frame de fecha (1 byte de encoding + texto) es
-/// texto plausible para una fecha ID3 (solo digitos + separadores comunes),
-/// decodificando segun el byte de encoding (0=Latin1, 1=UTF-16+BOM,
+/// True if the content of a date frame (1 encoding byte + text) is
+/// plausible text for an ID3 date (only digits + common separators),
+/// decoding according to the encoding byte (0=Latin1, 1=UTF-16+BOM,
 /// 2=UTF-16BE, 3=UTF-8).
 fn is_plausible_date_text(content: &[u8]) -> bool {
     let Some((&enc, text)) = content.split_first() else {
@@ -57,16 +57,16 @@ fn is_plausible_date_text(content: &[u8]) -> bool {
             let units: Vec<u16> = text.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
             char::decode_utf16(units).filter_map(|r| r.ok()).collect()
         }
-        _ => return true, // encoding desconocido: no tocar, mejor no arriesgar
+        _ => return true, // unknown encoding: don't touch, better not risk it
     };
     chars.iter().all(|&c| c == '\0' || c.is_ascii_digit() || matches!(c, '-' | ':' | 'T' | 'Z' | ' '))
 }
 
-/// Recorre los frames de un tag ID3v2 y neutraliza (encoding -> Latin1,
-/// contenido -> ceros) los frames de fecha con texto invalido. Devuelve
-/// `Some(bytes parcheados)` si encontro y arreglo algo, o `None` si no habia
-/// tag ID3v2 reconocible o los frames de fecha ya estaban bien (no hace
-/// falta reparsear nada distinto de lo que ya se intento).
+/// Walks the frames of an ID3v2 tag and neutralizes (encoding -> Latin1,
+/// content -> zeros) date frames with invalid text. Returns
+/// `Some(patched bytes)` if it found and fixed something, or `None` if there
+/// was no recognizable ID3v2 tag or the date frames were already fine (no
+/// need to reparse anything different from what was already tried).
 pub fn sanitize_id3v2_date_frames(bytes: &[u8]) -> Option<Vec<u8>> {
     if bytes.len() < 10 || &bytes[0..3] != b"ID3" {
         return None;
@@ -76,7 +76,7 @@ pub fn sanitize_id3v2_date_frames(bytes: &[u8]) -> Option<Vec<u8>> {
     let tag_size = syncsafe_u32(bytes.get(6..10)?)? as usize;
     let mut pos = 10usize;
     if flags & 0x40 != 0 {
-        // Extended header presente: lo saltamos (poco comun en la practica).
+        // Extended header present: skip it (uncommon in practice).
         let ext_size = if major >= 4 {
             syncsafe_u32(bytes.get(pos..pos + 4)?)? as usize
         } else {
@@ -89,7 +89,7 @@ pub fn sanitize_id3v2_date_frames(bytes: &[u8]) -> Option<Vec<u8>> {
     while pos + 10 <= tag_end {
         let id = &bytes[pos..pos + 4];
         if id == [0, 0, 0, 0] {
-            break; // padding: no hay mas frames reales
+            break; // padding: no more real frames
         }
         let frame_size = if major >= 4 {
             syncsafe_u32(bytes.get(pos + 4..pos + 8)?)? as usize
@@ -103,7 +103,7 @@ pub fn sanitize_id3v2_date_frames(bytes: &[u8]) -> Option<Vec<u8>> {
             let content = &bytes[frame_start..frame_end];
             if !is_plausible_date_text(content) {
                 let buf = out.get_or_insert_with(|| bytes.to_vec());
-                buf[frame_start] = 0; // encoding -> Latin1 (sin BOM que validar)
+                buf[frame_start] = 0; // encoding -> Latin1 (no BOM to validate)
                 for b in &mut buf[frame_start + 1..frame_end] {
                     *b = 0;
                 }
@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn neutralizes_garbage_tory_leaves_valid_tyer_untouched() {
-        // TORY con "AB" en UTF-16LE con BOM (invalido: letras, no digitos).
+        // TORY with "AB" in UTF-16LE with BOM (invalid: letters, not digits).
         let tory_content: Vec<u8> = {
             let mut c = vec![1u8]; // encoding = UTF-16 + BOM
             c.extend_from_slice(&[0xff, 0xfe]); // BOM LE
@@ -169,16 +169,16 @@ mod tests {
         frames.extend(frame(b"TYER", &tyer_content));
         let tag = build_tag(&frames);
 
-        let patched = sanitize_id3v2_date_frames(&tag).expect("deberia sanitizar TORY");
+        let patched = sanitize_id3v2_date_frames(&tag).expect("should sanitize TORY");
 
-        // TORY quedo neutralizado (encoding Latin1, resto en cero).
+        // TORY was neutralized (Latin1 encoding, rest zeroed).
         let tory_start = 10 + 10; // header + frame header de TORY
         assert_eq!(patched[tory_start], 0);
         assert!(patched[tory_start + 1..tory_start + 1 + tory_content.len() - 1]
             .iter()
             .all(|&b| b == 0));
 
-        // TYER (valido) no se toco: mismos bytes que el original.
+        // TYER (valid) was not touched: same bytes as the original.
         let tyer_start = tory_start + tory_content.len() + 10;
         assert_eq!(
             &patched[tyer_start..tyer_start + tyer_content.len()],

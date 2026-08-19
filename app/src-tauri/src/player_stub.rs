@@ -1,11 +1,11 @@
-//! Stub de `Player` para Android/iOS. La reproduccion real ahi va por
-//! `tauri-plugin-native-audio`, controlado directo desde JS (ver
-//! `app/src/nativeAudio.ts>`) — no por este `Player` de Rust (que en desktop
-//! mueve rodio). Los comandos de playback en `lib.rs` (`play_track`,
-//! `pause_playback`, etc.) son inalcanzables desde el frontend en Android
-//! (`api.ts` enruta a `nativeAudio.ts` en su lugar), pero `AppState` los
-//! sigue necesitando para compilar sin duplicar `lib.rs` por plataforma.
-//! Misma firma publica que `player.rs`, sin comportamiento real.
+//! `Player` stub for Android/iOS. Real playback there goes through
+//! `tauri-plugin-native-audio`, controlled directly from JS (see
+//! `app/src/nativeAudio.ts`) — not through this Rust `Player` (which on
+//! desktop drives rodio). The playback commands in `lib.rs` (`play_track`,
+//! `pause_playback`, etc.) are unreachable from the frontend on Android
+//! (`api.ts` routes to `nativeAudio.ts` instead), but `AppState` still needs
+//! them to compile without duplicating `lib.rs` per platform. Same public
+//! signature as `player.rs`, with no real behavior.
 
 use std::path::PathBuf;
 

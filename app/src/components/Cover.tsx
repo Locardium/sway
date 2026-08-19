@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Music } from 'lucide-react';
 import { coverThumb } from '../api';
 
-// Cache global de caratulas por track id (data-URL o null si no tiene).
+// Global cover cache by track id (data-URL or null if it has none).
 const cache = new Map<number, string | null>();
 const pending = new Map<number, Promise<string | null>>();
 
@@ -25,7 +25,7 @@ function fetchCover(id: number): Promise<string | null> {
 interface Props {
   trackId: number | null;
   className?: string;
-  /** true: carga inmediata (player/panel). false: espera a ser visible (filas). */
+  /** true: loads immediately (player/panel). false: waits to become visible (rows). */
   eager?: boolean;
 }
 

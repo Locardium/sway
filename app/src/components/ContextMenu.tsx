@@ -6,7 +6,7 @@ export interface MenuItem {
   onClick?: () => void;
   danger?: boolean;
   disabled?: boolean;
-  /** undefined = item normal; true/false = item con checkbox. */
+  /** undefined = normal item; true/false = item with checkbox. */
   checked?: boolean;
   separator?: boolean;
 }
@@ -16,7 +16,7 @@ interface Props {
   y: number;
   items: MenuItem[];
   onClose: () => void;
-  /** Con checkboxes el menu no se cierra al clickear un item. */
+  /** With checkboxes, the menu doesn't close when an item is clicked. */
   keepOpen?: boolean;
 }
 
@@ -24,7 +24,7 @@ export default function ContextMenu({ x, y, items, onClose, keepOpen }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ x, y });
 
-  // Clampa dentro del viewport.
+  // Clamps within the viewport.
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;

@@ -1,12 +1,13 @@
-//! Inventario de la biblioteca y cálculo del plan de sync (Fase 5.3).
+//! Library inventory and sync plan calculation (Phase 5.3).
 //!
-//! Acá NO se escribe nada. Los dos lados se mandan lo que tienen y se calcula
-//! qué habría que hacer; recién 5.4 lo ejecuta. Separarlo así es a propósito:
-//! el merge es la parte donde un error borra música, y se puede probar entera
-//! —y mirar con los ojos, en la UI— antes de que pueda tocar un archivo.
+//! Nothing gets written here. Both sides send what they have and the plan
+//! computes what should happen; only 5.4 actually executes it. Keeping it
+//! separate like this is deliberate: the merge is the part where a bug can
+//! delete music, and it can be tested in full — and eyeballed in the UI —
+//! before it gets anywhere near a file.
 //!
-//! `plan()` es una función pura sobre dos manifests. Todas las decisiones
-//! difíciles viven ahí y se testean sin red, sin DB y sin dispositivos.
+//! `plan()` is a pure function over two manifests. All the hard decisions
+//! live there and are tested without a network, a DB, or any devices.
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -15,33 +16,33 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 
 // ---------------------------------------------------------------------------
-// Compresión del inventario
+// Inventory compression
 // ---------------------------------------------------------------------------
 
-/// Tope de lo que se acepta descomprimir.
+/// Cap on what is accepted for decompression.
 ///
-/// Un `Vec` comprimido chiquito puede expandirse a gigabytes si lo armó
-/// alguien con ganas de que el otro lado se quede sin memoria. El límite es el
-/// mismo que ya tenía el canal para un mensaje entero (ver `wire.rs`): un
-/// inventario más grande que esto es un problema aunque venga sin comprimir.
+/// A tiny compressed `Vec` can expand to gigabytes if it was crafted by
+/// someone hoping to run the other side out of memory. The limit is the same
+/// one the channel already had for a whole message (see `wire.rs`): an
+/// inventory bigger than this is a problem even uncompressed.
 const MAX_INFLATED: u64 = 64 * 1024 * 1024;
 
-/// Comprime el inventario.
+/// Compresses the inventory.
 ///
-/// El inventario es JSON y es de lo más comprimible que hay: las mismas claves
-/// repetidas en cada fila, uuids y hashes en hexadecimal. Y no es un detalle
-/// de eficiencia — es lo que viaja **entero** en cada comparación, haya
-/// cambiado algo o no, y del celular sale por el plan de datos.
+/// The inventory is JSON and about as compressible as it gets: the same keys
+/// repeated in every row, uuids and hashes in hex. This isn't a minor
+/// efficiency detail — it's what travels **whole** on every comparison,
+/// whether anything changed or not, and out of a phone's data plan.
 pub fn squeeze(json: &[u8]) -> Result<Vec<u8>> {
-    // Compresión rápida y no máxima: la diferencia entre los dos extremos son
-    // unos pocos puntos porcentuales sobre algo que ya baja diez veces, y el
-    // lado que sirve puede ser una Raspberry.
+    // Fast compression, not maximum: the gap between the two extremes is a
+    // few percentage points on something that's already ten times smaller,
+    // and the serving side can be a Raspberry Pi.
     let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     enc.write_all(json)?;
     Ok(enc.finish()?)
 }
 
-/// Lo devuelve a JSON.
+/// Turns it back into JSON.
 pub fn expand(gz: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     flate2::read::GzDecoder::new(gz)
@@ -51,15 +52,16 @@ pub fn expand(gz: &[u8]) -> Result<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------------------
-// Inventario
+// Inventory
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackEntry {
     pub uid: String,
-    /// `None` mientras el backfill de hashes no llegó a este track. Sin hash
-    /// no se puede pedir ni verificar el archivo, así que no participa.
+    /// `None` while the hash backfill hasn't reached this track yet. Without
+    /// a hash the file can't be requested or verified, so it doesn't
+    /// participate.
     pub hash: Option<String>,
     pub size: i64,
     pub filename: String,
@@ -70,8 +72,7 @@ pub struct TrackEntry {
     pub duration_ms: i64,
     pub bpm: Option<i64>,
     pub updated_at: i64,
-    /// El archivo está en este dispositivo (no fue evacuado por sync
-    /// selectiva).
+    /// The file is on this device (wasn't evacuated by selective sync).
     pub present: bool,
 }
 
@@ -92,8 +93,9 @@ pub struct Membership {
     pub playlist_uid: String,
     pub track_uid: String,
     pub rank: String,
-    /// Cuando entro el track a la playlist. Se compara contra el
-    /// `deleted_at` del tombstone del mismo par: gana el mas reciente.
+    /// When the track was added to the playlist. Compared against the
+    /// `deleted_at` of the tombstone for the same pair: the most recent one
+    /// wins.
     #[serde(default)]
     pub added_at: i64,
 }
@@ -106,8 +108,8 @@ pub struct Tombstone {
     pub deleted_at: i64,
 }
 
-/// Una playlist marcada (o desmarcada) para un dispositivo. Viaja porque el
-/// scope se edita desde cualquier lado — ver `scope.rs`.
+/// A playlist marked (or unmarked) for a device. Travels because scope can
+/// be edited from either side — see `scope.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScopeEntry {
@@ -117,10 +119,10 @@ pub struct ScopeEntry {
     pub updated_at: i64,
 }
 
-/// Lo que hace un dispositivo: qué dirección sincroniza y si se lleva toda la
-/// biblioteca o sólo lo marcado. Es una propiedad del dispositivo, no del
-/// vínculo — entre dos, A → B pasa sólo si A manda y B recibe, y las dos filas
-/// las tienen los dos lados.
+/// What a device does: which direction it syncs and whether it takes the
+/// whole library or just what's marked. It's a property of the device, not
+/// of the link — between two devices, A → B happens only if A sends and B
+/// receives, and both sides hold both rows.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceSync {
@@ -145,8 +147,8 @@ pub struct Manifest {
     pub playlists: Vec<PlaylistEntry>,
     pub memberships: Vec<Membership>,
     pub tombstones: Vec<Tombstone>,
-    /// Scope de todos los dispositivos conocidos (Fase 5.7). `default` para
-    /// poder leer un manifest de una versión anterior sin romper.
+    /// Scope of all known devices (Phase 5.7). `default` so a manifest from
+    /// an earlier version can still be read without breaking.
     #[serde(default)]
     pub scopes: Vec<ScopeEntry>,
     #[serde(default)]
@@ -166,33 +168,35 @@ pub struct FileTransfer {
     pub size: i64,
 }
 
-/// Lo que pasaría si se sincronizara ahora. Los conteos son lo que se muestra
-/// en la UI antes de habilitar nada.
+/// What would happen if a sync ran right now. The counts are what gets shown
+/// in the UI before anything is enabled.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Plan {
-    /// Archivos que tiene el otro y acá faltan.
+    /// Files the peer has and we're missing.
     pub pull_files: Vec<FileTransfer>,
-    /// Archivos que hay acá y al otro le faltan.
+    /// Files we have and the peer is missing.
     pub push_files: Vec<FileTransfer>,
-    /// Tracks cuya metadata es más nueva del otro lado (y al revés).
+    /// Tracks whose metadata is newer on the other side (and vice versa).
     pub pull_meta: usize,
     pub push_meta: usize,
-    /// Playlists/carpetas que no existen del otro lado (y al revés).
+    /// Playlists/folders that don't exist on the other side (and vice versa).
     pub pull_playlists: usize,
     pub push_playlists: usize,
-    /// Tracks agregados a playlists que del otro lado no figuran.
+    /// Tracks added to playlists that don't appear on the other side.
     pub pull_memberships: usize,
     pub push_memberships: usize,
-    /// Borrados que habría que aplicar acá / allá.
+    /// Deletions that would need to be applied here / there.
     pub deletes_in: usize,
     pub deletes_out: usize,
-    /// Tracks que no participan porque todavía no tienen hash calculado.
+    /// Tracks that don't participate because they don't have a computed hash
+    /// yet.
     pub unhashed: usize,
-    /// Archivos que NO se traen / NO se mandan porque quedaron fuera del scope
-    /// selectivo del dispositivo que los recibiría (Fase 5.7). No son trabajo
-    /// pendiente: son la sync selectiva funcionando. Se muestran igual, porque
-    /// "faltan 300 archivos y el plan dice cero" necesita explicación.
+    /// Files that are NOT pulled / NOT pushed because they fell outside the
+    /// selective scope of the device that would receive them (Phase 5.7).
+    /// These aren't pending work: they're selective sync working as
+    /// intended. Shown anyway, because "300 files missing and the plan says
+    /// zero" needs an explanation.
     pub out_of_scope_in: usize,
     pub out_of_scope_out: usize,
 }
@@ -229,46 +233,48 @@ fn pair_key(playlist_uid: &str, track_uid: &str) -> String {
     format!("{playlist_uid}:{track_uid}")
 }
 
-/// El mismo track (mismo uid) con bytes distintos en cada dispositivo: otra
-/// codificación, otro recorte, un tagger que reescribió el archivo.
+/// The same track (same uid) with different bytes on each device: a
+/// different encoding, a different edit, a tagger that rewrote the file.
 ///
-/// Hay que quedarse con uno solo, y **los dos lados tienen que elegir el
-/// mismo**. Si cada uno se trae el del otro, se lo intercambian en cada sync
-/// para siempre: A termina con el de B, B con el de A, y en la vuelta
-/// siguiente al revés. Por eso la regla no puede ser "traé lo que te falta"
-/// sino una comparación que dé idéntica en las dos puntas.
+/// Only one can stick around, and **both sides have to pick the same one**.
+/// If each side pulls the other's, they'd swap it back and forth on every
+/// sync forever: A ends up with B's copy, B with A's, and the next round
+/// flips again. That's why the rule can't be "pull whatever you're missing"
+/// but a comparison that comes out identical on both ends.
 ///
-/// Gana el más nuevo; a igual fecha desempata el hash. El desempate es
-/// arbitrario, pero es lo único que importa: que sea el mismo de los dos lados.
+/// The newer one wins; on a tie, the hash breaks it. The tiebreaker is
+/// arbitrary, but the only thing that matters is that it's the same on both
+/// sides.
 fn wins(a: &TrackEntry, b: &TrackEntry) -> bool {
     (a.updated_at, a.hash.as_deref()) > (b.updated_at, b.hash.as_deref())
 }
 
-/// Calcula qué haría un sync entre `local` y `remote`. No toca nada.
+/// Computes what a sync between `local` and `remote` would do. Touches
+/// nothing.
 ///
-/// Sesgos, todos en la misma dirección — ante la duda, conservar:
-/// - Un track cuyo `uid` fue borrado acá NO se vuelve a traer. Sin esto, cada
-///   sync resucitaría lo borrado y no habría forma de sacar nada de la
-///   biblioteca.
-/// - Un archivo se considera presente si coincide el **contenido** (hash), no
-///   el uid: el mismo MP3 importado por separado en dos dispositivos tiene
-///   uids distintos, y transferirlo de nuevo sería tirar ancho de banda para
-///   terminar con dos copias iguales.
-/// - Las membresías (track dentro de playlist) se unen; sacar sólo se
-///   propaga si hay un tombstone explícito.
-/// - El scope selectivo filtra **sólo archivos**: las playlists, el orden y la
-///   metadata viajan enteros igual. Un track fuera de scope se sigue viendo en
-///   la biblioteca del otro dispositivo, sin archivo.
+/// Biases, all pointing the same way — when in doubt, keep:
+/// - A track whose `uid` was deleted here is NOT pulled back. Without this,
+///   every sync would resurrect what was deleted and there'd be no way to
+///   actually remove anything from the library.
+/// - A file counts as present if its **content** (hash) matches, not its
+///   uid: the same MP3 imported separately on two devices has different
+///   uids, and transferring it again would burn bandwidth just to end up
+///   with two identical copies.
+/// - Memberships (track inside playlist) are unioned; removal only
+///   propagates if there's an explicit tombstone.
+/// - Selective scope filters **only files**: playlists, order, and metadata
+///   travel in full regardless. A track outside of scope still shows up in
+///   the other device's library, just without a file.
 pub fn plan(local: &Manifest, remote: &Manifest) -> Plan {
     let mut p = Plan::default();
 
-    // Scope resuelto con las filas más nuevas de los dos lados: durante la
-    // ventana en que un cambio todavía no viajó, los manifests difieren y hay
-    // que decidir con la más reciente, no con la propia.
+    // Scope resolved from the newest rows on both sides: during the window
+    // where a change hasn't traveled yet, the manifests differ and the
+    // decision has to go by the most recent row, not by our own.
     let all_entries = crate::scope::merge_entries(&local.scopes, &remote.scopes);
     let all_modes = crate::scope::merge_device_sync(&local.device_sync, &remote.device_sync);
-    // La jerarquía y las membresías se resuelven sobre la unión: una playlist
-    // que sólo existe de un lado igual define qué entra.
+    // Hierarchy and memberships are resolved over the union: a playlist that
+    // only exists on one side still decides what gets included.
     let all_playlists: Vec<PlaylistEntry> = local
         .playlists
         .iter()
@@ -309,10 +315,10 @@ pub fn plan(local: &Manifest, remote: &Manifest) -> Plan {
     let remote_by_uid: HashMap<&str, &TrackEntry> =
         remote.tracks.iter().map(|t| (t.uid.as_str(), t)).collect();
 
-    // Los tombstones se consultan una vez por track, por playlist y por
-    // membresía. Recorrer la lista en cada consulta hace el sync cuadrático:
-    // con 20 mil tracks y unos cuantos borrados son cientos de millones de
-    // comparaciones de strings, dos veces por corrida.
+    // Tombstones are queried once per track, per playlist, and per
+    // membership. Scanning the list on every lookup makes the sync
+    // quadratic: with 20 thousand tracks and a handful of deletions that's
+    // hundreds of millions of string comparisons, twice per run.
     let local_tombs: HashSet<(&str, &str)> = tombstone_keys(local);
     let remote_tombs: HashSet<(&str, &str)> = tombstone_keys(remote);
     let tombstoned = |set: &HashSet<(&str, &str)>, entity: &str, uid: &str| {
@@ -321,24 +327,25 @@ pub fn plan(local: &Manifest, remote: &Manifest) -> Plan {
 
     p.unhashed = local.tracks.iter().filter(|t| t.hash.is_none()).count();
 
-    // --- Archivos -----------------------------------------------------------
+    // --- Files ----------------------------------------------------------
     for t in remote.tracks.iter().filter(|t| t.present) {
         let Some(hash) = t.hash.as_deref() else { continue };
         if local_hashes.contains(hash) || tombstoned(&local_tombs, "track", &t.uid) {
             continue;
         }
         if let Some(l) = local_by_uid.get(t.uid.as_str()).filter(|l| l.present) {
-            // Ese track ya está acá pero todavía sin hash calculado: no se
-            // puede saber si es el mismo contenido. Bajarlo "por las dudas" es
-            // transferirlo entero en CADA sync mientras el backfill no llega —
-            // que es exactamente lo que pasaba: el mismo tema viajando una y
-            // otra vez estando en los dos lados. Se espera al hash.
+            // That track is already here but doesn't have a computed hash
+            // yet: there's no way to tell if it's the same content.
+            // Pulling it "just in case" means transferring it in full on
+            // EVERY sync until the backfill catches up — which is exactly
+            // what used to happen: the same track traveling back and forth
+            // while present on both sides. So it waits for the hash.
             if l.hash.is_none() {
                 continue;
             }
-            // Está acá con otros bytes: sólo se trae si el de allá gana el
-            // desempate (ver `wins`), o los dos se intercambian el archivo
-            // para siempre.
+            // It's here with different bytes: only pulled if the remote
+            // one wins the tiebreak (see `wins`), or the two would swap the
+            // file back and forth forever.
             if l.hash.as_deref() != Some(hash) && !wins(t, l) {
                 continue;
             }
@@ -359,10 +366,10 @@ pub fn plan(local: &Manifest, remote: &Manifest) -> Plan {
         if remote_hashes.contains(hash) || tombstoned(&remote_tombs, "track", &t.uid) {
             continue;
         }
-        // Espejo de lo de arriba, visto desde el otro lado: no se le manda algo
-        // que allá ya está bajo el mismo uid, salvo que lo nuestro gane el
-        // desempate. Los dos lados hacen la misma cuenta y llegan al mismo
-        // ganador, así que el archivo viaja una vez y en una sola dirección.
+        // Mirror of the above, seen from the other side: nothing gets sent
+        // that's already there under the same uid, unless ours wins the
+        // tiebreak. Both sides run the same comparison and land on the same
+        // winner, so the file moves once and in a single direction.
         if let Some(r) = remote_by_uid.get(t.uid.as_str()).filter(|r| r.present) {
             if r.hash.is_none() {
                 continue;
@@ -383,7 +390,7 @@ pub fn plan(local: &Manifest, remote: &Manifest) -> Plan {
         });
     }
 
-    // --- Metadata (LWW por fila; el detalle por campo llega en 5.5) ---------
+    // --- Metadata (LWW per row; per-field detail arrives in 5.5) -----------
     for (uid, r) in remote_by_uid.iter() {
         if let Some(l) = local_by_uid.get(uid) {
             if r.updated_at > l.updated_at {
@@ -408,7 +415,7 @@ pub fn plan(local: &Manifest, remote: &Manifest) -> Plan {
         .filter(|pl| !remote_pl.contains(pl.uid.as_str()) && !tombstoned(&remote_tombs, "playlist", &pl.uid))
         .count();
 
-    // --- Membresías ---------------------------------------------------------
+    // --- Memberships ---------------------------------------------------------
     let local_pairs: HashSet<String> = local
         .memberships
         .iter()
@@ -436,10 +443,10 @@ pub fn plan(local: &Manifest, remote: &Manifest) -> Plan {
         })
         .count();
 
-    // --- Borrados -----------------------------------------------------------
-    // Un tombstone sólo cuenta si del otro lado todavía existe eso que borra.
-    // Los conjuntos ya están armados arriba: preguntar recorriendo la lista
-    // por cada tombstone volvía esto cuadrático.
+    // --- Deletions -----------------------------------------------------------
+    // A tombstone only counts if the thing it deletes still exists on the
+    // other side. The sets are already built above: checking by scanning
+    // the list for every tombstone made this quadratic.
     let exists_in = |uids: &HashMap<&str, &TrackEntry>,
                      pls: &HashSet<&str>,
                      pairs: &HashSet<String>,
@@ -465,7 +472,7 @@ pub fn plan(local: &Manifest, remote: &Manifest) -> Plan {
 }
 
 // ---------------------------------------------------------------------------
-// Construcción desde la DB
+// Building from the DB
 // ---------------------------------------------------------------------------
 
 pub fn build(conn: &Connection) -> rusqlite::Result<Manifest> {
@@ -497,8 +504,8 @@ pub fn build(conn: &Connection) -> rusqlite::Result<Manifest> {
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
 
-    // `parent_uid` en vez de `parent_id`: los ids INTEGER son locales y no
-    // significan nada del otro lado.
+    // `parent_uid` instead of `parent_id`: INTEGER ids are local and mean
+    // nothing on the other side.
     let playlists = {
         let mut stmt = conn.prepare(
             "SELECT p.uid, p.name, p.kind, parent.uid, p.rank, p.updated_at
@@ -561,54 +568,54 @@ pub fn build(conn: &Connection) -> rusqlite::Result<Manifest> {
 }
 
 #[cfg(test)]
-mod compresion {
+mod compression {
     use super::*;
 
     #[test]
-    fn lo_que_se_comprime_vuelve_igual() {
-        let json = br#"{"tracks":[{"uid":"a","title":"Un tema"}],"playlists":[]}"#;
+    fn what_gets_compressed_comes_back_the_same() {
+        let json = br#"{"tracks":[{"uid":"a","title":"A track"}],"playlists":[]}"#;
         let gz = squeeze(json).unwrap();
         assert_eq!(expand(&gz).unwrap(), json);
     }
 
-    /// Un inventario vacío también tiene que sobrevivir: es lo que manda un
-    /// dispositivo recién instalado, y es justo el caso donde equivocarse
-    /// borraría la biblioteca del otro lado.
+    /// An empty inventory also has to survive: it's what a freshly installed
+    /// device sends, and it's exactly the case where a mistake would wipe
+    /// out the other side's library.
     #[test]
-    fn un_inventario_vacio_sobrevive() {
+    fn an_empty_inventory_survives() {
         let json = b"{}";
         assert_eq!(expand(&squeeze(json).unwrap()).unwrap(), json);
     }
 
-    /// Basura comprimida no puede colgar ni reventar al que la recibe: tiene
-    /// que dar error y nada más.
+    /// Garbage compressed data can't hang or crash the receiver: it has to
+    /// return an error and nothing more.
     #[test]
-    fn algo_que_no_es_gzip_da_error_y_no_panic() {
-        assert!(expand(b"esto no es un gzip ni por casualidad").is_err());
+    fn something_that_is_not_gzip_errors_without_panicking() {
+        assert!(expand(b"this isn't gzip by any stretch").is_err());
     }
 }
 
 #[cfg(test)]
-mod peso {
+mod weight {
     use super::*;
 
-    /// Cuánto pesa el inventario que viaja en CADA sync, haya cambiado algo o
-    /// no. No es una aserción, es una medición: correr con
-    /// `cargo test -p sway-core -- --ignored --nocapture peso`.
+    /// How much the inventory that travels on EVERY sync weighs, whether
+    /// anything changed or not. This isn't an assertion, it's a measurement:
+    /// run it with `cargo test -p sway-core -- --ignored --nocapture weight`.
     ///
-    /// Importa porque el inventario no depende de lo que cambió sino de lo que
-    /// hay: una biblioteca quieta cuesta exactamente lo mismo que una que se
-    /// movió entera. Es lo que hace que la pasada periódica escale con el
-    /// tamaño de la biblioteca en vez de con la cantidad de novedades.
+    /// It matters because the inventory doesn't depend on what changed but
+    /// on what exists: a library sitting still costs exactly the same as one
+    /// that moved entirely. That's what makes the periodic pass scale with
+    /// the size of the library instead of with the amount of new activity.
     #[test]
     #[ignore]
-    fn cuanto_pesa_el_inventario() {
-        for (tracks, por_tema) in [(100usize, 3usize), (1_000, 3), (5_000, 3)] {
-            let m = sintetico(tracks, por_tema);
+    fn how_much_the_inventory_weighs() {
+        for (tracks, per_track) in [(100usize, 3usize), (1_000, 3), (5_000, 3)] {
+            let m = synthetic(tracks, per_track);
             let json = serde_json::to_vec(&m).unwrap();
             let gz = crate::manifest::squeeze(&json).unwrap();
             println!(
-                "{tracks} temas, {} membresías -> {:.2} MB en crudo, {:.2} MB comprimido ({:.1}x)",
+                "{tracks} tracks, {} memberships -> {:.2} MB raw, {:.2} MB compressed ({:.1}x)",
                 m.memberships.len(),
                 json.len() as f64 / (1024.0 * 1024.0),
                 gz.len() as f64 / (1024.0 * 1024.0),
@@ -617,9 +624,9 @@ mod peso {
         }
     }
 
-    /// Una biblioteca de mentira con medidas realistas: uid de UUID, hash de
-    /// blake3 en hexa, y títulos y nombres de archivo de largo corriente.
-    fn sintetico(tracks: usize, playlists_por_tema: usize) -> Manifest {
+    /// A fake library with realistic measurements: UUID uids, blake3 hex
+    /// hashes, and titles and filenames of typical length.
+    fn synthetic(tracks: usize, playlists_per_track: usize) -> Manifest {
         let uid = |n: usize| format!("{n:08x}-1111-4222-8333-444455556666");
         let hash = |n: usize| format!("{:064x}", n);
         Manifest {
@@ -629,10 +636,10 @@ mod peso {
                     uid: uid(i),
                     hash: Some(hash(i)),
                     size: 9_325_265,
-                    filename: format!("Artista {i} - Un Titulo Bastante Largo (Extended Mix).flac"),
-                    title: format!("Un Titulo Bastante Largo {i} (Extended Mix)"),
-                    artist: format!("Artista {i}"),
-                    album: format!("Un Album {i}"),
+                    filename: format!("Artist {i} - A Pretty Long Title (Extended Mix).flac"),
+                    title: format!("A Pretty Long Title {i} (Extended Mix)"),
+                    artist: format!("Artist {i}"),
+                    album: format!("An Album {i}"),
                     genre: "Progressive House".into(),
                     duration_ms: 384_000,
                     bpm: Some(126),
@@ -643,18 +650,18 @@ mod peso {
             playlists: (0..40)
                 .map(|i| PlaylistEntry {
                     uid: uid(900_000 + i),
-                    name: format!("Set de la playlist {i}"),
+                    name: format!("Playlist set {i}"),
                     kind: "playlist".into(),
                     parent_uid: None,
                     rank: "aZk".into(),
                     updated_at: 1_755_000_000_000,
                 })
                 .collect(),
-            // Un tema suele estar en varias playlists, y cada pertenencia es
-            // una fila propia en el inventario.
+            // A track is usually in several playlists, and each membership
+            // is its own row in the inventory.
             memberships: (0..tracks)
                 .flat_map(|i| {
-                    (0..playlists_por_tema).map(move |p| Membership {
+                    (0..playlists_per_track).map(move |p| Membership {
                         playlist_uid: uid(900_000 + p),
                         track_uid: uid(i),
                         rank: "aZkQm".into(),
@@ -702,22 +709,23 @@ mod tests {
         }
     }
 
-    /// Los dos manifests de prueba comparten `device_uid` ("dev"), que sirve
-    /// para todo menos para el scope: ahí hacen falta dos identidades.
+    /// Both test manifests share `device_uid` ("dev"), which works for
+    /// everything except scope: that needs two distinct identities.
     fn named(uid: &str, m: Manifest) -> Manifest {
         Manifest { device_uid: uid.into(), ..m }
     }
 
-    /// Se desmarca una playlist para el celular y después se cambia un tema de
-    /// esa playlist en la PC: el archivo no puede viajar. Ni recién desmarcada,
-    /// ni cuando el celular ya liberó el espacio — que le falte no es motivo
-    /// para mandárselo, o "liberar" no liberaría nada.
+    /// A playlist gets unmarked for the phone and then a track from that
+    /// playlist gets changed on the PC: the file can't travel. Not right
+    /// after unmarking, and not once the phone already freed the space —
+    /// missing it isn't a reason to send it, or "freeing space" wouldn't
+    /// actually free anything.
     #[test]
     fn an_unselected_playlist_never_sends_its_files() {
         let plists = vec![
             PlaylistEntry {
                 uid: "x".into(),
-                name: "Desmarcada".into(),
+                name: "Unmarked".into(),
                 kind: "playlist".into(),
                 parent_uid: None,
                 rank: "V".into(),
@@ -725,14 +733,14 @@ mod tests {
             },
             PlaylistEntry {
                 uid: "y".into(),
-                name: "Marcada".into(),
+                name: "Marked".into(),
                 kind: "playlist".into(),
                 parent_uid: None,
                 rank: "W".into(),
                 updated_at: 0,
             },
         ];
-        // El tema vive sólo en la desmarcada.
+        // The track only lives in the unmarked one.
         let members = vec![Membership {
             playlist_uid: "x".into(),
             track_uid: "t".into(),
@@ -768,24 +776,24 @@ mod tests {
             m
         };
 
-        // La PC retagueó el tema: mismo uid, otros bytes, más nuevo.
-        let pc = with("pc", track("t", Some("h-nuevo"), 500));
-        let celu = with("celu", track("t", Some("h-viejo"), 100));
+        // The PC re-tagged the track: same uid, different bytes, newer.
+        let pc = with("pc", track("t", Some("h-new"), 500));
+        let celu = with("celu", track("t", Some("h-old"), 100));
 
         let p = plan(&pc, &celu);
-        assert!(p.push_files.is_empty(), "no sale hacia una playlist desmarcada");
+        assert!(p.push_files.is_empty(), "should not go out to an unmarked playlist");
         assert_eq!(p.out_of_scope_out, 1);
 
-        // Y el celu llega a la misma conclusión sin negociar nada.
+        // And the phone reaches the same conclusion without negotiating anything.
         let p = plan(&celu, &pc);
         assert!(p.pull_files.is_empty());
         assert_eq!(p.out_of_scope_in, 1);
 
-        // Después de "liberar espacio" el archivo no está del otro lado.
-        let mut liberado = celu.clone();
-        liberado.tracks[0].present = false;
-        let p = plan(&pc, &liberado);
-        assert!(p.push_files.is_empty(), "liberar no puede hacer que vuelva a bajar");
+        // After "freeing up space" the file isn't there on the other side.
+        let mut freed = celu.clone();
+        freed.tracks[0].present = false;
+        let p = plan(&pc, &freed);
+        assert!(p.push_files.is_empty(), "freeing space can't make it come back down");
         assert_eq!(p.out_of_scope_out, 1);
     }
 
@@ -801,32 +809,32 @@ mod tests {
         assert_eq!(p.bytes_in(), 1000);
     }
 
-    /// El mismo archivo importado por separado en dos dispositivos tiene uids
-    /// distintos pero el mismo contenido. Transferirlo sería gastar ancho de
-    /// banda para terminar con dos copias idénticas.
+    /// The same file imported separately on two devices has different uids
+    /// but the same content. Transferring it would burn bandwidth just to
+    /// end up with two identical copies.
     #[test]
     fn same_content_under_different_uids_is_not_transferred() {
-        let local = manifest(vec![track("aca", Some("mismo-hash"), 0)]);
-        let remote = manifest(vec![track("alla", Some("mismo-hash"), 0)]);
+        let local = manifest(vec![track("here", Some("same-hash"), 0)]);
+        let remote = manifest(vec![track("there", Some("same-hash"), 0)]);
         let p = plan(&local, &remote);
         assert!(p.pull_files.is_empty());
         assert!(p.push_files.is_empty());
     }
 
-    /// Sin esto, cada sync resucitaría lo borrado y no habría manera de sacar
-    /// nada de la biblioteca.
+    /// Without this, every sync would resurrect what was deleted and there'd
+    /// be no way to actually remove anything from the library.
     #[test]
     fn deleted_tracks_are_not_pulled_back() {
         let mut local = manifest(vec![]);
         local.tombstones.push(Tombstone {
             entity: "track".into(),
-            uid: "borrado".into(),
+            uid: "deleted".into(),
             deleted_at: 100,
         });
-        let remote = manifest(vec![track("borrado", Some("h"), 0)]);
+        let remote = manifest(vec![track("deleted", Some("h"), 0)]);
         let p = plan(&local, &remote);
-        assert!(p.pull_files.is_empty(), "no debe volver lo que borré");
-        // Y del otro lado sí hay algo para borrar.
+        assert!(p.pull_files.is_empty(), "should not bring back what I deleted");
+        // And on the other side there's indeed something to delete.
         assert_eq!(p.deletes_out, 1);
         assert_eq!(p.deletes_in, 0);
     }
@@ -844,49 +852,49 @@ mod tests {
         assert_eq!(p.push_meta, 1);
     }
 
-    /// El track ya está acá, con archivo, pero el backfill todavía no le
-    /// calculó el hash. Bajarlo "por si acaso" es transferirlo entero en cada
-    /// sync mientras dure esa ventana — el mismo tema viajando una y otra vez
-    /// estando en los dos lados.
+    /// The track is already here, with a file, but the backfill hasn't
+    /// computed its hash yet. Pulling it "just in case" means transferring
+    /// it in full on every sync for as long as that window lasts — the same
+    /// track traveling back and forth while present on both sides.
     #[test]
     fn a_track_already_here_but_not_hashed_yet_is_not_downloaded_again() {
         let local = manifest(vec![track("t1", None, 0)]);
         let remote = manifest(vec![track("t1", Some("h1"), 0)]);
         assert!(plan(&local, &remote).pull_files.is_empty());
 
-        // Y si de verdad no lo tenemos, sí se baja.
+        // And if we truly don't have it, it does get pulled.
         assert_eq!(plan(&manifest(vec![]), &remote).pull_files.len(), 1);
     }
 
-    /// Mismo track, bytes distintos en cada lado. Si cada uno se trae el del
-    /// otro, se lo intercambian para siempre —y cada vuelta manda un archivo
-    /// entero por la red y archiva el anterior. El plan tiene que elegir un
-    /// ganador **y que las dos puntas elijan el mismo**.
+    /// Same track, different bytes on each side. If each side pulls the
+    /// other's, they'd swap it forever — and every round sends a whole file
+    /// over the network and archives the previous one. The plan has to pick
+    /// a winner **and both ends have to pick the same one**.
     #[test]
     fn the_same_track_with_different_bytes_moves_once_and_in_one_direction() {
-        let mut viejo = track("t1", Some("hash-viejo"), 100);
-        let mut nuevo = track("t1", Some("hash-nuevo"), 500);
-        viejo.filename = "tema.mp3".into();
-        nuevo.filename = "tema.mp3".into();
+        let mut old = track("t1", Some("hash-old"), 100);
+        let mut new = track("t1", Some("hash-new"), 500);
+        old.filename = "track.mp3".into();
+        new.filename = "track.mp3".into();
 
-        // Desde el lado que tiene el viejo: se trae el nuevo, no manda nada.
-        let p = plan(&manifest(vec![viejo.clone()]), &manifest(vec![nuevo.clone()]));
+        // From the side that has the old one: it pulls the new one, sends nothing.
+        let p = plan(&manifest(vec![old.clone()]), &manifest(vec![new.clone()]));
         assert_eq!(p.pull_files.len(), 1);
         assert!(p.push_files.is_empty());
 
-        // Desde el lado que tiene el nuevo: la conclusión es la misma, al
-        // revés. Si acá también trajera, se lo estarían intercambiando.
-        let p = plan(&manifest(vec![nuevo.clone()]), &manifest(vec![viejo.clone()]));
-        assert!(p.pull_files.is_empty(), "no se trae una versión más vieja");
+        // From the side that has the new one: the conclusion is the same,
+        // reversed. If it also pulled here, they'd be swapping it back and forth.
+        let p = plan(&manifest(vec![new.clone()]), &manifest(vec![old.clone()]));
+        assert!(p.pull_files.is_empty(), "should not pull an older version");
         assert_eq!(p.push_files.len(), 1);
 
-        // A igual fecha desempata el hash, pero sigue moviéndose en una sola
-        // dirección: nunca los dos.
+        // On a tie, the hash breaks it, but it still moves in a single
+        // direction: never both.
         let a = track("t1", Some("aaa"), 100);
         let b = track("t1", Some("bbb"), 100);
-        let uno = plan(&manifest(vec![a.clone()]), &manifest(vec![b.clone()]));
-        let otro = plan(&manifest(vec![b]), &manifest(vec![a]));
-        assert_eq!(uno.pull_files.len() + otro.pull_files.len(), 1);
+        let one = plan(&manifest(vec![a.clone()]), &manifest(vec![b.clone()]));
+        let other = plan(&manifest(vec![b]), &manifest(vec![a]));
+        assert_eq!(one.pull_files.len() + other.pull_files.len(), 1);
     }
 
     #[test]
@@ -899,8 +907,8 @@ mod tests {
         assert_eq!(p.unhashed, 1);
     }
 
-    /// Un track evacuado por sync selectiva sigue en la biblioteca como fila,
-    /// pero su archivo no está: no puede ofrecerse como fuente.
+    /// A track evacuated by selective sync still stays in the library as a
+    /// row, but its file isn't there: it can't be offered as a source.
     #[test]
     fn absent_files_are_not_offered_as_a_source() {
         let mut remote = manifest(vec![track("a", Some("h-a"), 0)]);
@@ -919,10 +927,10 @@ mod tests {
             rank: "V".into(),
             added_at: 0,
         });
-        // Sin tombstone: hay que traerla.
+        // No tombstone: it should be pulled.
         assert_eq!(plan(&local, &remote).pull_memberships, 1);
 
-        // Con tombstone local explícito: no vuelve.
+        // With an explicit local tombstone: it doesn't come back.
         local.tombstones.push(Tombstone {
             entity: "playlist_track".into(),
             uid: "pl:tr".into(),
@@ -938,7 +946,7 @@ mod tests {
         let mut local = manifest(vec![]);
         let mut remote = manifest(vec![]);
         local.playlists.push(PlaylistEntry {
-            uid: "solo-aca".into(),
+            uid: "here-only".into(),
             name: "Sets".into(),
             kind: "playlist".into(),
             parent_uid: None,
@@ -946,7 +954,7 @@ mod tests {
             updated_at: 0,
         });
         remote.playlists.push(PlaylistEntry {
-            uid: "solo-alla".into(),
+            uid: "there-only".into(),
             name: "Warmup".into(),
             kind: "playlist".into(),
             parent_uid: None,
@@ -958,13 +966,13 @@ mod tests {
         assert_eq!(p.push_playlists, 1);
     }
 
-    /// Un tombstone de algo que el otro ya no tiene no es trabajo pendiente.
+    /// A tombstone for something the peer already lacks isn't pending work.
     #[test]
     fn tombstones_for_things_the_peer_already_lacks_are_not_counted() {
         let mut local = manifest(vec![]);
         local.tombstones.push(Tombstone {
             entity: "track".into(),
-            uid: "fantasma".into(),
+            uid: "ghost".into(),
             deleted_at: 1,
         });
         let p = plan(&local, &manifest(vec![]));
@@ -972,9 +980,9 @@ mod tests {
         assert!(p.is_empty());
     }
 
-    /// Sync selectiva: el celular sólo se baja los archivos de las playlists
-    /// marcadas — pero la playlist y la membresía viajan igual, así que el
-    /// track se ve en su biblioteca aunque el archivo no esté.
+    /// Selective sync: the phone only pulls files for marked playlists — but
+    /// the playlist and the membership travel regardless, so the track
+    /// still shows up in its library even without the file.
     #[test]
     fn out_of_scope_files_are_not_pulled_but_the_library_still_travels() {
         let mut remote = named("pc", manifest(vec![track("t1", Some("h1"), 0), track("t2", Some("h2"), 0)]));
@@ -1001,14 +1009,14 @@ mod tests {
             updated_at: 10,
         });
 
-        // Nada marcado todavía: ningún archivo, pero las dos playlists sí.
+        // Nothing marked yet: no files, but both playlists still travel.
         let p = plan(&local, &remote);
         assert!(p.pull_files.is_empty());
         assert_eq!(p.out_of_scope_in, 2);
         assert_eq!(p.pull_playlists, 1);
         assert_eq!(p.pull_memberships, 1);
 
-        // Marcando "Sets" baja sólo el track que está adentro.
+        // Marking "Sets" pulls down only the track inside it.
         local.scopes.push(ScopeEntry {
             device_uid: "celu".into(),
             playlist_uid: "sets".into(),
@@ -1021,8 +1029,8 @@ mod tests {
         assert_eq!(p.out_of_scope_in, 1);
     }
 
-    /// El scope del otro lado decide qué le mando: desmarcar una playlist
-    /// desde la PC tiene que cortar el envío al celular.
+    /// The peer's scope decides what gets sent to it: unmarking a playlist
+    /// from the PC has to cut off the send to the phone.
     #[test]
     fn the_peers_scope_decides_what_gets_pushed() {
         let local = named("pc", manifest(vec![track("t1", Some("h1"), 0)]));

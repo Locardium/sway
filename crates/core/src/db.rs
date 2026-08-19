@@ -13,34 +13,34 @@ pub struct Track {
     pub genre: String,
     pub duration_ms: i64,
     pub bpm: Option<i64>,
-    /// El archivo esta en este dispositivo. `false` = la fila quedo pero el
-    /// blob se evacuo por sync selectiva (Fase 5.7), o todavia no se bajo.
+    /// The file is on this device. `false` = the row is still here but the
+    /// blob was evicted by selective sync (Phase 5.7), or hasn't been downloaded yet.
     pub present: bool,
-    /// Entra en lo que este dispositivo sincroniza. `false` = su playlist no
-    /// esta marcada: el archivo que ya esta no se toca, pero no se va a bajar
-    /// ni a actualizar. Lo completa el comando, no la query — depende del
-    /// scope, no de la fila.
+    /// Falls within what this device syncs. `false` = its playlist isn't
+    /// marked: the file that's already here isn't touched, but it won't be downloaded
+    /// or updated. Filled in by the command, not the query — it depends on the
+    /// scope, not the row.
     ///
-    /// Junto con `present` decide como se ve: fuera de scope y con archivo se
-    /// muestra apagado y no suena; fuera de scope y sin archivo desaparece de
-    /// la vista principal (ya se libero el espacio).
+    /// Together with `present` it decides how it's shown: out of scope with a file
+    /// shows dimmed and doesn't play; out of scope without a file disappears from
+    /// the main view (the space has already been freed).
     pub in_scope: bool,
     pub uid: Option<String>,
 }
 
 const SCHEMA: &str = "
--- Identidad de un track: DOS columnas, no una.
---   `uid`          identidad logica (UUID). Sobrevive retag, renombre, movida.
---                  Es lo que referencian playlists, cues y tombstones, y lo
---                  unico que significa algo en el otro dispositivo (el `id`
---                  INTEGER es local: el 42 de esta maquina no es el 42 de la
---                  otra).
---   `content_hash` identidad de los bytes (blake3). Es lo que se pide y se
---                  verifica en una transferencia, y lo que permite deduplicar
---                  el mismo archivo importado dos veces por separado.
--- Separadas porque editar el genero cambia metadata pero no bytes: mismo uid,
--- mismo hash, clock nuevo. (Corolario: Sway NO reescribe tags dentro de los
--- archivos; si alguna vez lo hiciera habria que rehashear y propagar el blob.)
+-- Identity of a track: TWO columns, not one.
+--   `uid`          logical identity (UUID). Survives retagging, renaming, moving.
+--                  It's what playlists, cues and tombstones reference, and the
+--                  only thing that means anything on the other device (the `id`
+--                  INTEGER is local: this machine's 42 isn't the other
+--                  machine's 42).
+--   `content_hash` identity of the bytes (blake3). It's what gets requested and
+--                  verified during a transfer, and what allows deduplicating
+--                  the same file imported twice separately.
+-- Kept separate because editing the genre changes metadata but not bytes: same uid,
+-- same hash, new clock. (Corollary: Sway does NOT rewrite tags inside the
+-- files; if it ever did, the blob would need to be rehashed and propagated.)
 CREATE TABLE IF NOT EXISTS tracks (
     id          INTEGER PRIMARY KEY,
     path        TEXT NOT NULL UNIQUE,
@@ -52,29 +52,29 @@ CREATE TABLE IF NOT EXISTS tracks (
     bpm         INTEGER,
     uid          TEXT,
     content_hash TEXT,
-    -- Nombre del archivo dentro de la carpeta gestionada. `path` es absoluto y
-    -- por lo tanto local; lo que viaja entre dispositivos es esto.
+    -- File name inside the managed folder. `path` is absolute and
+    -- therefore local; this is what travels between devices.
     rel_path     TEXT,
     size_bytes   INTEGER,
-    -- (size, mtime) son el cache del hash: si no cambiaron, no se rehashea.
+    -- (size, mtime) are the hash cache: if they haven't changed, no rehash happens.
     mtime_ms     INTEGER,
-    -- LWW por campo: {\"artist\": [ts_ms, device_uid], ...}. Se puebla cuando
-    -- exista edicion de metadata (Fase 5.5); hoy queda NULL.
+    -- LWW per field: {\"artist\": [ts_ms, device_uid], ...}. Gets populated once
+    -- metadata editing exists (Phase 5.5); currently stays NULL.
     field_clocks TEXT,
     updated_at   INTEGER NOT NULL DEFAULT 0,
-    -- present  = el archivo esta en este dispositivo
-    -- absent   = la fila esta, el blob no (sync selectiva: el celu conoce el
-    --            track pero no se lo bajo)
-    -- pending  = transferencia en curso
+    -- present  = the file is on this device
+    -- absent   = the row is here, the blob isn't (selective sync: the phone
+    --            knows the track but hasn't downloaded it)
+    -- pending  = transfer in progress
     local_state  TEXT NOT NULL DEFAULT 'present'
 );
--- Los indices sobre uid/content_hash los crea migrate(): en una base vieja
--- esas columnas todavia no existen cuando corre este batch.
+-- The uid/content_hash indexes are created by migrate(): on an old database
+-- these columns don't exist yet when this batch runs.
 
--- Jerarquia virtual (folders + playlists) — se usa desde Fase 2/3.
--- `rank` es un rank fraccional (ver rank.rs), no un indice: reordenar toca
--- una sola fila, asi que dos dispositivos que reordenan offline mergean sin
--- pisarse. El orden es `ORDER BY rank` (colacion BINARY).
+-- Virtual hierarchy (folders + playlists) — used since Phase 2/3.
+-- `rank` is a fractional rank (see rank.rs), not an index: reordering touches
+-- a single row, so two devices reordering offline merge without
+-- stomping on each other. The order is `ORDER BY rank` (BINARY collation).
 CREATE TABLE IF NOT EXISTS playlists (
     id        INTEGER PRIMARY KEY,
     name      TEXT NOT NULL,
@@ -89,10 +89,10 @@ CREATE TABLE IF NOT EXISTS playlist_tracks (
     playlist_id INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
     track_id    INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
     rank        TEXT NOT NULL DEFAULT '',
-    -- Cuando se agrego. Se compara contra `tombstones.deleted_at` del mismo
-    -- par: sin esto, un tombstone viejo le gana para siempre a un agregado
-    -- nuevo y volver a meter una cancion en una playlist se deshacia solo en
-    -- el proximo sync.
+    -- When it was added. Compared against `tombstones.deleted_at` for the same
+    -- pair: without this, an old tombstone would win forever over a fresh add
+    -- and re-adding a song to a playlist would undo itself on the
+    -- next sync.
     added_at    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (playlist_id, track_id)
 );
@@ -106,53 +106,53 @@ CREATE TABLE IF NOT EXISTS cues (
     label    TEXT
 );
 
--- Config persistida clave/valor (ej. toggle de auto-sync XML).
+-- Persisted key/value config (e.g. auto-sync XML toggle).
 CREATE TABLE IF NOT EXISTS app_settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 
 -- ---------------------------------------------------------------------------
--- Fase 5: sync P2P.
+-- Phase 5: P2P sync.
 --
--- `devices` es LOCAL: describe con quien sincroniza ESTE dispositivo.
+-- `devices` is LOCAL: it describes who THIS device syncs with.
 --
--- `device_scope` y `sync_scope` en cambio SI se replican (Fase 5.7): el scope
--- describe un deseo (quiero estas playlists en el celular), no una regla de
--- seguridad, y se edita desde cualquier dispositivo.
+-- `device_scope` and `sync_scope`, by contrast, ARE replicated (Phase 5.7): the
+-- scope describes a desire (I want these playlists on the phone), not a
+-- security rule, and can be edited from any device.
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS devices (
     uid          TEXT PRIMARY KEY,
     name         TEXT NOT NULL,
     platform     TEXT NOT NULL DEFAULT '',
-    pubkey       BLOB,               -- clave estatica Noise, fijada al parear
+    pubkey       BLOB,               -- static Noise key, fixed at pairing time
     paired_at    INTEGER,
     last_seen    INTEGER,
-    last_sync_at INTEGER,            -- corte del manifest incremental
-    -- Hasta donde sabemos de la biblioteca de ESE dispositivo (ver
-    -- `wire::Mark`). Sobrevive al cierre de la app a proposito: sin esto, cada
-    -- vez que Android mata el proceso hay que comparar las dos bibliotecas
-    -- enteras para descubrir que no cambio nada — y en un celular eso pasa
-    -- decenas de veces por dia.
+    last_sync_at INTEGER,            -- cutoff for the incremental manifest
+    -- How up to date we are on THAT device's library (see
+    -- `wire::Mark`). Deliberately survives the app closing: without this, every
+    -- time Android kills the process the two whole libraries would have to be
+    -- compared to discover that nothing changed — and on a phone that happens
+    -- dozens of times a day.
     watch_epoch  INTEGER,
     watch_rev    INTEGER,
-    -- `host:puerto` de un dispositivo que NO se descubre solo (Fase 6.3): el
-    -- server de archivo, que vive fuera de la LAN y por eso no aparece en
-    -- mDNS. Los dispositivos de la red local lo dejan NULL — su direccion
-    -- cambia con el DHCP, y la que vale es la que anuncian.
+    -- `host:port` of a device that does NOT self-discover (Phase 6.3): the
+    -- file server, which lives outside the LAN and therefore doesn't show up on
+    -- mDNS. Devices on the local network leave this NULL — their address
+    -- changes with DHCP, and the one that matters is the one they announce.
     address      TEXT
 );
 
--- Preferencias de sync de CADA dispositivo (incluido este). Replicadas, LWW
--- por `updated_at`: describen una propiedad del dispositivo (que hace, y que
--- playlists viven ahi), y la misma respuesta vale para todos los que la miren.
+-- Sync preferences for EACH device (including this one). Replicated, LWW
+-- by `updated_at`: they describe a property of the device (what it does, and which
+-- playlists live there), and the same answer holds for everyone looking at it.
 --
---   `direction`  que hace ESE dispositivo: manda, recibe, las dos, o nada.
---                Entre dos dispositivos, A -> B pasa solo si A manda Y B
---                recibe. No hace falta negociar nada por la red: los dos
---                lados leen las mismas dos filas.
---   `mode`       'all' o 'selected' (ver sync_scope).
+--   `direction`  what THAT device does: sends, receives, both, or neither.
+--                Between two devices, A -> B happens only if A sends AND B
+--                receives. Nothing needs to be negotiated over the network: both
+--                sides read the same two rows.
+--   `mode`       'all' or 'selected' (see sync_scope).
 CREATE TABLE IF NOT EXISTS device_sync (
     device_uid TEXT PRIMARY KEY,
     mode       TEXT NOT NULL DEFAULT 'all',    -- all|selected
@@ -160,11 +160,11 @@ CREATE TABLE IF NOT EXISTS device_sync (
     updated_at INTEGER NOT NULL DEFAULT 0
 );
 
--- Que playlists/carpetas quiere cada dispositivo. Replicada, LWW por fila.
+-- Which playlists/folders each device wants. Replicated, LWW per row.
 --
--- Desmarcar NO borra la fila: la deja con `selected = 0`. Con la fila borrada,
--- la union del merge la volveria a traer del otro lado en el proximo sync y
--- desmarcar no se pegaria nunca.
+-- Unmarking does NOT delete the row: it leaves it with `selected = 0`. If the row were
+-- deleted, the merge union would bring it back from the other side on the
+-- next sync and unmarking would never stick.
 CREATE TABLE IF NOT EXISTS sync_scope (
     device_uid   TEXT NOT NULL,
     playlist_uid TEXT NOT NULL,
@@ -173,9 +173,9 @@ CREATE TABLE IF NOT EXISTS sync_scope (
     PRIMARY KEY (device_uid, playlist_uid)
 );
 
--- Que dispositivos tienen (o tenian) cada blob. Es lo unico que permite
--- liberar espacio sin arriesgar la ultima copia: un archivo fuera de scope
--- solo se evacua si consta que vive en otro lado.
+-- Which devices have (or had) each blob. It's the only thing that allows
+-- freeing up space without risking the last copy: a file out of scope
+-- is only evicted if it's confirmed to live somewhere else.
 CREATE TABLE IF NOT EXISTS blob_replicas (
     hash       TEXT NOT NULL,
     device_uid TEXT NOT NULL,
@@ -183,8 +183,8 @@ CREATE TABLE IF NOT EXISTS blob_replicas (
     PRIMARY KEY (hash, device_uid)
 );
 
--- Un borrado sin tombstone es un borrado que el proximo sync deshace: el otro
--- dispositivo todavia tiene la fila y te la manda de vuelta, para siempre.
+-- A deletion without a tombstone is a deletion the next sync undoes: the other
+-- device still has the row and sends it back to you, forever.
 CREATE TABLE IF NOT EXISTS tombstones (
     entity     TEXT NOT NULL,   -- 'track'|'playlist'|'playlist_track'|'cue'
     uid        TEXT NOT NULL,   -- playlist_track: '<playlist_uid>:<track_uid>'
@@ -193,8 +193,8 @@ CREATE TABLE IF NOT EXISTS tombstones (
     PRIMARY KEY (entity, uid)
 );
 
--- Historial legible: dry-runs, conflictos resueltos automaticamente (con el
--- valor perdedor, para poder revertirlo) y transferencias.
+-- Readable history: dry-runs, automatically resolved conflicts (with the
+-- losing value, so it can be reverted) and transfers.
 CREATE TABLE IF NOT EXISTS sync_log (
     id     INTEGER PRIMARY KEY,
     ts     INTEGER NOT NULL,
@@ -204,11 +204,11 @@ CREATE TABLE IF NOT EXISTS sync_log (
 );
 ";
 
-/// Consolida el WAL cada tanto, desde una conexión propia y en su propio hilo.
+/// Checkpoints the WAL periodically, from its own connection and on its own thread.
 ///
-/// `PASSIVE` es la clave: hace lo que puede sin bloquear a nadie y se retira si
-/// hay alguien escribiendo o leyendo. Así el WAL no crece sin límite y ningún
-/// click paga la consolidación.
+/// `PASSIVE` is the key: it does what it can without blocking anyone and backs off if
+/// someone is writing or reading. That way the WAL doesn't grow unbounded and no
+/// click pays for the checkpoint.
 pub fn spawn_checkpointer(path: &Path) {
     let path = path.to_path_buf();
     std::thread::spawn(move || {
@@ -220,15 +220,15 @@ pub fn spawn_checkpointer(path: &Path) {
     });
 }
 
-/// Conexión aparte, sólo para leer lo que muestra la pantalla.
+/// Separate connection, only for reading what's shown on screen.
 ///
-/// En WAL un lector no espera al escritor: ve el último estado consolidado
-/// mientras el otro escribe. Con una sola conexión detrás de un mutex eso se
-/// pierde, y abrir una playlist queda encolado detrás de lo que esté haciendo
-/// el sync — que son ráfagas de SQL entre viajes de red.
+/// In WAL a reader doesn't wait for the writer: it sees the last checkpointed state
+/// while the other one writes. With a single connection behind a mutex that's
+/// lost, and opening a playlist ends up queued behind whatever sync is
+/// doing — which is bursts of SQL between network trips.
 ///
-/// `query_only` es para que la separación no dependa de acordarse: por acá no
-/// se puede escribir aunque alguien lo intente.
+/// `query_only` is so the separation doesn't rely on remembering: nothing can
+/// write through here even if it tries.
 pub fn open_read(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch("PRAGMA query_only=ON; PRAGMA foreign_keys=ON;")?;
@@ -238,36 +238,36 @@ pub fn open_read(path: &Path) -> Result<Connection> {
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
-    // `synchronous` por default es FULL: cada commit hace fsync del WAL. En la
-    // flash de un teléfono eso son cientos de milisegundos, y como hay un solo
-    // mutex de conexión para toda la app, ese fsync no lo paga sólo quien
-    // escribe — encola a todo lo demás. Marcar una playlist es un commit.
+    // `synchronous` defaults to FULL: every commit does an fsync of the WAL. On a
+    // phone's flash storage that's hundreds of milliseconds, and since there's a single
+    // connection mutex for the whole app, that fsync isn't paid only by whoever is
+    // writing — it queues up everything else. Marking a playlist is a commit.
     //
-    // Con WAL, NORMAL sigue siendo seguro ante un cierre sucio o un crash de la
-    // app: lo que se pierde es a lo sumo el último commit ante un corte de luz,
-    // y la base no se corrompe. Es lo que usa el propio SQLiteDatabase de
-    // Android por la misma razón.
+    // With WAL, NORMAL is still safe against a dirty shutdown or an app crash:
+    // what's lost is at most the last commit if power is cut,
+    // and the database doesn't get corrupted. It's what Android's own SQLiteDatabase
+    // uses for the same reason.
     conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
-    // Foldea el WAL de la sesion anterior al archivo principal en cada arranque.
-    // Sin esto, un cierre sucio (force-kill en dev, cuelgue) deja todo el estado
-    // en el -wal; si un arranque no lo aplica, la biblioteca "aparece vacia".
-    // TRUNCATE consolida y achica el -wal a cero.
+    // Folds the previous session's WAL into the main file on every startup.
+    // Without this, a dirty shutdown (force-kill in dev, a hang) leaves all the state
+    // in the -wal; if a startup doesn't apply it, the library "appears empty".
+    // TRUNCATE checkpoints and shrinks the -wal to zero.
     let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
-    // El checkpoint automático lo paga el commit que cruza el umbral: la
-    // mayoría son baratos y cada tanto uno consolida el WAL entero, con fsync,
-    // justo en el que disparó un click. Ese "cada un tiempo se traba" es esto.
+    // The automatic checkpoint is paid for by the commit that crosses the threshold: most
+    // are cheap and every so often one checkpoints the whole WAL, with an fsync,
+    // right on whichever click triggered it. That "it freezes every so often" is this.
     //
-    // Acá se apaga y lo hace `spawn_checkpointer` desde su propia conexión, sin
-    // pisar a nadie. El `wal_checkpoint(TRUNCATE)` del arranque sigue cubriendo
-    // el cierre sucio, así que el -wal nunca queda sin aplicar.
+    // Here it's turned off and `spawn_checkpointer` does it instead from its own
+    // connection, without stepping on anyone. The startup `wal_checkpoint(TRUNCATE)`
+    // still covers the dirty shutdown, so the -wal never ends up unapplied.
     conn.execute_batch("PRAGMA wal_autocheckpoint=0;")?;
     init_schema(&conn)?;
     Ok(conn)
 }
 
-/// Crea el schema y aplica las migraciones sobre una conexion ya abierta.
-/// Lo usan `open` y los tests de otros modulos, para que nadie tenga que
-/// mantener una copia del DDL al lado.
+/// Creates the schema and applies the migrations on an already-open connection.
+/// Used by `open` and other modules' tests, so nobody has to
+/// maintain a copy of the DDL elsewhere.
 pub fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA)?;
     migrate(conn)
@@ -294,13 +294,13 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     Ok(false)
 }
 
-/// Migraciones sobre bases ya existentes. `CREATE TABLE IF NOT EXISTS` no
-/// toca una tabla que ya esta, asi que las columnas nuevas se agregan aca.
-/// Idempotente: en una base recien creada SCHEMA ya las trae y no hace nada.
+/// Migrations on already-existing databases. `CREATE TABLE IF NOT EXISTS` doesn't
+/// touch a table that's already there, so new columns get added here.
+/// Idempotent: on a freshly created database SCHEMA already brings them and this does nothing.
 fn migrate(conn: &Connection) -> Result<()> {
-    // `position` INTEGER -> `rank` fraccional (ver rank.rs). La columna vieja
-    // se deja donde esta (tiene DEFAULT, no molesta a los INSERT nuevos);
-    // sacarla obligaria a reconstruir la tabla entera sin ganancia.
+    // `position` INTEGER -> fractional `rank` (see rank.rs). The old column
+    // is left where it is (it has a DEFAULT, doesn't get in the way of new INSERTs);
+    // removing it would force rebuilding the whole table for no gain.
     for (table, group_by) in [("playlists", "parent_id"), ("playlist_tracks", "playlist_id")] {
         if has_column(conn, table, "rank")? {
             continue;
@@ -311,7 +311,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         backfill_ranks(conn, table, group_by)?;
     }
 
-    // Columnas de identidad/sync. En una base nueva ya vienen de SCHEMA.
+    // Identity/sync columns. On a new database these already come from SCHEMA.
     let added: &[(&str, &str)] = &[
         ("tracks", "uid TEXT"),
         ("tracks", "content_hash TEXT"),
@@ -324,31 +324,31 @@ fn migrate(conn: &Connection) -> Result<()> {
         ("playlists", "uid TEXT"),
         ("playlists", "updated_at INTEGER NOT NULL DEFAULT 0"),
         ("playlist_tracks", "added_at INTEGER NOT NULL DEFAULT 0"),
-        // Fase 5.7: el scope pasa a ser dato replicado. En una base de 5.0-5.6
-        // la tabla existe con dos columnas y ninguna fila util.
+        // Phase 5.7: scope becomes replicated data. On a 5.0-5.6 database
+        // the table exists with two columns and no useful rows.
         ("sync_scope", "selected INTEGER NOT NULL DEFAULT 1"),
         ("sync_scope", "updated_at INTEGER NOT NULL DEFAULT 0"),
-        // Fase 6.3: direccion fija de los dispositivos que no se descubren.
+        // Phase 6.3: fixed address for devices that aren't self-discovered.
         ("devices", "address TEXT"),
-        // Fase 6.9: hasta donde sabemos de la biblioteca del otro, guardado
-        // para no tener que comparar todo en cada arranque de la app.
+        // Phase 6.9: how up to date we are on the other one's library, saved
+        // so we don't have to compare everything on every app startup.
         ("devices", "watch_epoch INTEGER"),
         ("devices", "watch_rev INTEGER"),
     ];
-    // Fase 6.4: la politica de borrados por dispositivo se saco. Filtraba por
-    // quien te pasaba el tombstone y no por quien habia borrado, asi que con
-    // tres dispositivos el borrado que rechazabas a uno entraba por el otro.
-    // Lo que protege es la papelera. Las tres tablas eran locales — no las
-    // referencia nada replicado — asi que se tiran.
+    // Phase 6.4: per-device deletion policy was removed. It filtered by
+    // who handed you the tombstone rather than who had deleted it, so with
+    // three devices a deletion you rejected from one would still get in through another.
+    // What protects things is the trash. The three tables were local — nothing
+    // replicated references them — so they get dropped.
     conn.execute_batch(
         "DROP TABLE IF EXISTS sync_policy;
          DROP TABLE IF EXISTS pending_deletes;
          DROP TABLE IF EXISTS delete_ignores;",
     )?;
     for (table, decl) in added {
-        // Una tabla que todavia no existe no necesita migracion: la crea
-        // SCHEMA. `migrate` tambien corre sola en los tests sobre bases
-        // armadas a mano, y ahi puede faltar.
+        // A table that doesn't exist yet needs no migration: SCHEMA
+        // creates it. `migrate` also runs on its own in other modules' tests
+        // against hand-built databases, where it can be missing.
         if !has_table(conn, table)? {
             continue;
         }
@@ -357,8 +357,8 @@ fn migrate(conn: &Connection) -> Result<()> {
             conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {decl}"))?;
         }
     }
-    // `device_scope` se llamaba asi cuando solo guardaba el scope; ahora
-    // guarda tambien la direccion, que no es scope. Se copia y se tira.
+    // `device_scope` was called that when it only stored scope; now it
+    // also stores direction, which isn't scope. It gets copied over and dropped.
     if has_table(conn, "device_scope")? {
         conn.execute_batch(
             "INSERT OR IGNORE INTO device_sync (device_uid, mode, direction, updated_at)
@@ -367,24 +367,24 @@ fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
 
-    // Los indices unicos de uid van despues del ALTER (SCHEMA corre antes que
-    // exista la columna en una base vieja, asi que ese CREATE INDEX falla y se
-    // saltea; aca ya se puede).
+    // The unique uid indexes go after the ALTER (SCHEMA runs before the
+    // column exists on an old database, so that CREATE INDEX fails and gets skipped;
+    // here it can already be created).
     conn.execute_batch(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_tracks_uid ON tracks(uid) WHERE uid IS NOT NULL;
          CREATE INDEX IF NOT EXISTS idx_tracks_hash ON tracks(content_hash);
          CREATE UNIQUE INDEX IF NOT EXISTS idx_playlists_uid ON playlists(uid) WHERE uid IS NOT NULL;
-         -- La PK de playlist_tracks es (playlist_id, track_id): sirve para ir
-         -- de una playlist a sus temas, no al reves. Todo lo del scope va al
-         -- reves —de un tema a las playlists que lo contienen— y sin esto cada
-         -- una de esas consultas escanea la tabla entera.
+         -- The PK of playlist_tracks is (playlist_id, track_id): it serves for going
+         -- from a playlist to its tracks, not the other way around. Everything about scope goes the
+         -- other way — from a track to the playlists containing it — and without this each
+         -- of those queries scans the whole table.
          CREATE INDEX IF NOT EXISTS idx_playlist_tracks_track ON playlist_tracks(track_id);
          CREATE INDEX IF NOT EXISTS idx_tracks_state ON tracks(local_state);",
     )?;
     assign_missing_uids(conn)?;
-    // Las membresias que ya estaban se fechan AHORA, no en 0: si quedaran en
-    // 0, cualquier tombstone viejo del mismo par les ganaria y el proximo
-    // sync las sacaria. Estan en la biblioteca ahora, asi que valen ahora.
+    // Memberships that already existed get dated NOW, not 0: if they stayed at
+    // 0, any old tombstone for the same pair would win against them forever and the
+    // next sync would remove them again. They're in the library now, so they count as of now.
     conn.execute(
         "UPDATE playlist_tracks SET added_at = ?1 WHERE added_at = 0",
         [now_ms()],
@@ -392,9 +392,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Toda fila sin `uid` recibe uno. Corre en cada arranque, no solo en la
-/// migracion: una fila insertada por un camino que se olvide de generarlo
-/// (import, drop del OS, watcher) queda sincronizable igual.
+/// Every row without a `uid` gets one. Runs on every startup, not just during
+/// migration: a row inserted through a path that forgot to generate it
+/// (import, OS drop, watcher) still ends up syncable.
 pub fn assign_missing_uids(conn: &Connection) -> Result<()> {
     for table in ["tracks", "playlists"] {
         let ids: Vec<i64> = {
@@ -416,8 +416,8 @@ pub fn new_uid() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// Milisegundos desde epoch. El proyecto no usa `chrono` (la fecha del XML
-/// tambien esta hecha a mano en export_xml.rs), asi que va con `SystemTime`.
+/// Milliseconds since epoch. The project doesn't use `chrono` (the XML date
+/// is also built by hand in export_xml.rs), so this goes with `SystemTime`.
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -425,8 +425,8 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// Traduce el orden `position` existente a ranks, grupo por grupo, sin alterar
-/// el orden que el usuario ya veia.
+/// Translates the existing `position` order into ranks, group by group, without altering
+/// the order the user was already seeing.
 fn backfill_ranks(conn: &Connection, table: &str, group_by: &str) -> Result<()> {
     let key = if table == "playlists" { "id" } else { "track_id" };
     let groups: Vec<Option<i64>> = {
@@ -479,11 +479,11 @@ pub fn track_path(conn: &Connection, id: i64) -> Result<String> {
     conn.query_row("SELECT path FROM tracks WHERE id = ?1", [id], |r| r.get(0))
 }
 
-/// Borra tracks de la biblioteca. Los archivos que viven bajo la carpeta
-/// gestionada `managed` se mandan a la papelera del OS; los de afuera (legacy)
-/// no se tocan. El CASCADE los saca de todas las playlists.
+/// Deletes tracks from the library. Files living under the managed
+/// folder `managed` get sent to the OS trash; ones outside it (legacy)
+/// aren't touched. The CASCADE removes them from all playlists.
 pub fn delete_tracks(conn: &mut Connection, managed: &std::path::Path, ids: &[i64]) -> Result<()> {
-    // Junta paths y uids antes de borrar de la DB.
+    // Gather paths and uids before deleting from the DB.
     let mut paths = Vec::new();
     let mut uids = Vec::new();
     for id in ids {
@@ -499,15 +499,15 @@ pub fn delete_tracks(conn: &mut Connection, managed: &std::path::Path, ids: &[i6
         tx.execute("DELETE FROM tracks WHERE id = ?1", [id])?;
     }
     tx.commit()?;
-    // El tombstone es lo que impide que el proximo sync lo resucite.
+    // The tombstone is what stops the next sync from resurrecting it.
     for uid in uids {
         record_tombstone(conn, "track", &uid)?;
     }
     for p in paths {
         let path = std::path::Path::new(&p);
         if path.starts_with(managed) && path.exists() {
-            // El crate `trash` no soporta Android (sin papelera de OS ahi).
-            // best-effort: no romper si falla.
+            // The `trash` crate doesn't support Android (no OS trash there).
+            // Best-effort: don't break if it fails.
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             {
                 let _ = trash::delete(path);
@@ -522,7 +522,7 @@ pub fn delete_tracks(conn: &mut Connection, managed: &std::path::Path, ids: &[i6
 }
 
 // ---------------------------------------------------------------------------
-// Config persistida (app_settings)
+// Persisted config (app_settings)
 // ---------------------------------------------------------------------------
 
 const SETTING_AUTO_SYNC_XML: &str = "auto_sync_xml";
@@ -543,9 +543,9 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-/// Identidad de ESTE dispositivo, estable de por vida (se genera una sola vez
-/// y queda en `app_settings`). Es lo que firma tombstones y clocks, y lo que
-/// desempata los LWW empatados — por eso no puede regenerarse en cada arranque.
+/// Identity of THIS device, stable for life (generated once
+/// and kept in `app_settings`). It's what signs tombstones and clocks, and what
+/// breaks ties between equal LWW timestamps — that's why it can't be regenerated on every startup.
 pub fn this_device_uid(conn: &Connection) -> Result<String> {
     if let Some(uid) = get_setting(conn, SETTING_DEVICE_UID)? {
         if !uid.is_empty() {
@@ -557,11 +557,11 @@ pub fn this_device_uid(conn: &Connection) -> Result<String> {
     Ok(uid)
 }
 
-/// Nombre visible de este dispositivo. Si lo guardado es un placeholder de
-/// una version anterior (el celu se llamaba literalmente "Android") se
-/// recalcula: el nombre real recien se puede averiguar desde que existe
-/// `device_info`, y si no, el telefono se quedaria con ese nombre para
-/// siempre.
+/// Visible name of this device. If what's stored is a placeholder from
+/// an earlier version (the phone was literally named "Android") it gets
+/// recomputed: the real name has only been discoverable since
+/// `device_info` existed, and otherwise the phone would keep that name
+/// forever.
 pub fn device_name(conn: &Connection) -> Result<String> {
     if let Some(n) = get_setting(conn, SETTING_DEVICE_NAME)? {
         let n = n.trim().to_string();
@@ -578,8 +578,8 @@ pub fn set_device_name(conn: &Connection, name: &str) -> Result<()> {
     set_setting(conn, SETTING_DEVICE_NAME, name)
 }
 
-/// Default true: el punto central de Fase 2 es que el XML se mantenga
-/// sincronizado solo, sin que el user tenga que prenderlo a mano.
+/// Defaults to true: the whole point of Phase 2 is that the XML stays
+/// synced on its own, without the user having to switch it on by hand.
 pub fn get_auto_sync_xml(conn: &Connection) -> Result<bool> {
     let v: Option<String> = conn
         .query_row(
@@ -601,57 +601,57 @@ pub fn set_auto_sync_xml(conn: &Connection, enabled: bool) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Playlists / folders (jerarquia virtual)
+// Playlists / folders (virtual hierarchy)
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaylistNode {
     pub id: i64,
-    /// Identidad compartida entre dispositivos. La necesita el editor de scope
-    /// (Fase 5.7): el `id` INTEGER es local y no significa nada del otro lado.
+    /// Identity shared across devices. Needed by the scope editor
+    /// (Phase 5.7): the `id` INTEGER is local and means nothing on the other side.
     pub uid: Option<String>,
     pub name: String,
     pub kind: String, // 'folder' | 'playlist'
     pub parent_id: Option<i64>,
-    /// Indice del nodo entre sus hermanos, derivado del `rank`. El frontend
-    /// ordena por este numero; el rank en si no sale de Rust.
+    /// Index of the node among its siblings, derived from `rank`. The frontend
+    /// sorts by this number; the rank itself never leaves Rust.
     pub position: i64,
     pub track_count: i64,
-    /// De cuantos de esos tracks hay archivo en este dispositivo. Es lo que se
-    /// ve al abrir una playlist desmarcada: mientras el archivo este, el tema
-    /// se muestra apagado, sin importar por que sigue estando.
+    /// Of those tracks, how many have a file present on this device. This is what
+    /// shows when opening an unmarked playlist: as long as the file is there, the
+    /// track shows dimmed, no matter why it's still there.
     pub present_count: i64,
-    /// Cuantos de esos tracks siguen ocupando lugar POR ESTA playlist: tienen
-    /// archivo aca y no entran en el scope de este dispositivo. Es lo que separa
-    /// "desmarcada pero todavia ocupa lugar" (sigue en el arbol, apagada) de
-    /// "desmarcada y ya liberada" (desaparece).
+    /// Of those tracks, how many are still taking up space BECAUSE OF THIS
+    /// playlist: they have a file here and don't fall within this device's scope. This is what
+    /// separates "unmarked but still taking up space" (still in the tree, dimmed) from
+    /// "unmarked and already freed" (disappears).
     ///
-    /// Distinto de `present_count` a proposito: un tema que ademas esta en una
-    /// playlist marcada se sigue VIENDO aca, pero no cuenta para decidir si esta
-    /// playlist sigue existiendo. Su archivo lo sostiene la otra, asi que esta
-    /// no lo va a soltar nunca y contarlo la dejaba visible para siempre.
+    /// Deliberately different from `present_count`: a track that's also in a
+    /// marked playlist is still SHOWN here, but doesn't count toward deciding whether this
+    /// playlist keeps existing. Its file is being kept alive by the other one, so this
+    /// one will never let it go, and counting it would keep it visible forever.
     ///
-    /// Lo completa el comando, no la query — depende del scope.
+    /// Filled in by the command, not the query — it depends on the scope.
     pub stranded_count: i64,
-    /// Esta playlist entra en lo que este dispositivo sincroniza. Lo completa
-    /// el comando, no la query — depende del scope, no de la fila.
+    /// Whether this playlist falls within what this device syncs. Filled in by
+    /// the command, not the query — it depends on the scope, not the row.
     pub in_scope: bool,
 }
 
 pub fn list_playlists(conn: &Connection) -> Result<Vec<PlaylistNode>> {
     let mut stmt = conn.prepare(
-        // Los dos conteos salen de UNA pasada agrupada, no de dos subconsultas
-        // correlacionadas por fila: asi eran 2N recorridos de playlist_tracks
-        // por cada refresco del arbol, y el arbol se refresca en cada cambio de
-        // la biblioteca.
+        // Both counts come from ONE grouped pass, not two subqueries
+        // correlated per row: that used to mean 2N scans of playlist_tracks
+        // per tree refresh, and the tree refreshes on every library
+        // change.
         "SELECT p.id, p.uid, p.name, p.kind, p.parent_id,
-                COALESCE(c.total, 0), COALESCE(c.presentes, 0)
+                COALESCE(c.total, 0), COALESCE(c.present_rows, 0)
          FROM playlists p
          LEFT JOIN (
              SELECT pt.playlist_id AS pid,
                     COUNT(*) AS total,
-                    COUNT(CASE WHEN t.local_state = 'present' THEN 1 END) AS presentes
+                    COUNT(CASE WHEN t.local_state = 'present' THEN 1 END) AS present_rows
                FROM playlist_tracks pt
                JOIN tracks t ON t.id = pt.track_id
               GROUP BY pt.playlist_id
@@ -673,8 +673,8 @@ pub fn list_playlists(conn: &Connection) -> Result<Vec<PlaylistNode>> {
         })
     })?;
     let mut nodes: Vec<PlaylistNode> = rows.collect::<Result<_>>()?;
-    // Ya vienen agrupados por parent y ordenados por rank: numerar de cero
-    // dentro de cada grupo.
+    // They already come grouped by parent and ordered by rank: just number from
+    // zero within each group.
     let mut seen: std::collections::HashMap<Option<i64>, i64> = std::collections::HashMap::new();
     for n in nodes.iter_mut() {
         let slot = seen.entry(n.parent_id).or_insert(0);
@@ -684,7 +684,7 @@ pub fn list_playlists(conn: &Connection) -> Result<Vec<PlaylistNode>> {
     Ok(nodes)
 }
 
-/// Ranks de los hijos de `parent`, en orden.
+/// Ranks of `parent`'s children, in order.
 fn sibling_ranks(conn: &Connection, parent: Option<i64>, exclude: Option<i64>) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT rank FROM playlists WHERE parent_id IS ?1 AND id IS NOT ?2 ORDER BY rank",
@@ -722,10 +722,10 @@ pub fn rename_playlist(conn: &Connection, id: i64, name: &str) -> Result<()> {
 }
 
 pub fn delete_playlist(conn: &Connection, id: i64) -> Result<()> {
-    // Los hijos los borra ON DELETE CASCADE sin pasar por aca, asi que sus
-    // uids hay que juntarlos ANTES: un borrado sin tombstone se lo lleva
-    // puesto el proximo sync (el otro dispositivo todavia lo tiene y lo
-    // reenvia).
+    // Children get deleted by ON DELETE CASCADE without going through here, so
+    // their uids have to be gathered BEFORE that: a deletion without a tombstone gets
+    // undone by the next sync (the other device still has it and resends
+    // it).
     let mut pending = vec![id];
     let mut uids: Vec<String> = Vec::new();
     while let Some(cur) = pending.pop() {
@@ -757,8 +757,8 @@ fn track_uid(conn: &Connection, id: i64) -> Result<Option<String>> {
         .map(|v: Option<Option<String>>| v.flatten())
 }
 
-/// Marca una entidad como borrada. `INSERT OR REPLACE` para que un
-/// re-borrado refresque el timestamp en vez de fallar.
+/// Marks an entity as deleted. `INSERT OR REPLACE` so that a
+/// re-deletion refreshes the timestamp instead of failing.
 pub fn record_tombstone(conn: &Connection, entity: &str, uid: &str) -> Result<()> {
     let device = this_device_uid(conn)?;
     conn.execute(
@@ -769,7 +769,7 @@ pub fn record_tombstone(conn: &Connection, entity: &str, uid: &str) -> Result<()
     Ok(())
 }
 
-/// True si `maybe_ancestor` es ancestro de (o igual a) `node`.
+/// True if `maybe_ancestor` is an ancestor of (or equal to) `node`.
 fn is_ancestor(conn: &Connection, maybe_ancestor: i64, node: i64) -> Result<bool> {
     let mut cur = Some(node);
     while let Some(id) = cur {
@@ -781,7 +781,7 @@ fn is_ancestor(conn: &Connection, maybe_ancestor: i64, node: i64) -> Result<bool
     Ok(false)
 }
 
-/// Mueve un nodo a `new_parent` en el indice `index` entre sus hermanos.
+/// Moves a node to `new_parent` at index `index` among its siblings.
 pub fn move_playlist(
     conn: &mut Connection,
     id: i64,
@@ -793,16 +793,16 @@ pub fn move_playlist(
             .query_row("SELECT kind FROM playlists WHERE id = ?1", [p], |r| r.get(0))
             .map_err(|e| e.to_string())?;
         if kind != "folder" {
-            return Err("el destino no es una carpeta".into());
+            return Err("the target is not a folder".into());
         }
         if is_ancestor(conn, id, p).map_err(|e| e.to_string())? {
-            return Err("no se puede mover una carpeta dentro de sí misma".into());
+            return Err("a folder cannot be moved inside itself".into());
         }
     }
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     {
-        // Hermanos del destino sin el nodo movido: el rank nuevo sale de los
-        // dos vecinos del hueco. Ninguna otra fila se toca.
+        // Destination's siblings without the moved node: the new rank comes from
+        // the two neighbors of the gap. No other row is touched.
         let siblings = sibling_ranks(&tx, new_parent, Some(id)).map_err(|e| e.to_string())?;
         let rank = crate::rank::rank_at(&siblings, index.max(0) as usize);
         tx.execute(
@@ -815,10 +815,10 @@ pub fn move_playlist(
 }
 
 // ---------------------------------------------------------------------------
-// Tracks dentro de una playlist
+// Tracks within a playlist
 // ---------------------------------------------------------------------------
 
-/// Ids de las playlists que contienen el track.
+/// Ids of the playlists that contain the track.
 pub fn track_playlists(conn: &Connection, track_id: i64) -> Result<Vec<i64>> {
     let mut stmt =
         conn.prepare("SELECT playlist_id FROM playlist_tracks WHERE track_id = ?1")?;
@@ -852,7 +852,7 @@ pub fn playlist_tracks(conn: &Connection, playlist_id: i64) -> Result<Vec<Track>
     rows.collect()
 }
 
-/// Agrega tracks al final. Ignora los que ya estan. Devuelve cuantos agrego.
+/// Appends tracks at the end. Ignores ones already present. Returns how many it added.
 pub fn add_tracks_to_playlist(
     conn: &mut Connection,
     playlist_id: i64,
@@ -872,7 +872,7 @@ pub fn add_tracks_to_playlist(
              VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![playlist_id, tid, rank, now_ms()],
         )?;
-        // Solo avanza si entro: un duplicado ignorado no consume rank.
+        // Only advances if it was inserted: an ignored duplicate doesn't consume a rank.
         if n > 0 {
             last = Some(rank);
         }
@@ -880,9 +880,9 @@ pub fn add_tracks_to_playlist(
     }
     touch_playlist(&tx, playlist_id)?;
     tx.commit()?;
-    // Volver a agregar un track que se habia sacado tiene que levantar su
-    // tombstone; si no, el par queda muerto para siempre y el proximo sync lo
-    // vuelve a sacar.
+    // Re-adding a track that had been removed has to lift its
+    // tombstone; otherwise the pair stays dead forever and the next
+    // sync removes it again.
     if let Some(pu) = playlist_uid(conn, playlist_id)? {
         for tid in track_ids {
             if let Some(tu) = track_uid(conn, *tid)? {
@@ -917,19 +917,19 @@ pub fn remove_tracks_from_playlist(
             rusqlite::params![playlist_id, tid],
         )?;
     }
-    // Sin reindexado: los ranks de los que quedan siguen siendo validos y
-    // ordenados entre si. Sacar del medio no le mueve el rank a nadie.
+    // No reindexing: the ranks of the ones that remain are still valid and
+    // ordered relative to each other. Removing from the middle doesn't move anyone's rank.
     touch_playlist(&tx, playlist_id)?;
     tx.commit()?;
-    // La membresia mergea por union (agregar le gana a quitar concurrente),
-    // asi que sacar un track solo se propaga si queda constancia explicita.
+    // Membership merges by union (adding beats a concurrent removal),
+    // so removing a track only propagates if there's explicit record of it.
     for p in pairs {
         record_tombstone(conn, "playlist_track", &p)?;
     }
     Ok(())
 }
 
-/// Mueve un bloque de tracks (en su orden actual) al indice `index`.
+/// Moves a block of tracks (in their current order) to index `index`.
 pub fn reorder_playlist_tracks(
     conn: &mut Connection,
     playlist_id: i64,
@@ -949,8 +949,8 @@ pub fn reorder_playlist_tracks(
         .map(|(t, _)| *t)
         .filter(|t| track_ids.contains(t))
         .collect();
-    // El indice pedido es sobre la lista completa; hay que descontar los
-    // elementos movidos que estaban antes del destino.
+    // The requested index is over the full list; the moved
+    // elements that were before the destination need to be subtracted.
     let before = current
         .iter()
         .take((index.max(0) as usize).min(current.len()))
@@ -962,8 +962,8 @@ pub fn reorder_playlist_tracks(
         .map(|(_, r)| r.clone())
         .collect();
     let idx = ((index.max(0) as usize).saturating_sub(before)).min(staying.len());
-    // Solo se reescriben los ranks del bloque movido; los que se quedan
-    // conservan el suyo, que es lo que hace que el merge no pise nada.
+    // Only the ranks of the moved block get rewritten; the ones that stay
+    // keep theirs, which is what makes the merge not stomp on anything.
     let mut prev = if idx == 0 { None } else { staying.get(idx - 1).cloned() };
     let next = staying.get(idx).cloned();
     for t in moving.iter() {
@@ -978,9 +978,9 @@ pub fn reorder_playlist_tracks(
     tx.commit()
 }
 
-/// Marca la playlist como modificada. Es el reloj que usa el merge para
-/// decidir de quien es el orden bueno cuando los dos lados reordenaron: las
-/// membresias no tienen timestamp propio, la playlist si.
+/// Marks the playlist as modified. It's the clock the merge uses to
+/// decide whose order wins when both sides reordered: memberships
+/// don't have their own timestamp, the playlist does.
 fn touch_playlist(tx: &rusqlite::Transaction, playlist_id: i64) -> Result<()> {
     tx.execute(
         "UPDATE playlists SET updated_at = ?1 WHERE id = ?2",
@@ -1044,11 +1044,11 @@ mod tests {
         let f = create_playlist(&conn, "f", "folder", None).unwrap();
         let a = create_playlist(&conn, "a", "playlist", None).unwrap();
         let b = create_playlist(&conn, "b", "playlist", None).unwrap();
-        // a adentro de f
+        // a goes inside f
         move_playlist(&mut conn, a, Some(f), 0).unwrap();
         let nodes = list_playlists(&conn).unwrap();
         assert_eq!(nodes.iter().find(|n| n.id == a).unwrap().parent_id, Some(f));
-        // b antes de f en la raiz
+        // b before f at the root
         move_playlist(&mut conn, b, None, 0).unwrap();
         let roots: Vec<i64> = list_playlists(&conn)
             .unwrap()
@@ -1065,9 +1065,9 @@ mod tests {
         let f1 = create_playlist(&conn, "f1", "folder", None).unwrap();
         let f2 = create_playlist(&conn, "f2", "folder", Some(f1)).unwrap();
         let p = create_playlist(&conn, "p", "playlist", None).unwrap();
-        assert!(move_playlist(&mut conn, f1, Some(f2), 0).is_err()); // ciclo
-        assert!(move_playlist(&mut conn, f1, Some(f1), 0).is_err()); // en si mismo
-        assert!(move_playlist(&mut conn, f2, Some(p), 0).is_err()); // playlist no es carpeta
+        assert!(move_playlist(&mut conn, f1, Some(f2), 0).is_err()); // cycle
+        assert!(move_playlist(&mut conn, f1, Some(f1), 0).is_err()); // into itself
+        assert!(move_playlist(&mut conn, f2, Some(p), 0).is_err()); // playlist is not a folder
     }
 
     #[test]
@@ -1088,15 +1088,15 @@ mod tests {
         let ids: Vec<i64> = (0..5).map(|i| add_track(&conn, &format!("/t{i}"))).collect();
         add_tracks_to_playlist(&mut conn, pl, &ids).unwrap();
 
-        // Mover el primero al final (index = len).
+        // Move the first one to the end (index = len).
         reorder_playlist_tracks(&mut conn, pl, &[ids[0]], 5).unwrap();
         assert_eq!(order_of(&conn, pl), vec![ids[1], ids[2], ids[3], ids[4], ids[0]]);
 
-        // Mover bloque {ids[3], ids[4]} (posiciones 2,3 ahora) al inicio.
+        // Move block {ids[3], ids[4]} (positions 2,3 now) to the start.
         reorder_playlist_tracks(&mut conn, pl, &[ids[3], ids[4]], 0).unwrap();
         assert_eq!(order_of(&conn, pl), vec![ids[3], ids[4], ids[1], ids[2], ids[0]]);
 
-        // Mover al medio: ids[0] al index 2.
+        // Move to the middle: ids[0] to index 2.
         reorder_playlist_tracks(&mut conn, pl, &[ids[0]], 2).unwrap();
         assert_eq!(order_of(&conn, pl), vec![ids[3], ids[4], ids[0], ids[1], ids[2]]);
     }
@@ -1107,17 +1107,17 @@ mod tests {
         let pl = create_playlist(&conn, "p", "playlist", None).unwrap();
         let ids: Vec<i64> = (0..3).map(|i| add_track(&conn, &format!("/r{i}"))).collect();
         add_tracks_to_playlist(&mut conn, pl, &ids).unwrap();
-        // Saca el del medio: los ranks de los otros dos no se tocan y el
-        // orden relativo se mantiene.
+        // Removes the middle one: the ranks of the other two aren't touched and the
+        // relative order is preserved.
         let ranks_before = ranks_of(&conn, pl);
         remove_tracks_from_playlist(&mut conn, pl, &[ids[1]]).unwrap();
         assert_eq!(order_of(&conn, pl), vec![ids[0], ids[2]]);
         assert_eq!(ranks_of(&conn, pl), vec![ranks_before[0].clone(), ranks_before[2].clone()]);
     }
 
-    /// Reordenar sólo debe reescribir el rank del bloque movido. Es la
-    /// propiedad que hace que dos dispositivos reordenando offline mergeen
-    /// sin pisarse — si se renumerara todo, cada reorden tocaría cada fila.
+    /// Reordering should only rewrite the rank of the moved block. This is the
+    /// property that makes two devices reordering offline merge
+    /// without stomping on each other — if everything got renumbered, every reorder would touch every row.
     #[test]
     fn reorder_only_rewrites_moved_rows() {
         let mut conn = mem();
@@ -1132,7 +1132,7 @@ mod tests {
         let after: std::collections::HashMap<i64, String> =
             order_of(&conn, pl).into_iter().zip(ranks_of(&conn, pl)).collect();
         for id in &ids[1..] {
-            assert_eq!(before[id], after[id], "el track {id} no se movio, su rank no debe cambiar");
+            assert_eq!(before[id], after[id], "track {id} was not moved, its rank must not change");
         }
         assert_ne!(before[&ids[0]], after[&ids[0]]);
     }
@@ -1147,8 +1147,8 @@ mod tests {
         assert!(get_auto_sync_xml(&conn).unwrap());
     }
 
-    /// Una base vieja (con `position` INTEGER y sin `rank`) tiene que salir de
-    /// la migracion con exactamente el mismo orden que el usuario veia.
+    /// An old database (with `position` INTEGER and no `rank`) has to come out of
+    /// the migration with exactly the same order the user was seeing.
     #[test]
     fn migrate_backfills_ranks_preserving_old_order() {
         let conn = Connection::open_in_memory().unwrap();
@@ -1174,15 +1174,15 @@ mod tests {
         let names: Vec<String> = list_playlists(&conn).unwrap().into_iter().map(|n| n.name).collect();
         assert_eq!(names, vec!["a", "b", "c"]);
         assert_eq!(order_of(&conn, 1), vec![12, 10, 11]);
-        // Idempotente: correrla de nuevo no reescribe nada.
+        // Idempotent: running it again doesn't rewrite anything.
         let ranks = ranks_of(&conn, 1);
         migrate(&conn).unwrap();
         assert_eq!(ranks_of(&conn, 1), ranks);
     }
 
-    /// Sin tombstone, el proximo sync ve que el otro dispositivo todavia tiene
-    /// la fila y la reenvia: lo borrado reaparece. Por eso todo borrado deja
-    /// constancia, incluidos los hijos que se lleva puestos el CASCADE.
+    /// Without a tombstone, the next sync sees that the other device still has
+    /// the row and resends it: the deleted item reappears. That's why every deletion leaves a
+    /// record, including the children the CASCADE takes down with it.
     #[test]
     fn deleting_a_folder_leaves_tombstones_for_the_whole_subtree() {
         let conn = mem();
@@ -1216,8 +1216,8 @@ mod tests {
         remove_tracks_from_playlist(&mut conn, pl, &[t]).unwrap();
         assert_eq!(tombstones_of(&conn, "playlist_track"), vec![pair.clone()]);
 
-        // Volver a agregarlo tiene que levantar el tombstone: si no, la union
-        // del merge lo vuelve a sacar en el proximo sync.
+        // Adding it back has to lift the tombstone: otherwise the merge
+        // union removes it again on the next sync.
         add_tracks_to_playlist(&mut conn, pl, &[t]).unwrap();
         assert!(tombstones_of(&conn, "playlist_track").is_empty());
     }
@@ -1232,26 +1232,26 @@ mod tests {
             track_uid(&conn, t2).unwrap().unwrap(),
         ];
         uids.sort();
-        delete_tracks(&mut conn, std::path::Path::new("/nada"), &[t1, t2]).unwrap();
+        delete_tracks(&mut conn, std::path::Path::new("/nothing"), &[t1, t2]).unwrap();
         assert_eq!(tombstones_of(&conn, "track"), uids);
     }
 
     #[test]
     fn uids_are_assigned_to_legacy_rows_and_are_stable() {
         let conn = mem();
-        conn.execute("INSERT INTO tracks (path) VALUES ('/viejo')", []).unwrap();
-        conn.execute("INSERT INTO playlists (name, rank) VALUES ('vieja', 'V')", []).unwrap();
+        conn.execute("INSERT INTO tracks (path) VALUES ('/old')", []).unwrap();
+        conn.execute("INSERT INTO playlists (name, rank) VALUES ('old', 'V')", []).unwrap();
         assign_missing_uids(&conn).unwrap();
 
         let tuid: Option<String> = conn
-            .query_row("SELECT uid FROM tracks WHERE path = '/viejo'", [], |r| r.get(0))
+            .query_row("SELECT uid FROM tracks WHERE path = '/old'", [], |r| r.get(0))
             .unwrap();
         assert!(tuid.is_some());
-        // Segunda corrida: no reasigna (el uid tiene que ser estable de por
-        // vida, es lo que referencian playlists y tombstones).
+        // Second run: doesn't reassign (the uid has to be stable for
+        // life, it's what playlists and tombstones reference).
         assign_missing_uids(&conn).unwrap();
         let again: Option<String> = conn
-            .query_row("SELECT uid FROM tracks WHERE path = '/viejo'", [], |r| r.get(0))
+            .query_row("SELECT uid FROM tracks WHERE path = '/old'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(tuid, again);
     }
@@ -1262,8 +1262,8 @@ mod tests {
         let uid = this_device_uid(&conn).unwrap();
         assert!(!uid.is_empty());
         assert_eq!(this_device_uid(&conn).unwrap(), uid);
-        set_device_name(&conn, "PC del living").unwrap();
-        assert_eq!(device_name(&conn).unwrap(), "PC del living");
+        set_device_name(&conn, "Living room PC").unwrap();
+        assert_eq!(device_name(&conn).unwrap(), "Living room PC");
     }
 
     #[test]
@@ -1279,8 +1279,7 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM playlist_tracks", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0);
-        // El track sigue en la biblioteca.
+        // The track is still in the library.
         assert_eq!(list_tracks(&conn).unwrap().len(), 1);
     }
 }
-

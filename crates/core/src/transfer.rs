@@ -1,25 +1,25 @@
-//! Transferencia de archivos de audio (Fase 5.4).
+//! Audio file transfer (Phase 5.4).
 //!
-//! El requisito duro de toda la Fase 5 es que nunca se pierda música. Eso no
-//! se consigue teniendo cuidado, se consigue con un camino que no tenga
-//! forma de perder nada:
+//! The hard requirement of all of Phase 5 is that music must never be lost.
+//! That's not achieved by being careful, it's achieved by a path that has no
+//! way to lose anything:
 //!
 //! ```text
-//! 1. pedir el archivo desde el byte N (N = lo que ya haya en el .part)
-//! 2. escribir en  <música>/.sway-incoming/<hash>.part
-//! 3. corte de red / app matada -> el .part sobrevive, se reanuda desde ahí
-//! 4. completo -> blake3 del .part ENTERO
-//!      distinto  -> se borra el .part, la biblioteca nunca se tocó
-//!      igual     -> rename() al destino final (atómico, mismo filesystem)
-//! 5. recién ahí, la fila en la DB
+//! 1. request the file from byte N (N = whatever is already in the .part)
+//! 2. write to  <music>/.sway-incoming/<hash>.part
+//! 3. network cut / app killed -> the .part survives, resumes from there
+//! 4. complete -> blake3 of the WHOLE .part
+//!      different  -> the .part is deleted, the library was never touched
+//!      same       -> rename() to the final destination (atomic, same filesystem)
+//! 5. only then, the row in the DB
 //! ```
 //!
-//! Invariantes:
-//! - El destino final **nunca** se escribe en vivo: todo pasa por el .part.
-//! - Si el destino existe con otro contenido, se desambigua el nombre. Jamás
-//!   se sobrescribe un archivo de audio existente.
-//! - Se verifica el archivo completo, no sólo lo recién llegado: un .part con
-//!   un prefijo corrupto de una corrida anterior también tiene que caer.
+//! Invariants:
+//! - The final destination is **never** written live: everything goes through the .part.
+//! - If the destination exists with different content, the name is disambiguated. An
+//!   existing audio file is never overwritten.
+//! - The whole file is verified, not just what just arrived: a .part with a
+//!   corrupt prefix from a previous run also has to fail.
 
 use crate::wire::{Msg, Session};
 use anyhow::{anyhow, Result};
@@ -27,14 +27,13 @@ use rusqlite::OptionalExtension;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-/// Tamaño de cada payload crudo. El canal lo trocea internamente en frames
-/// de 64 KiB (tope de Noise); esto es sólo cuánto se lee del disco por vuelta.
+/// Size of each raw payload. The channel internally splits it into 64 KiB
+/// frames (Noise's cap); this is just how much is read from disk per round.
 const CHUNK: usize = 1024 * 1024;
 
-/// Descargas a medio terminar. Está adentro de la carpeta gestionada a
-/// propósito: `rename()` sólo es atómico dentro del mismo filesystem, y en
-/// Android la carpeta de la app y la de música pueden estar en volúmenes
-/// distintos.
+/// Half-finished downloads. Deliberately placed inside the managed folder:
+/// `rename()` is only atomic within the same filesystem, and on Android the
+/// app folder and the music folder can be on different volumes.
 pub fn incoming_dir(music_dir: &Path) -> PathBuf {
     music_dir.join(".sway-incoming")
 }
@@ -43,7 +42,7 @@ fn part_path(music_dir: &Path, hash: &str) -> PathBuf {
     incoming_dir(music_dir).join(format!("{hash}.part"))
 }
 
-/// Cuánto hay ya descargado de este archivo.
+/// How much of this file has already been downloaded.
 fn resume_offset(music_dir: &Path, hash: &str) -> u64 {
     std::fs::metadata(part_path(music_dir, hash))
         .map(|m| m.len())
@@ -51,10 +50,10 @@ fn resume_offset(music_dir: &Path, hash: &str) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// Lado que envía
+// Sending side
 // ---------------------------------------------------------------------------
 
-/// Manda `path` desde `offset`. El receptor ya sabe el hash esperado.
+/// Sends `path` starting at `offset`. The receiver already knows the expected hash.
 pub fn send_file(sess: &mut Session, path: &Path, offset: u64, hash: &str) -> Result<()> {
     let mut f = std::fs::File::open(path)?;
     let total = f.metadata()?.len();
@@ -80,7 +79,7 @@ pub fn send_file(sess: &mut Session, path: &Path, offset: u64, hash: &str) -> Re
 }
 
 // ---------------------------------------------------------------------------
-// Lado que recibe
+// Receiving side
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
@@ -89,22 +88,22 @@ pub struct Received {
     pub bytes: u64,
 }
 
-/// Recibe un archivo que ya fue pedido (o empujado) y lo deja en la carpeta
-/// gestionada. Devuelve el path final.
+/// Receives a file that was already requested (or pushed) and leaves it in the
+/// managed folder. Returns the final path.
 ///
-/// `progress(recibidos, total)` se llama seguido: con archivos de 40 MB por
-/// una red doméstica, sin esto la UI parece colgada.
-/// `mark_expected` se llama con el destino **antes** del rename. El watcher de
-/// la carpeta gestionada usa eso para no auto-importar lo que acaba de traer
-/// el sync: si lo importara, crearía una fila con un uid nuevo y le pisaría
-/// la metadata sincronizada con los tags del archivo.
+/// `progress(received, total)` is called often: with 40 MB files over a home
+/// network, without this the UI looks frozen.
+/// `mark_expected` is called with the destination **before** the rename. The
+/// managed folder's watcher uses that to avoid auto-importing what sync just
+/// brought in: if it imported it, it would create a row with a new uid and
+/// overwrite the metadata synced from the file's tags.
 ///
-/// `resuming` dice si lo que viene continúa un `.part` que ya estaba. **Sólo
-/// es cierto cuando este lado pidió el archivo con un offset** (`pull_file`).
-/// En un empuje el otro lado manda desde cero sin saber qué tenemos, así que
-/// un `.part` viejo del mismo hash hay que tirarlo: apilarle el archivo entero
-/// encima da un archivo más largo, hash distinto, y una transferencia entera a
-/// la basura que se repite en cada sync.
+/// `resuming` says whether what's coming continues a `.part` that already
+/// existed. **It's only true when this side requested the file with an
+/// offset** (`pull_file`). In a push the other side sends from scratch without
+/// knowing what we have, so an old `.part` with the same hash has to be
+/// discarded: stacking the whole file on top of it gives a longer file, a
+/// different hash, and an entire transfer wasted that repeats on every sync.
 pub fn receive_file(
     sess: &mut Session,
     music_dir: &Path,
@@ -128,7 +127,7 @@ pub fn receive_file(
         other => return Err(anyhow!("expected BlobStart, got {other:?}")),
     };
 
-    // Append: lo que ya estaba se conserva; por eso el pedido llevaba offset.
+    // Append: what was already there is kept; that's why the request carried an offset.
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -147,8 +146,8 @@ pub fn receive_file(
         got += chunk.len() as u64;
         progress(got, total);
     }
-    // Al disco antes de dar por buena la descarga: si se corta la luz acá, lo
-    // que quede en el .part tiene que ser lo que realmente se escribió.
+    // To disk before considering the download good: if power is cut here, what's
+    // left in the .part has to be what was actually written.
     f.flush()?;
     f.sync_all()?;
     drop(f);
@@ -162,19 +161,19 @@ pub fn receive_file(
         other => return Err(anyhow!("expected BlobEnd, got {other:?}")),
     }
 
-    // Se verifica el archivo ENTERO, no sólo lo que acaba de llegar: un .part
-    // con un prefijo corrupto de una corrida anterior también tiene que caer.
+    // The WHOLE file is verified, not just what just arrived: a .part with a
+    // corrupt prefix from a previous run also has to fail.
     let actual = crate::hashing::hash_file(&part)?;
     if actual != hash {
-        // La biblioteca nunca se tocó: lo único que se pierde es la descarga.
+        // The library was never touched: the only thing lost is the download.
         let _ = std::fs::remove_file(&part);
         return Err(anyhow!("hash mismatch (expected {hash}, got {actual})"));
     }
 
     let dest = crate::import::managed_dest_for(music_dir, filename, got);
     mark_expected(&dest);
-    // `rename` dentro del mismo filesystem es atómico: el archivo aparece
-    // entero o no aparece. Nunca queda uno a medias en la biblioteca.
+    // `rename` within the same filesystem is atomic: the file appears whole or
+    // doesn't appear at all. It never ends up half-done in the library.
     std::fs::rename(&part, &dest)?;
     Ok(Received {
         path: dest,
@@ -182,7 +181,7 @@ pub fn receive_file(
     })
 }
 
-/// Pide un archivo y lo recibe, reanudando si ya había algo bajado.
+/// Requests a file and receives it, resuming if something was already downloaded.
 pub fn pull_file(
     sess: &mut Session,
     music_dir: &Path,
@@ -203,15 +202,15 @@ pub fn pull_file(
 }
 
 // ---------------------------------------------------------------------------
-// Alta en la biblioteca
+// Adding to the library
 // ---------------------------------------------------------------------------
 
-/// Da de alta un archivo recibido conservando el `uid` del otro dispositivo.
+/// Adds a received file, keeping the `uid` from the other device.
 ///
-/// El uid tiene que ser el mismo en los dos lados o el próximo sync no
-/// reconocería que es la misma canción: las playlists y los tombstones lo
-/// referencian. Por eso no se usa el camino de import normal, que genera uno
-/// nuevo y relee los tags del archivo.
+/// The uid has to be the same on both sides or the next sync wouldn't
+/// recognize it's the same song: playlists and tombstones reference it. This
+/// is why the normal import path isn't used, since that generates a new one
+/// and rereads the file's tags.
 #[allow(clippy::too_many_arguments)]
 pub fn insert_received(
     conn: &rusqlite::Connection,
@@ -232,15 +231,15 @@ pub fn insert_received(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    // Si ya hay una fila con este uid, NO se puede insertar otra: `uid` tiene
-    // índice único y el INSERT revienta con "UNIQUE constraint failed:
-    // tracks.uid". Y eso no es un detalle cosmético: el error corta la sesión
-    // entera, así que el sync falla, se reintenta solo, y vuelve a fallar —
-    // nada se copia nunca.
+    // If there's already a row with this uid, another one CANNOT be inserted:
+    // `uid` has a unique index and the INSERT blows up with "UNIQUE constraint
+    // failed: tracks.uid". And that's not a cosmetic detail: the error kills
+    // the whole session, so sync fails, retries on its own, and fails again —
+    // nothing ever gets copied.
     //
-    // Pasa más seguido de lo que parece: mientras el backfill de hashes no le
-    // puso `content_hash` a una fila, el otro lado no la ve como presente y
-    // manda el archivo que acá ya está.
+    // This happens more often than it seems: while the hash backfill hasn't
+    // set `content_hash` on a row yet, the other side doesn't see it as
+    // present and sends the file that's already here.
     let existing: Option<(i64, String)> = conn
         .query_row(
             "SELECT id, path FROM tracks WHERE uid = ?1",
@@ -251,17 +250,17 @@ pub fn insert_received(
     if let Some((id, old_path)) = existing {
         let old = Path::new(&old_path);
         if old != dest && old.exists() {
-            // Ya había un archivo para este track. Hay que quedarse con uno
-            // solo —el uid es único, la fila apunta a un path— y sobre todo
-            // **dejar anotado un hash que corresponda al archivo que queda**.
+            // There was already a file for this track. We have to keep just
+            // one —the uid is unique, the row points to one path— and above
+            // all **record a hash that matches the file that remains**.
             //
-            // Antes esto descartaba la copia recibida sin tocar el hash. Si la
-            // fila local no tenía hash (backfill pendiente), el otro lado
-            // seguía viendo que nos "faltaba" y lo mandaba de nuevo: el mismo
-            // tema viajando en cada sync, para siempre.
+            // Before this discarded the received copy without touching the
+            // hash. If the local row had no hash (backfill pending), the
+            // other side kept seeing that we were "missing" it and sent it
+            // again: the same track traveling on every sync, forever.
             let same = crate::hashing::hash_file(old).map(|h| h == hash).unwrap_or(false);
             if same {
-                // Es el mismo contenido: la transferencia era redundante.
+                // Same content: the transfer was redundant.
                 let _ = std::fs::remove_file(dest);
                 conn.execute(
                     "UPDATE tracks SET content_hash = ?1, size_bytes = ?2,
@@ -270,13 +269,14 @@ pub fn insert_received(
                 )?;
                 return Ok(id);
             }
-            // Contenido distinto bajo el mismo track (otra codificación, otro
-            // recorte). Gana el que llegó, y el que estaba **va a la papelera**
-            // de la biblioteca, no al vacío: sigue siendo música del usuario y
-            // se recupera por 30 días. Quedarse con el viejo no serviría —
-            // el otro lado volvería a mandar el suyo en cada sync.
-            // `dest` siempre cuelga de la carpeta gestionada (lo eligió
-            // `managed_dest_for`), así que su padre ES la carpeta gestionada.
+            // Different content under the same track (different encoding,
+            // different edit). The one that just arrived wins, and the one
+            // that was there **goes to the library's trash**, not to the void:
+            // it's still the user's music and is recoverable for 30 days.
+            // Keeping the old one wouldn't work — the other side would send
+            // its own again on every sync.
+            // `dest` always hangs off the managed folder (`managed_dest_for`
+            // chose it), so its parent IS the managed folder.
             if let Some(managed) = dest.parent() {
                 match crate::trash::move_to_trash(managed, old) {
                     Ok(p) => {
@@ -286,9 +286,9 @@ pub fn insert_received(
                 }
             }
         }
-        // La fila apunta al archivo que acaba de llegar: o no tenía ninguno
-        // (liberada por sync selectiva, borrado a mano) o el que tenía era otro
-        // contenido y ya se archivó arriba.
+        // The row points to the file that just arrived: either it had none
+        // (freed by selective sync, deleted by hand) or the one it had was
+        // different content and was already archived above.
         conn.execute(
             "UPDATE tracks SET path = ?1, rel_path = ?2, content_hash = ?3,
                     size_bytes = ?4, mtime_ms = ?5, local_state = 'present'
@@ -338,7 +338,7 @@ pub fn insert_received(
     )
 }
 
-/// Resuelve el archivo local que corresponde a un hash, para poder servirlo.
+/// Resolves the local file that corresponds to a hash, so it can be served.
 pub fn path_for_hash(conn: &rusqlite::Connection, hash: &str) -> Option<PathBuf> {
     conn.query_row(
         "SELECT path FROM tracks WHERE content_hash = ?1 AND local_state = 'present' LIMIT 1",
@@ -366,7 +366,7 @@ mod tests {
         d
     }
 
-    /// Dos puntas de una sesión cifrada sobre loopback.
+    /// Two ends of an encrypted session over loopback.
     fn pair() -> (Session, Session) {
         let (a, _) = generate_keypair().unwrap();
         let (b, _) = generate_keypair().unwrap();
@@ -384,10 +384,10 @@ mod tests {
         (0..n).map(|i| (i % 251) as u8).collect()
     }
 
-    /// Un empuje manda el archivo desde cero: el otro lado no sabe qué tenemos
-    /// a medio bajar. Si el `.part` viejo se conservara, se le apilaría el
-    /// archivo entero encima — más largo, otro hash, y una transferencia
-    /// completa tirada que se repite en cada sync.
+    /// A push sends the file from scratch: the other side doesn't know what
+    /// we have half-downloaded. If the old `.part` were kept, the whole file
+    /// would get stacked on top of it — longer, a different hash, and a
+    /// complete transfer wasted that repeats on every sync.
     #[test]
     fn a_stale_partial_does_not_poison_a_push() {
         let src_dir = tmpdir("push-src");
@@ -397,7 +397,7 @@ mod tests {
         std::fs::write(&src, &data).unwrap();
         let hash = crate::hashing::hash_file(&src).unwrap();
 
-        // Sobra un parcial de una descarga anterior que se cortó.
+        // A partial from a previous download that got cut off is left over.
         std::fs::create_dir_all(incoming_dir(&dst_dir)).unwrap();
         std::fs::write(part_path(&dst_dir, &hash), &data[..1000]).unwrap();
 
@@ -416,7 +416,7 @@ mod tests {
             &mut |_, _| {},
             &mut |_| {},
         )
-        .expect("el parcial viejo no puede arruinar el empuje");
+        .expect("the old partial cannot ruin the push");
         sender.join().unwrap();
 
         assert_eq!(std::fs::read(&got.path).unwrap(), data);
@@ -424,71 +424,71 @@ mod tests {
         std::fs::remove_dir_all(&dst_dir).ok();
     }
 
-    /// `uid` tiene índice único: recibir un track que acá ya existe no puede
-    /// terminar en "UNIQUE constraint failed: tracks.uid". Ese error cortaba la
-    /// sesión entera, así que el sync fallaba, se reintentaba solo y volvía a
-    /// fallar — no se copiaba nada nunca. Pasa cada vez que el backfill de
-    /// hashes todavía no le puso `content_hash` a la fila: el otro lado no la
-    /// ve como presente y manda el archivo de nuevo.
+    /// `uid` has a unique index: receiving a track that already exists here
+    /// cannot end in "UNIQUE constraint failed: tracks.uid". That error used
+    /// to kill the whole session, so sync would fail, retry on its own, and
+    /// fail again — nothing ever got copied. It happens whenever the hash
+    /// backfill hasn't yet set `content_hash` on the row: the other side
+    /// doesn't see it as present and sends the file again.
     #[test]
     fn receiving_a_track_that_already_exists_here_does_not_break_the_session() {
         let dir = tmpdir("dup");
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
 
-        let mine = dir.join("ya-lo-tengo.flac");
+        let mine = dir.join("i-already-have-it.flac");
         std::fs::write(&mine, b"audio").unwrap();
         conn.execute(
             "INSERT INTO tracks (path, uid, rel_path, local_state)
-             VALUES (?1, 'uid-1', 'ya-lo-tengo.flac', 'present')",
+             VALUES (?1, 'uid-1', 'i-already-have-it.flac', 'present')",
             [mine.to_string_lossy()],
         )
         .unwrap();
 
-        // Llega el mismo contenido con otro nombre de archivo.
+        // The same content arrives with a different filename.
         let hash = crate::hashing::hash_file(&mine).unwrap();
-        let incoming = dir.join("ya-lo-tengo (2).flac");
+        let incoming = dir.join("i-already-have-it (2).flac");
         std::fs::write(&incoming, b"audio").unwrap();
         let id = insert_received(&conn, &incoming, "uid-1", &hash, 5, "T", "A", "", "", 0, None, 10)
-            .expect("no puede fallar por el índice único");
+            .expect("cannot fail because of the unique index");
 
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 1, "una sola fila para ese uid");
+        assert_eq!(n, 1, "a single row for that uid");
         let (path, stored): (String, Option<String>) = conn
             .query_row("SELECT path, content_hash FROM tracks WHERE id = ?1", [id], |r| {
                 Ok((r.get(0)?, r.get(1)?))
             })
             .unwrap();
-        assert_eq!(path, mine.to_string_lossy(), "se queda con el archivo que ya tenía");
-        assert!(!incoming.exists(), "y la copia redundante no queda tirada");
-        // Lo que cerraba el loop: sin hash anotado, el otro lado ve que nos
-        // "falta" y lo vuelve a mandar en cada sync.
+        assert_eq!(path, mine.to_string_lossy(), "keeps the file it already had");
+        assert!(!incoming.exists(), "and the redundant copy isn't left lying around");
+        // What closed the loop: without a recorded hash, the other side sees
+        // us as "missing" it and sends it again on every sync.
         assert_eq!(stored.as_deref(), Some(hash.as_str()));
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Mismo track (mismo uid) con bytes distintos en cada lado. Hay que
-    /// quedarse con uno solo o el sync no converge nunca — pero el que pierde
-    /// **no se destruye**: va a la papelera de la biblioteca.
+    /// Same track (same uid) with different bytes on each side. We have to
+    /// keep just one or sync never converges — but the loser **is not
+    /// destroyed**: it goes to the library's trash.
     #[test]
     fn a_different_encoding_of_the_same_track_does_not_loop_and_does_not_lose_the_old_file() {
         let dir = tmpdir("replace");
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
 
-        let mine = dir.join("tema.flac");
-        std::fs::write(&mine, b"version vieja").unwrap();
+        let mine = dir.join("track.flac");
+        std::fs::write(&mine, b"old version").unwrap();
         conn.execute(
             "INSERT INTO tracks (path, uid, rel_path, local_state)
-             VALUES (?1, 'uid-1', 'tema.flac', 'present')",
+             VALUES (?1, 'uid-1', 'track.flac', 'present')",
             [mine.to_string_lossy()],
         )
         .unwrap();
 
-        let incoming = dir.join("tema (2).flac");
-        std::fs::write(&incoming, b"version nueva").unwrap();
+        let incoming = dir.join("track (2).flac");
+        std::fs::write(&incoming, b"new version").unwrap();
         let hash = crate::hashing::hash_file(&incoming).unwrap();
         let id = insert_received(&conn, &incoming, "uid-1", &hash, 13, "T", "A", "", "", 0, None, 10)
             .unwrap();
@@ -498,32 +498,33 @@ mod tests {
                 Ok((r.get(0)?, r.get(1)?))
             })
             .unwrap();
-        assert_eq!(path, incoming.to_string_lossy(), "gana el que llegó");
-        assert_eq!(stored.as_deref(), Some(hash.as_str()), "y su hash queda anotado");
-        assert!(!mine.exists(), "el viejo sale de la biblioteca");
-        let rescatable = std::fs::read_dir(crate::trash::trash_dir(&dir))
+        assert_eq!(path, incoming.to_string_lossy(), "the one that arrived wins");
+        assert_eq!(stored.as_deref(), Some(hash.as_str()), "and its hash gets recorded");
+        assert!(!mine.exists(), "the old one leaves the library");
+        let recoverable = std::fs::read_dir(crate::trash::trash_dir(&dir))
             .unwrap()
             .flatten()
-            .any(|e| std::fs::read(e.path()).unwrap() == b"version vieja");
-        assert!(rescatable, "pero sigue existiendo en la papelera");
+            .any(|e| std::fs::read(e.path()).unwrap() == b"old version");
+        assert!(recoverable, "but it still exists in the trash");
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Ciclo completo de la sync selectiva: se libera el espacio (la fila
-    /// queda `absent`) y al re-marcar la playlist el archivo vuelve **a la
-    /// misma fila**. Reinsertar con el mismo uid y otro path chocaba contra el
-    /// índice único de `uid`, y el track volvía duplicado o no volvía.
+    /// Full cycle of selective sync: space is freed (the row becomes
+    /// `absent`) and when the playlist is re-marked, the file comes back
+    /// **to the same row**. Reinserting with the same uid and a different
+    /// path used to collide with `uid`'s unique index, and the track came
+    /// back duplicated or didn't come back at all.
     #[test]
     fn a_freed_track_comes_back_to_the_same_row() {
         let dir = tmpdir("recover");
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
 
-        let first = dir.join("tema.flac");
+        let first = dir.join("track.flac");
         std::fs::write(&first, b"audio").unwrap();
         insert_received(&conn, &first, "uid-1", "h1", 5, "T", "A", "", "", 0, None, 10).unwrap();
 
-        // Liberado: la fila se queda, el archivo no.
+        // Freed: the row stays, the file doesn't.
         conn.execute(
             "UPDATE tracks SET local_state = 'absent' WHERE uid = 'uid-1'",
             [],
@@ -531,8 +532,9 @@ mod tests {
         .unwrap();
         std::fs::remove_file(&first).unwrap();
 
-        // Vuelve, y con otro nombre (el destino se desambigua si hace falta).
-        let again = dir.join("tema (2).flac");
+        // It comes back, with a different name too (the destination is
+        // disambiguated if needed).
+        let again = dir.join("track (2).flac");
         std::fs::write(&again, b"audio").unwrap();
         insert_received(&conn, &again, "uid-1", "h1", 5, "T", "A", "", "", 0, None, 10).unwrap();
 
@@ -543,7 +545,7 @@ mod tests {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(n, 1, "una sola fila, no un duplicado");
+        assert_eq!(n, 1, "a single row, not a duplicate");
         assert_eq!(state, "present");
         assert_eq!(path, again.to_string_lossy());
         std::fs::remove_dir_all(&dir).ok();
@@ -554,7 +556,7 @@ mod tests {
         let src_dir = tmpdir("src");
         let dst_dir = tmpdir("dst");
         let src = src_dir.join("track.flac");
-        // Más de un chunk, para ejercitar el troceo.
+        // More than one chunk, to exercise the chunking.
         let data = sample(CHUNK * 2 + 1234);
         std::fs::write(&src, &data).unwrap();
         let hash = crate::hashing::hash_file(&src).unwrap();
@@ -566,7 +568,7 @@ mod tests {
                 Msg::BlobReq { offset, .. } => {
                     send_file(&mut server, &src, offset, &h).unwrap();
                 }
-                other => panic!("inesperado: {other:?}"),
+                other => panic!("unexpected: {other:?}"),
             }
         });
 
@@ -575,26 +577,26 @@ mod tests {
 
         assert_eq!(std::fs::read(&got.path).unwrap(), data);
         assert_eq!(got.bytes as usize, data.len());
-        // El .part se consumió: no queda basura.
+        // The .part was consumed: no leftover junk.
         assert!(!part_path(&dst_dir, &hash).exists());
         std::fs::remove_dir_all(&src_dir).ok();
         std::fs::remove_dir_all(&dst_dir).ok();
     }
 
-    /// Un emisor que manda bytes que no son los del hash pedido —bug,
-    /// corrupción en tránsito o mala fe— no puede meter nada en la
-    /// biblioteca. Es el único chequeo que importa: el hash declarado en el
-    /// BlobEnd no prueba nada, lo que se verifica son los bytes recibidos.
+    /// A sender that sends bytes that aren't the ones for the requested
+    /// hash —bug, corruption in transit, or bad faith— can't get anything
+    /// into the library. It's the only check that matters: the hash declared
+    /// in BlobEnd proves nothing, what's verified is the bytes received.
     #[test]
     fn content_that_does_not_match_the_requested_hash_is_rejected() {
         let src_dir = tmpdir("bad-src");
         let dst_dir = tmpdir("bad-dst");
-        // Lo que el receptor quiere...
-        let wanted = src_dir.join("bueno.flac");
+        // What the receiver wants...
+        let wanted = src_dir.join("good.flac");
         std::fs::write(&wanted, sample(5000)).unwrap();
         let wanted_hash = crate::hashing::hash_file(&wanted).unwrap();
-        // ...y lo que el emisor manda en su lugar, diciendo que es lo mismo.
-        let other = src_dir.join("otro.flac");
+        // ...and what the sender sends instead, claiming it's the same.
+        let other = src_dir.join("other.flac");
         std::fs::write(&other, sample(4096)).unwrap();
 
         let (mut client, mut server) = pair();
@@ -602,24 +604,24 @@ mod tests {
         let sender = std::thread::spawn(move || {
             let offset = match server.recv().unwrap() {
                 Msg::BlobReq { offset, .. } => offset,
-                other => panic!("inesperado: {other:?}"),
+                other => panic!("unexpected: {other:?}"),
             };
             send_file(&mut server, &other, offset, &claimed).unwrap();
         });
 
-        let err = pull_file(&mut client, &dst_dir, &wanted_hash, "bueno.flac", &mut |_, _| {}, &mut |_| {})
+        let err = pull_file(&mut client, &dst_dir, &wanted_hash, "good.flac", &mut |_, _| {}, &mut |_| {})
             .unwrap_err();
         sender.join().unwrap();
 
-        assert!(err.to_string().contains("hash mismatch"), "error inesperado: {err}");
-        // Ni archivo final ni .part: la biblioteca quedó intacta.
-        assert!(!dst_dir.join("bueno.flac").exists());
+        assert!(err.to_string().contains("hash mismatch"), "unexpected error: {err}");
+        // Neither the final file nor the .part: the library stayed intact.
+        assert!(!dst_dir.join("good.flac").exists());
         assert!(!part_path(&dst_dir, &wanted_hash).exists());
         std::fs::remove_dir_all(&src_dir).ok();
         std::fs::remove_dir_all(&dst_dir).ok();
     }
 
-    /// Y si además miente en el BlobEnd, cae antes todavía.
+    /// And if it also lies in BlobEnd, it fails even earlier.
     #[test]
     fn a_wrong_hash_in_blob_end_is_rejected() {
         let src_dir = tmpdir("end-src");
@@ -632,7 +634,7 @@ mod tests {
         let sender = std::thread::spawn(move || {
             let offset = match server.recv().unwrap() {
                 Msg::BlobReq { offset, .. } => offset,
-                other => panic!("inesperado: {other:?}"),
+                other => panic!("unexpected: {other:?}"),
             };
             send_file(&mut server, &src, offset, &"0".repeat(64)).unwrap();
         });
@@ -645,18 +647,19 @@ mod tests {
         std::fs::remove_dir_all(&dst_dir).ok();
     }
 
-    /// Una transferencia cortada por la mitad deja un .part, y la siguiente
-    /// arranca desde ahí en vez de bajar todo de nuevo.
+    /// A transfer cut off halfway leaves a .part, and the next one starts
+    /// from there instead of downloading everything again.
     #[test]
     fn an_interrupted_transfer_resumes_from_where_it_stopped() {
         let src_dir = tmpdir("res-src");
         let dst_dir = tmpdir("res-dst");
-        let src = src_dir.join("largo.flac");
+        let src = src_dir.join("long.flac");
         let data = sample(CHUNK * 3);
         std::fs::write(&src, &data).unwrap();
         let hash = crate::hashing::hash_file(&src).unwrap();
 
-        // Simula el corte: ya hay medio archivo bajado de una corrida previa.
+        // Simulates the cutoff: half the file is already downloaded from a
+        // previous run.
         std::fs::create_dir_all(incoming_dir(&dst_dir)).unwrap();
         let half = data.len() / 2;
         std::fs::write(part_path(&dst_dir, &hash), &data[..half]).unwrap();
@@ -666,24 +669,24 @@ mod tests {
         let asked = std::thread::spawn(move || {
             let offset = match server.recv().unwrap() {
                 Msg::BlobReq { offset, .. } => offset,
-                other => panic!("inesperado: {other:?}"),
+                other => panic!("unexpected: {other:?}"),
             };
             send_file(&mut server, &src, offset, &h).unwrap();
             offset
         });
 
-        let got = pull_file(&mut client, &dst_dir, &hash, "largo.flac", &mut |_, _| {}, &mut |_| {}).unwrap();
+        let got = pull_file(&mut client, &dst_dir, &hash, "long.flac", &mut |_, _| {}, &mut |_| {}).unwrap();
         let offset = asked.join().unwrap();
 
-        assert_eq!(offset, half as u64, "tenía que pedir sólo lo que faltaba");
-        // Y el archivo reensamblado es idéntico al original.
+        assert_eq!(offset, half as u64, "had to request only what was missing");
+        // And the reassembled file is identical to the original.
         assert_eq!(std::fs::read(&got.path).unwrap(), data);
         std::fs::remove_dir_all(&src_dir).ok();
         std::fs::remove_dir_all(&dst_dir).ok();
     }
 
-    /// Un .part con el prefijo corrupto (disco que falló, corte sucio) no se
-    /// puede detectar por tamaño: sólo cae al verificar el archivo completo.
+    /// A .part with a corrupt prefix (failed disk, dirty cutoff) can't be
+    /// detected by size alone: it only fails when the whole file is verified.
     #[test]
     fn a_corrupted_resume_prefix_is_caught_by_the_full_hash() {
         let src_dir = tmpdir("pre-src");
@@ -695,7 +698,7 @@ mod tests {
 
         let half = data.len() / 2;
         let mut bad = data[..half].to_vec();
-        bad[10] ^= 0xFF; // un byte cambiado, mismo tamaño
+        bad[10] ^= 0xFF; // one byte changed, same size
         std::fs::create_dir_all(incoming_dir(&dst_dir)).unwrap();
         std::fs::write(part_path(&dst_dir, &hash), &bad).unwrap();
 
@@ -704,7 +707,7 @@ mod tests {
         let sender = std::thread::spawn(move || {
             let offset = match server.recv().unwrap() {
                 Msg::BlobReq { offset, .. } => offset,
-                other => panic!("inesperado: {other:?}"),
+                other => panic!("unexpected: {other:?}"),
             };
             send_file(&mut server, &src, offset, &h).unwrap();
         });
@@ -712,22 +715,22 @@ mod tests {
         let err =
             pull_file(&mut client, &dst_dir, &hash, "x.flac", &mut |_, _| {}, &mut |_| {}).unwrap_err();
         sender.join().unwrap();
-        assert!(err.to_string().contains("hash"), "error inesperado: {err}");
-        assert!(!part_path(&dst_dir, &hash).exists(), "el .part malo se descarta");
+        assert!(err.to_string().contains("hash"), "unexpected error: {err}");
+        assert!(!part_path(&dst_dir, &hash).exists(), "the bad .part is discarded");
         std::fs::remove_dir_all(&src_dir).ok();
         std::fs::remove_dir_all(&dst_dir).ok();
     }
 
-    /// Nunca se pisa un archivo existente: si el nombre está ocupado por otro
-    /// contenido, el que llega se desambigua.
+    /// An existing file is never overwritten: if the name is taken by
+    /// different content, the incoming one is disambiguated.
     #[test]
     fn an_existing_file_with_the_same_name_is_never_overwritten() {
         let src_dir = tmpdir("dup-src");
         let dst_dir = tmpdir("dup-dst");
-        let existing = dst_dir.join("mismo.flac");
-        std::fs::write(&existing, b"lo que ya estaba").unwrap();
+        let existing = dst_dir.join("same.flac");
+        std::fs::write(&existing, b"what was already there").unwrap();
 
-        let src = src_dir.join("mismo.flac");
+        let src = src_dir.join("same.flac");
         let data = sample(3000);
         std::fs::write(&src, &data).unwrap();
         let hash = crate::hashing::hash_file(&src).unwrap();
@@ -737,15 +740,15 @@ mod tests {
         let sender = std::thread::spawn(move || {
             let offset = match server.recv().unwrap() {
                 Msg::BlobReq { offset, .. } => offset,
-                other => panic!("inesperado: {other:?}"),
+                other => panic!("unexpected: {other:?}"),
             };
             send_file(&mut server, &src, offset, &h).unwrap();
         });
-        let got = pull_file(&mut client, &dst_dir, &hash, "mismo.flac", &mut |_, _| {}, &mut |_| {}).unwrap();
+        let got = pull_file(&mut client, &dst_dir, &hash, "same.flac", &mut |_, _| {}, &mut |_| {}).unwrap();
         sender.join().unwrap();
 
         assert_ne!(got.path, existing);
-        assert_eq!(std::fs::read(&existing).unwrap(), b"lo que ya estaba");
+        assert_eq!(std::fs::read(&existing).unwrap(), b"what was already there");
         assert_eq!(std::fs::read(&got.path).unwrap(), data);
         std::fs::remove_dir_all(&src_dir).ok();
         std::fs::remove_dir_all(&dst_dir).ok();

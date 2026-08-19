@@ -1,29 +1,29 @@
 
-# Workspace Rust del proyecto (Fase 6).
+# Rust workspace for the project (Phase 6).
 #
-# Hasta acá había un solo crate: la app Tauri. El server de sync (Fase 6.2)
-# corre headless en un Ubuntu sin escritorio, así que no puede arrastrar
-# `tauri` — que trae wry/tao y, en Linux, webkit2gtk. La única forma de
-# compartir el motor de sync entre la app y el server es que el motor viva en
-# un crate propio que no sepa que Tauri existe.
+# Until now there was a single crate: the Tauri app. The sync server (Phase 6.2)
+# runs headless on an Ubuntu with no desktop, so it can't drag in
+# `tauri` — which pulls in wry/tao and, on Linux, webkit2gtk. The only way to
+# share the sync engine between the app and the server is for the engine to live in
+# its own crate that doesn't know Tauri exists.
 #
-# `crates/core` es ese crate. La app y el server son dos frentes distintos
-# sobre el mismo motor.
+# `crates/core` is that crate. The app and the server are two different fronts
+# over the same engine.
 [workspace]
 resolver = "2"
 members = ["app/src-tauri", "crates/core", "crates/server"]
 
-# Las dependencias van optimizadas TAMBIEN en debug. Sin esto, el canal
-# cifrado del sync corre sin optimizar y da 3,5 MB/s: mandar un track de
-# 40 MB tardaba 12 s en `tauri dev`. Se pierden dias buscando eso en la red
-# — Nagle, wifi, el celu — cuando el cuello es ChaCha20-Poly1305 compilado
-# con opt-level 0. En release el mismo canal da 476 MB/s: 136x.
+# Dependencies are also optimized in debug. Without this, the sync
+# encrypted channel runs unoptimized and gives 3.5 MB/s: sending a 40 MB
+# track took 12 s in `tauri dev`. You can lose days chasing that on the network
+# — Nagle, wifi, the phone — when the bottleneck is ChaCha20-Poly1305 compiled
+# with opt-level 0. In release the same channel gives 476 MB/s: 136x.
 #
-# Medirlo de nuevo:
+# To measure it again:
 #   cargo test --release -p sway-core -- --ignored --nocapture channel_throughput
 #
-# Solo las dependencias, no los crates propios: esos siguen sin optimizar, que
-# es lo que mantiene util al debugger y corta la recompilacion. blake3 y
-# rusqlite se llevan la misma mejora de arriba.
+# Only dependencies, not our own crates: those stay unoptimized, which
+# is what keeps the debugger useful and cuts recompilation time. blake3 and
+# rusqlite get the same improvement as above.
 [profile.dev.package."*"]
 opt-level = 3

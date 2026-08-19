@@ -1,20 +1,20 @@
-//! El motor de sync, sin Tauri adentro (Fase 5.8).
+//! The sync engine, with no Tauri inside (Phase 5.8).
 //!
-//! Hasta acá la sincronización vivía pegada a `AppHandle`: para leer la base
-//! había que pedirle el estado a la app, y para avisar de un archivo recibido
-//! había que emitir un evento de ventana. Eso alcanzaba para que anduviera,
-//! pero dejaba el requisito duro de toda la Fase 5 —**nunca perder música**—
-//! apoyado en probar a mano con dos dispositivos reales.
+//! Until now synchronization lived glued to `AppHandle`: to read the database
+//! it had to ask the app for its state, and to announce a received file it
+//! had to emit a window event. That was enough to make it work, but it left
+//! the hard requirement of all of Phase 5 —**never lose music**— resting on
+//! manual testing with two real devices.
 //!
-//! Todo lo que el motor necesita del dispositivo donde corre entra ahora por
-//! `Host`: la base, la carpeta gestionada, y los avisos a la UI. La app lo
-//! implementa sobre `AppHandle` (ver `lib.rs`); la suite de integridad lo
-//! implementa sobre un directorio temporal, y así puede levantar **dos motores
-//! en el mismo proceso** y hacerlos sincronizar de verdad sobre loopback —
-//! archivos, cortes de red, conflictos y borrados incluidos.
+//! Everything the engine needs from the device it runs on now comes in
+//! through `Host`: the database, the managed folder, and the notices to the
+//! UI. The app implements it over `AppHandle` (see `lib.rs`); the integrity
+//! suite implements it over a temporary directory, and so it can spin up
+//! **two engines in the same process** and make them actually synchronize
+//! over loopback — files, network cuts, conflicts and deletions included.
 //!
-//! Lo que NO entra acá: pairing, descubrimiento, y todo lo que necesita que
-//! haya una persona mirando una pantalla. Eso sigue en `pairing.rs`.
+//! What does NOT go in here: pairing, discovery, and anything that needs a
+//! person watching a screen. That stays in `pairing.rs`.
 
 use crate::wire::{Mark, Msg, Session};
 use anyhow::{anyhow, Result};
@@ -22,86 +22,87 @@ use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
-// El dispositivo donde corre el motor
+// The device the engine runs on
 // ---------------------------------------------------------------------------
 
-/// Avance de un archivo. La app lo convierte en un evento de ventana; la suite
-/// de integridad lo usa para cortar la red justo a la mitad de una
-/// transferencia, que es la única forma honesta de probar la reanudación.
+/// Progress on a file. The app turns it into a window event; the integrity
+/// suite uses it to cut the network right in the middle of a transfer, which
+/// is the only honest way to test resumption.
 pub struct Progress<'a> {
     pub peer_uid: &'a str,
-    /// Índice del archivo actual y total de archivos de esta corrida.
+    /// Index of the current file and total files in this run.
     pub index: usize,
     pub total_files: usize,
     pub filename: &'a str,
-    /// Bytes del archivo actual.
+    /// Bytes of the current file.
     pub done: u64,
     pub total: u64,
     pub sending: bool,
 }
 
-/// Lo que el motor necesita del dispositivo donde corre.
+/// What the engine needs from the device it runs on.
 ///
-/// Las dos formas de tocar la base son closures y no un guard devuelto a
-/// propósito: así el que implementa decide cómo toma el lock (y cuándo lo
-/// suelta) sin que el motor pueda quedárselo cruzando una operación larga —
-/// **nunca sostener el lock de SQLite mientras se hashea o se hace I/O**, que
-/// es la regla que ya mordió dos veces en este proyecto.
+/// The two ways of touching the database are closures rather than a returned
+/// guard on purpose: this way the implementer decides how the lock is taken
+/// (and when it's released) without the engine being able to hold onto it
+/// across a long operation — **never hold the SQLite lock while hashing or
+/// doing I/O**, a rule that has already bitten this project twice.
 pub trait Host {
     fn with_db<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T>;
 
-    /// Conexión de sólo lectura, para lo que casi siempre da cero y no vale
-    /// encolar detrás de un sync en curso. Por defecto es la misma.
+    /// Read-only connection, for what almost always returns zero and isn't
+    /// worth queuing behind an in-progress sync. Defaults to the same one.
     fn with_db_read<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         self.with_db(f)
     }
 
-    /// Carpeta gestionada: acá viven los archivos, la papelera y los parciales.
+    /// Managed folder: this is where the files, the trash, and the partials live.
     fn music_dir(&self) -> PathBuf;
 
-    /// "Este archivo lo escribí yo": el watcher de la carpeta lo saltea en vez
-    /// de auto-importarlo con un uid nuevo. Sin watcher no hace falta nada.
+    /// "I wrote this file myself": the folder watcher skips it instead of
+    /// auto-importing it with a new uid. With no watcher, nothing is needed.
     fn expect_path(&self, _dest: &Path) {}
 
     fn progress(&self, _p: &Progress) {}
 
-    /// La biblioteca cambió. `force` distingue el fin de una corrida (que
-    /// siempre avisa) del goteo de archivo por archivo (que se limita).
+    /// The library changed. `force` distinguishes the end of a run (which
+    /// always notifies) from the file-by-file trickle (which is throttled).
     fn library_changed(&self, _force: bool) {}
 
-    /// `peer_uid` acaba de mover esta biblioteca.
+    /// `peer_uid` just moved this library.
     ///
-    /// Va aparte de `library_changed` porque contesta otra pregunta: aquélla
-    /// dice "hay que redibujar", ésta dice "hay que avisarle a los demás", y
-    /// para lo segundo hace falta saber a quién NO avisarle. Sin el autor, el
-    /// dispositivo que empuja un cambio se despierta a sí mismo y sale a
-    /// sincronizar algo que él mismo acaba de mandar.
+    /// Separate from `library_changed` because it answers a different
+    /// question: that one says "needs a redraw", this one says "the others
+    /// need to be told", and for the latter it's necessary to know who NOT to
+    /// tell. Without the author, the device that pushes a change wakes itself
+    /// up and goes out to sync something it just sent itself.
     fn note_change_by(&self, _peer_uid: &str) {}
 
-    /// Hasta dónde va esta biblioteca: la corrida actual y cuántas veces se
-    /// movió desde que arrancó.
+    /// How far this library has gotten: the current run and how many times it
+    /// moved since it started.
     ///
-    /// La cuenta no es persistente ni tiene que serlo — sólo sirve para
-    /// comparar contra sí misma dentro de una espera (ver `Msg::Watch`)—, y por
-    /// eso viaja con la corrida al lado: un reinicio la vuelve a cero, y sin
-    /// saber que fue otra corrida ese cero es indistinguible de "no pasó nada".
+    /// The count isn't persistent and doesn't need to be — it's only used to
+    /// compare against itself within a single wait (see `Msg::Watch`) — and
+    /// that's why it travels alongside the run: a restart resets it to zero,
+    /// and without knowing it was a different run, that zero is
+    /// indistinguishable from "nothing happened".
     ///
-    /// `None` = este dispositivo no sabe avisar de novedades. Es el default
-    /// porque sólo el server de archivo tiene sentido que espere: entre dos
-    /// dispositivos con pantalla, el que cambia algo llama al otro y se lo
-    /// empuja, así que nadie necesita que le avisen.
+    /// `None` = this device doesn't know how to report changes. It's the
+    /// default because only the file server makes sense to wait: between two
+    /// devices with a screen, whoever changes something calls the other one
+    /// and pushes it, so nobody needs to be notified.
     fn revision(&self) -> Option<Mark> {
         None
     }
 
-    /// Espera hasta `max` a que aparezca un cambio posterior a `since` que no
-    /// haya hecho `ignoring`.
+    /// Waits up to `max` for a change to appear after `since` that wasn't made
+    /// by `ignoring`.
     ///
-    /// La referencia la pone quien llama y no se vuelve a tomar acá a
-    /// propósito: la espera se corta cada tanto para mandar un latido, y si
-    /// cada vuelta tomara la revisión de nuevo, un cambio caído justo entre
-    /// dos vueltas quedaría del lado viejo de la comparación y no despertaría
-    /// a nadie.
+    /// The reference point is set by the caller and is deliberately not
+    /// re-taken here: the wait is cut short every so often to send a
+    /// heartbeat, and if each round re-read the revision, a change that
+    /// landed exactly between two rounds would end up on the old side of the
+    /// comparison and wouldn't wake anyone up.
     fn wait_revision(&self, _since: Mark, _ignoring: &str, _max: std::time::Duration) -> Seen {
         Seen {
             news: false,
@@ -110,38 +111,38 @@ pub trait Host {
     }
 }
 
-/// Lo que vio una espera: si hay novedades, y en qué revisión estaba la
-/// biblioteca al mirar.
+/// What a wait saw: whether there's news, and what revision the library was
+/// at when it looked.
 ///
-/// Las dos cosas salen de la **misma** mirada a propósito. Leer la revisión
-/// aparte, después, deja una ventana en la que un cambio entra sin que nadie
-/// lo cuente: el latido diría "estás al día en la revisión N" cuando N ya
-/// incluye algo que no se contó, y quien espera avanzaría su `since` por
-/// encima de una novedad que nunca le llegó.
+/// Both things come from the **same** look on purpose. Reading the revision
+/// separately, afterward, leaves a window where a change comes in without
+/// anyone counting it: the heartbeat would say "you're up to date at revision
+/// N" when N already includes something that wasn't counted, and the waiter
+/// would advance its `since` past a piece of news that never reached it.
 pub struct Seen {
     pub news: bool,
     pub mark: Mark,
 }
 
-/// Cada cuánto se manda un latido mientras no pasa nada (`Msg::Watch`).
+/// How often a heartbeat is sent while nothing happens (`Msg::Watch`).
 ///
-/// Una conexión abierta y callada no sobrevive sola, y quien la corta primero
-/// no es el proxy —el Stream de Nginx aguanta 10 minutos— sino el NAT de la
-/// operadora: en datos móviles una conexión TCP ociosa se cae entre los 30 y
-/// los 60 segundos. Se midió: con dos minutos, la del celular vivía 17 y 47
-/// segundos por vez.
+/// An open, silent connection doesn't survive on its own, and the one that
+/// cuts it first isn't the proxy —Nginx's stream holds for 10 minutes— but
+/// the carrier's NAT: on mobile data an idle TCP connection drops somewhere
+/// between 30 and 60 seconds. It was measured: at two minutes, the phone's
+/// connection lived for 17 to 47 seconds at a time.
 ///
-/// Cuarenta y cinco segundos entran abajo de ese plazo y encima acortan a la
-/// mitad lo que tarda el que atiende en darse cuenta de que del otro lado ya
-/// no hay nadie — sólo se entera cuando le falla el latido, y hasta entonces
-/// tiene un hilo parado hablándole a un muerto.
+/// Forty-five seconds falls under that limit and on top of that halves how
+/// long it takes the server to realize nobody's on the other end anymore —
+/// it only finds out when the heartbeat fails, and until then it has a thread
+/// stuck talking to a dead connection.
 ///
-/// Sigue siendo barato: un frame de unas decenas de bytes, contra el sondeo
-/// TCP cada 10 segundos que esto reemplaza.
+/// It's still cheap: a frame of a few dozen bytes, against the TCP polling
+/// every 10 seconds that this replaces.
 pub const WATCH_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(45);
 
 // ---------------------------------------------------------------------------
-// Resultado
+// Result
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Default)]
@@ -153,13 +154,14 @@ pub struct SyncResult {
     pub organized: usize,
 }
 
-/// El otro lado cerró sin decir nada: un sondeo, una app que se fue, un
-/// celular que se durmió o se cambió de red.
+/// The other side closed without saying anything: a health check, an app
+/// that went away, a phone that fell asleep or switched networks.
 ///
-/// `BrokenPipe` entra acá: es lo que da escribir en un socket que el otro ya
-/// cerró, o sea el final normal de una sesión que se corta. Sin esto salía
-/// como error en la cara del usuario ("broken pipe"), que no significa nada
-/// para quien lo lee y encima suena a que se rompió algo.
+/// `BrokenPipe` belongs here: it's what you get writing to a socket the other
+/// side already closed, i.e. the normal end of a session being cut. Without
+/// this it showed up as an error in the user's face ("broken pipe"), which
+/// means nothing to whoever reads it and on top of that sounds like something
+/// broke.
 pub fn is_disconnect(e: &anyhow::Error) -> bool {
     use std::io::ErrorKind::*;
     e.downcast_ref::<std::io::Error>()
@@ -173,20 +175,20 @@ pub fn is_disconnect(e: &anyhow::Error) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Lado que atiende
+// Serving side
 // ---------------------------------------------------------------------------
 
-/// Lo que pasó mientras se atendía a alguien.
+/// What happened while serving someone.
 ///
-/// El que atiende no decide nada —responde pedidos— así que sin esto su log es
-/// una tira de lineas sueltas sin totales, y no hay forma de leer de un
-/// vistazo si una corrida movió algo. Del lado del server, que no tiene
-/// pantalla, es el único resumen que existe.
+/// The server doesn't decide anything —it responds to requests— so without
+/// this its log is a string of loose lines with no totals, and there's no way
+/// to tell at a glance whether a run moved anything. On the server side,
+/// which has no screen, this is the only summary that exists.
 #[derive(Debug, Default)]
 pub struct ServeStats {
-    /// Archivos que nos empujaron.
+    /// Files pushed to us.
     pub received: usize,
-    /// Archivos que nos pidieron y mandamos.
+    /// Files requested from us and sent.
     pub sent: usize,
     pub applied: crate::merge::Applied,
 }
@@ -197,8 +199,8 @@ impl ServeStats {
     }
 }
 
-/// Después de presentarse, la sesión queda abierta atendiendo pedidos hasta
-/// que el otro corta.
+/// After the handshake, the session stays open serving requests until the
+/// other side hangs up.
 pub fn serve_requests<H: Host>(
     host: &H,
     sess: &mut Session,
@@ -208,7 +210,7 @@ pub fn serve_requests<H: Host>(
     loop {
         let msg = match sess.recv() {
             Ok(m) => m,
-            // Cortó: fin normal de la sesión, no un error.
+            // Hung up: normal end of the session, not an error.
             Err(e) if is_disconnect(&e) => return Ok(stats),
             Err(e) => return Err(e),
         };
@@ -217,7 +219,7 @@ pub fn serve_requests<H: Host>(
                 let manifest = host.with_db(|conn| Ok(crate::manifest::build(conn)?))?;
                 send_manifest(sess, manifest, gzip)?;
             }
-            // Alguien pide un archivo nuestro.
+            // Someone is requesting one of our files.
             Msg::BlobReq { hash, offset } => {
                 let path = host.with_db(|conn| Ok(crate::transfer::path_for_hash(conn, &hash)))?;
                 match path {
@@ -230,7 +232,7 @@ pub fn serve_requests<H: Host>(
                     })?,
                 }
             }
-            // Nos empujan un archivo.
+            // A file is being pushed to us.
             Msg::BlobPush {
                 track_uid,
                 hash,
@@ -245,7 +247,7 @@ pub fn serve_requests<H: Host>(
                 ..
             } => {
                 let music_dir = host.music_dir();
-                // Empuje: el otro manda desde cero, no continúa nada nuestro.
+                // Push: the other side sends from scratch, not resuming anything of ours.
                 let got = crate::transfer::receive_file(
                     sess,
                     &music_dir,
@@ -256,13 +258,13 @@ pub fn serve_requests<H: Host>(
                     &mut |dest| host.expect_path(dest),
                 )?;
                 host.with_db(|conn| {
-                    // Nos lo acaba de mandar: obviamente lo tiene. Es lo que
-                    // después permite liberar este archivo sin arriesgar nada.
+                    // It just sent it to us: it obviously has it. This is what
+                    // later allows freeing this file without risking anything.
                     let _ = crate::scope::note_replicas(conn, peer_uid, &[hash.clone()]);
-                    // Un fallo dando de alta ESTE archivo no puede cortar la
-                    // sesión: el `?` hacía que un solo track problemático
-                    // volteara el sync entero, que se reintentaba solo y volvía
-                    // a voltearse. Se registra y sigue con el próximo.
+                    // A failure registering THIS file can't cut the session:
+                    // the `?` used to make a single problematic track flip
+                    // the whole sync, which retried on its own and flipped
+                    // again. It's logged and moves on to the next one.
                     if let Err(e) = crate::transfer::insert_received(
                         conn,
                         &got.path,
@@ -284,20 +286,20 @@ pub fn serve_requests<H: Host>(
                 log::info!("[sync] received {filename} ({} bytes)", got.bytes);
                 stats.received += 1;
                 host.note_change_by(peer_uid);
-                // Sin forzar: en una tanda de archivos, una recarga completa
-                // de la biblioteca por archivo deja la UI inservible.
+                // Not forced: in a batch of files, a full library reload
+                // per file leaves the UI unusable.
                 host.library_changed(false);
             }
-            // Cambios de organización que nos manda el otro lado.
+            // Organization changes sent to us by the other side.
             Msg::MetaPush { changes } => {
                 let music_dir = host.music_dir();
                 let applied =
                     host.with_db(|conn| Ok(crate::merge::apply(conn, &changes, &music_dir)?))?;
                 if applied.total() > 0 {
-                    // Las cinco cifras, no tres. `total()` cuenta también el
-                    // scope y los borrados, así que cambiar una dirección o
-                    // marcar una playlist entraba acá e imprimía tres ceros:
-                    // el log decía "no pasó nada" justo cuando había pasado.
+                    // All five figures, not three. `total()` also counts scope
+                    // and deletions, so changing a direction or checking a
+                    // playlist landed here and printed three zeros: the log
+                    // said "nothing happened" exactly when something had.
                     log::info!(
                         "[sync] applied {} tracks, {} playlists, {} memberships, {} deletions, {} scope rows",
                         applied.tracks,
@@ -309,9 +311,9 @@ pub fn serve_requests<H: Host>(
                     host.library_changed(true);
                     host.note_change_by(peer_uid);
                 }
-                // El scope de este dispositivo lo pudo haber cambiado el otro:
-                // si volvió a marcar una playlist, lo liberado se recupera de
-                // la papelera antes de que nadie lo pida por la red.
+                // This device's scope may have been changed by the other side:
+                // if it re-checked a playlist, what was freed is recovered
+                // from the trash before anyone requests it over the network.
                 if applied.scope > 0 {
                     restore(host);
                 }
@@ -322,23 +324,23 @@ pub fn serve_requests<H: Host>(
                 stats.applied.scope += applied.scope;
                 sess.send(&Msg::MetaAck { applied })?;
             }
-            // "Avisame cuando cambie algo." De acá no se sale hasta que la
-            // biblioteca se mueva o se corte la conexión: el que llama dejó
-            // esta sesión abierta justo para eso y no va a mandar nada más.
+            // "Tell me when something changes." This doesn't return until the
+            // library moves or the connection is cut: the caller left this
+            // session open exactly for that and won't send anything else.
             Msg::Watch { since } => {
                 let Some(current) = host.revision() else {
-                    // Que se entere y deje de intentar, en vez de reconectar
-                    // contra un dispositivo que nunca le va a contestar.
+                    // Let it know so it stops trying, instead of reconnecting
+                    // to a device that's never going to answer.
                     sess.send(&Msg::Reject {
                         reason: "this device does not report changes".into(),
                     })?;
                     return Ok(stats);
                 };
-                // Sin marca, se espera desde ahora. Con una de otra corrida —o
-                // de una revisión que todavía no existe— no hay forma de saber
-                // qué pasó en el medio, así que se contesta que sí y que venga
-                // a comparar. Es la respuesta segura: un sync de más no rompe
-                // nada, uno de menos deja una biblioteca incompleta.
+                // With no mark, it waits from now. With one from another run —or
+                // from a revision that doesn't exist yet— there's no way to know
+                // what happened in between, so the answer is "yes" and to come
+                // compare. It's the safe answer: an extra sync breaks nothing,
+                // a missing one leaves an incomplete library.
                 let since = match since {
                     None => current,
                     Some(s) if s.epoch != current.epoch => {
@@ -371,16 +373,17 @@ pub fn serve_requests<H: Host>(
 }
 
 // ---------------------------------------------------------------------------
-// Lado que sincroniza
+// Syncing side
 // ---------------------------------------------------------------------------
 
-/// Pide el inventario del otro lado y calcula el plan. Devuelve también el
-/// manifest remoto: la transferencia necesita la metadata de cada track para
-/// dar de alta lo que reciba con el uid del otro dispositivo.
-/// Devuelve además la dirección efectiva: qué se puede traer y qué se puede
-/// mandar, resuelto con lo que dice CADA dispositivo de sí mismo (`takes`,
-/// `gives`). No se negocia por la red — las dos filas viajan replicadas en el
-/// manifest, así que los dos lados llegan solos a la misma conclusión.
+/// Requests the other side's inventory and computes the plan. Also returns
+/// the remote manifest: the transfer needs each track's metadata to register
+/// what it receives with the other device's uid.
+/// Also returns the effective direction: what can be pulled and what can be
+/// pushed, resolved from what EACH device says about itself (`takes`,
+/// `gives`). It isn't negotiated over the network — both rows travel
+/// replicated in the manifest, so both sides arrive at the same conclusion on
+/// their own.
 pub fn fetch_plan<H: Host>(
     host: &H,
     sess: &mut Session,
@@ -392,8 +395,8 @@ pub fn fetch_plan<H: Host>(
         other => return Err(anyhow!("expected the manifest, got {other:?}")),
     };
     let local = host.with_db(|conn| {
-        // Quién tiene qué archivo. Es lo único que después permite liberar
-        // espacio sin arriesgar la última copia (ver `scope::evictable`).
+        // Who has which file. This is the only thing that later allows
+        // freeing space without risking the last copy (see `scope::evictable`).
         let hashes: Vec<String> = remote
             .tracks
             .iter()
@@ -412,12 +415,12 @@ pub fn fetch_plan<H: Host>(
     Ok((crate::manifest::plan(&local, &remote), remote, dir))
 }
 
-/// Manda el inventario, comprimido si el otro lado sabe leerlo.
+/// Sends the inventory, compressed if the other side knows how to read it.
 ///
-/// Es lo único grande que viaja en una comparación, y viaja **entero** aunque
-/// no haya cambiado nada: con 5000 temas son 4 MB de JSON, que comprimidos
-/// quedan en unos cientos de kilobytes. Del lado del celular, eso sale del
-/// plan de datos.
+/// It's the only big thing that travels in a comparison, and it travels
+/// **whole** even if nothing changed: with 5000 tracks that's 4 MB of JSON,
+/// which compressed comes down to a few hundred kilobytes. On the phone
+/// side, that comes out of the data plan.
 fn send_manifest(
     sess: &mut Session,
     manifest: crate::manifest::Manifest,
@@ -438,13 +441,13 @@ fn send_manifest(
     sess.send(&Msg::ManifestGz { data })
 }
 
-/// Recorta el plan a lo que la dirección de los dos dispositivos permite. El
-/// plan puro dice qué falta; esto dice qué de eso se va a hacer de verdad, que
-/// es lo que hay que mostrar antes de apretar Sync.
+/// Trims the plan down to what the two devices' direction allows. The raw
+/// plan says what's missing; this says what of that is actually going to
+/// happen, which is what needs to be shown before hitting Sync.
 ///
-/// Archivos y organización van juntos: si un dispositivo no manda, no manda
-/// nada — mover playlists sin los archivos, o al revés, deja las dos
-/// bibliotecas describiendo cosas distintas.
+/// Files and organization go together: if a device doesn't send, it doesn't
+/// send anything — moving playlists without the files, or the other way
+/// around, leaves the two libraries describing different things.
 pub fn restrict(plan: &mut crate::manifest::Plan, (takes, gives): (bool, bool)) {
     if !takes {
         plan.pull_files.clear();
@@ -462,31 +465,33 @@ pub fn restrict(plan: &mut crate::manifest::Plan, (takes, gives): (bool, bool)) 
     }
 }
 
-/// Una corrida completa sobre una sesión ya abierta y presentada.
+/// A full run over an already-opened and handshaken session.
 pub fn sync<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> Result<SyncResult> {
-    // Un sync que tarda es tres cosas distintas —inventario, archivos,
-    // organización— y sin medirlas por separado no hay forma de saber cuál es.
+    // A slow sync is three different things —inventory, files,
+    // organization— and without measuring them separately there's no way to
+    // know which one it is.
     let started = std::time::Instant::now();
-    // Antes de planificar: lo que volvió al scope y sigue en la papelera se
-    // recupera de acá, no se pide por la red. Si no, re-marcar una playlist
-    // recién liberada bajaba de nuevo gigabytes que estaban a un rename de
-    // distancia.
+    // Before planning: what came back into scope and is still in the trash
+    // gets recovered here, not requested over the network. Otherwise,
+    // re-checking a just-freed playlist would download gigabytes again that
+    // were a rename away.
     restore(host);
     let (mut plan, remote, dir) = fetch_plan(host, sess)?;
-    // La dirección se resuelve acá, no en `plan()`: el plan describe qué falta
-    // entre las dos bibliotecas, la dirección describe qué se hace con eso.
+    // The direction is resolved here, not in `plan()`: the plan describes
+    // what's missing between the two libraries, the direction describes what
+    // to do with that.
     restrict(&mut plan, dir);
 
-    // El cambio de scope pudo haberlo hecho el OTRO dispositivo, y recién
-    // aparece ahora, en su manifest. Aplicarlo antes de transferir —y rescatar
-    // de la papelera lo que vuelve a entrar— es lo que evita bajar de nuevo
-    // por la red gigabytes que están a un `rename` de distancia. Si no, se
-    // aplicaría después del bucle de archivos, o sea tarde.
+    // The scope change may have been made by the OTHER device, and it only
+    // shows up now, in its manifest. Applying it before transferring —and
+    // rescuing from the trash what comes back in— is what avoids downloading
+    // gigabytes again over the network that are a `rename` away. Otherwise,
+    // it would be applied after the file loop, i.e. too late.
     if !plan.pull_files.is_empty() {
         apply_remote_scope(host, &remote)?;
-        // Sólo si algo volvió de verdad: rearmar el manifest local es recorrer
-        // la biblioteca entera, y hacerlo en cada sync "por las dudas" es caro
-        // al pedo — sobre todo en el celular.
+        // Only if something actually came back: rebuilding the local
+        // manifest means walking the whole library, and doing that on every
+        // sync "just in case" is wastefully expensive — especially on phones.
         if restore(host) > 0 {
             let local = host.with_db(|conn| Ok(crate::manifest::build(conn)?))?;
             plan = crate::manifest::plan(&local, &remote);
@@ -500,7 +505,7 @@ pub fn sync<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> Result<Syn
     let (mut received, mut sent, mut failed, mut bytes) = (0usize, 0usize, 0usize, 0u64);
     let mut index = 0usize;
 
-    // --- Traer lo que falta acá ------------------------------------------
+    // --- Pull what's missing here -----------------------------------------
     for f in &plan.pull_files {
         index += 1;
         let entry = remote.tracks.iter().find(|t| t.uid == f.track_uid);
@@ -548,10 +553,10 @@ pub fn sync<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> Result<Syn
                 received += 1;
             }
             Err(e) => {
-                // Un corte de red no es "este archivo falló": la sesión ya no
-                // sirve para nada, y seguir el bucle contra un socket muerto
-                // sólo suma errores. Se corta y se reintenta después — el
-                // `.part` en disco es lo que hace que eso no cueste nada.
+                // A network cut isn't "this file failed": the session is no
+                // longer good for anything, and continuing the loop against
+                // a dead socket only piles up errors. It's cut and retried
+                // later — the `.part` on disk is what makes that cost nothing.
                 if is_disconnect(&e) {
                     return Err(e);
                 }
@@ -561,7 +566,7 @@ pub fn sync<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> Result<Syn
         }
     }
 
-    // --- Mandar lo que falta allá ----------------------------------------
+    // --- Push what's missing there ------------------------------------
     for f in &plan.push_files {
         index += 1;
         let local = host.with_db(|conn| Ok(local_track(conn, &f.track_uid)))?;
@@ -591,13 +596,13 @@ pub fn sync<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> Result<Syn
             bpm: entry.bpm,
             updated_at: entry.updated_at,
         });
-        // Un archivo que no se puede leer no corta la corrida entera.
+        // A file that can't be read doesn't cut the whole run short.
         match push.and_then(|_| crate::transfer::send_file(sess, &path, 0, &f.hash)) {
             Ok(()) => {
                 bytes += f.size as u64;
                 sent += 1;
-                // Ahora el archivo vive también allá: cuenta como respaldo
-                // para poder liberar espacio acá.
+                // Now the file also lives there: it counts as a backup that
+                // allows freeing space here.
                 let _ = host.with_db(|conn| {
                     let _ = crate::scope::note_replicas(conn, peer_uid, &[f.hash.clone()]);
                     Ok(())
@@ -613,18 +618,19 @@ pub fn sync<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> Result<Syn
         }
     }
 
-    // --- Organización (Fase 5.5) ------------------------------------------
+    // --- Organization (Phase 5.5) ------------------------------------------
     //
-    // Después de los archivos a propósito: una membresía de un track que
-    // todavía no llegó se ignora, así que primero conviene que exista.
+    // Deliberately after the files: a membership for a track that hasn't
+    // arrived yet is ignored, so it's better for it to exist first.
     //
-    // El manifest local se reconstruye acá y no se reusa el de `fetch_plan`:
-    // las filas que acaban de entrar por transferencia tienen que viajar en
-    // este mismo sync, no en el siguiente.
+    // The local manifest is rebuilt here rather than reusing the one from
+    // `fetch_plan`: the rows that just came in via transfer have to travel in
+    // this same sync, not the next one.
     let local = host.with_db(|conn| Ok(crate::manifest::build(conn)?))?;
-    // Con la dirección de metadata cortada el intercambio igual ocurre, vacío:
-    // el ida y vuelta MetaPush/MetaAck es la forma del protocolo, y saltearlo
-    // dejaría la sesión esperando un mensaje que no llega.
+    // With the metadata direction cut off the exchange still happens, empty:
+    // the MetaPush/MetaAck round trip is the shape of the protocol, and
+    // skipping it would leave the session waiting for a message that never
+    // arrives.
     let after_files = started.elapsed();
     let (takes, gives) = dir;
     let mine = if gives {
@@ -650,9 +656,9 @@ pub fn sync<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> Result<Syn
         Msg::MetaAck { applied } => applied,
         other => return Err(anyhow!("expected MetaAck, got {other:?}")),
     };
-    // Desglosado y no sólo el total: si un sync repite los mismos números
-    // corrida tras corrida, no está convergiendo, y el total solo no dice
-    // qué se está re-aplicando.
+    // Broken down and not just the total: if a sync repeats the same numbers
+    // run after run, it isn't converging, and the total alone doesn't say
+    // what's being re-applied.
     log::info!(
         "[sync] here: {} meta, {} playlists, {} memberships, {} deletions, {} scope | there: {} meta, {} playlists, {} memberships, {} deletions, {} scope",
         applied_here.tracks,
@@ -678,21 +684,21 @@ pub fn sync<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> Result<Syn
 
     let _ = sess.send(&Msg::Bye);
     let total = started.elapsed();
-    let tiempos = format!(
-        "[sync] tiempos: inventario {} ms, {total_files} archivo(s) {} ms, organización {} ms, total {} ms",
+    let timings = format!(
+        "[sync] timings: inventory {} ms, {total_files} file(s) {} ms, organization {} ms, total {} ms",
         after_plan.as_millis(),
         (after_files - after_plan).as_millis(),
         (total - after_files).as_millis(),
         total.as_millis()
     );
-    log::info!("{tiempos}");
-    // TEMPORAL — al archivo también: en Android con logcat apagado esta línea
-    // es la única forma de ver cuánto bloquea un sync.
-    crate::perf_line(&tiempos);
+    log::info!("{timings}");
+    // TEMPORARY — to the file too: on Android with logcat off this line is
+    // the only way to see how much a sync is blocking.
+    crate::perf_line(&timings);
 
-    // Historial legible por dispositivo (lo muestra la pantalla de Sync). Sólo
-    // las corridas que hicieron algo: una línea por sync automático vacío cada
-    // pocos minutos no es historial, es ruido.
+    // Human-readable history per device (shown by the Sync screen). Only runs
+    // that did something: a line for every empty automatic sync every few
+    // minutes isn't history, it's noise.
     if received + sent + failed + applied_here.total() + applied_there.total() > 0 {
         let _ = host.with_db(|conn| {
             let _ = conn.execute(
@@ -721,10 +727,10 @@ pub fn sync<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> Result<Syn
 }
 
 // ---------------------------------------------------------------------------
-// Piezas comunes
+// Common pieces
 // ---------------------------------------------------------------------------
 
-/// Datos de un track local por uid: el path real y su entrada de manifest.
+/// Data for a local track by uid: the real path and its manifest entry.
 fn local_track(
     conn: &Connection,
     uid: &str,
@@ -758,9 +764,9 @@ fn local_track(
     .ok()
 }
 
-/// Aplica las filas de scope del manifest del otro lado (LWW). Es el mismo
-/// merge que hace `merge::apply` más tarde; acá va antes porque el scope
-/// decide qué se transfiere en esta misma corrida.
+/// Applies the scope rows from the other side's manifest (LWW). It's the
+/// same merge that `merge::apply` does later; it goes here first because the
+/// scope decides what gets transferred in this same run.
 fn apply_remote_scope<H: Host>(host: &H, remote: &crate::manifest::Manifest) -> Result<()> {
     host.with_db(|conn| {
         for e in &remote.scopes {
@@ -773,29 +779,31 @@ fn apply_remote_scope<H: Host>(host: &H, remote: &crate::manifest::Manifest) -> 
     })
 }
 
-/// Recupera de la papelera lo que haya vuelto a entrar en el scope de este
-/// dispositivo. Best-effort: si falla, el archivo se vuelve a bajar por la red
-/// y no se pierde nada.
-/// El hash se calcula **con el lock soltado**: hashear la papelera puede
-/// tardar segundos, y sostener el mutex mientras tanto congela la UI entera —
-/// cada `list_tracks` del frontend se queda esperando. Sólo las dos puntas
-/// (buscar candidatos, aplicar) tocan la DB, y las dos son baratas.
+/// Recovers from the trash whatever has come back into this device's scope.
+/// Best-effort: if it fails, the file gets downloaded again over the network
+/// and nothing is lost.
+/// The hash is computed **with the lock released**: hashing the trash can
+/// take seconds, and holding the mutex in the meantime freezes the whole UI —
+/// every `list_tracks` call from the frontend is left waiting. Only the two
+/// endpoints (finding candidates, applying) touch the DB, and both are cheap.
 pub fn restore<H: Host>(host: &H) -> usize {
     let music_dir = host.music_dir();
 
-    // TEMPORAL — diagnóstico. `timed` de afuera mide todo junto, incluida la
-    // espera por el lock, y así no se distingue "tarda" de "esperó a otro".
+    // TEMPORARY — diagnostics. The outer `timed` measures everything together,
+    // including the wait for the lock, so it doesn't distinguish "it's slow"
+    // from "it waited on someone else".
     let t0 = std::time::Instant::now();
-    // Averiguar si hay algo que recuperar es una lectura, y casi siempre da
-    // cero. Por la conexión de escritura, ese "no hay nada" quedaba encolado
-    // detrás del sync: medido en Android, hasta 1255 ms de espera para no hacer
-    // nada. El lock de escritura se toma más abajo, y sólo si hay qué mover.
+    // Finding out whether there's anything to recover is a read, and almost
+    // always returns zero. Through the write connection, that "there's
+    // nothing" used to queue up behind the sync: measured on Android, up to
+    // 1255 ms of waiting to do nothing. The write lock is taken further
+    // below, and only if there's something to move.
     let candidates = host.with_db_read(|conn| {
         let lock_ms = t0.elapsed().as_millis();
         let t1 = std::time::Instant::now();
         let r = crate::scope::restorable(conn);
         crate::perf_line(&format!(
-            "  restore_local: lock {} ms, restorable {} ms, {} candidato(s)",
+            "  restore_local: lock {} ms, restorable {} ms, {} candidate(s)",
             lock_ms,
             t1.elapsed().as_millis(),
             r.as_ref().map(|c| c.len()).unwrap_or(0)
@@ -816,7 +824,7 @@ pub fn restore<H: Host>(host: &H) -> usize {
     let t2 = std::time::Instant::now();
     let found = crate::scope::find_in_trash(&music_dir, &candidates);
     crate::perf_line(&format!(
-        "  restore_local: find_in_trash {} ms, {} encontrado(s)",
+        "  restore_local: find_in_trash {} ms, {} found",
         t2.elapsed().as_millis(),
         found.len()
     ));
@@ -846,16 +854,16 @@ pub fn restore<H: Host>(host: &H) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// Suite de integridad (Fase 5.8)
+// Integrity suite (Phase 5.8)
 // ---------------------------------------------------------------------------
 //
-// Dos dispositivos completos —cada uno con su base, su carpeta gestionada y su
-// papelera— sincronizando de verdad sobre un socket de loopback, con el mismo
-// código que corre en la app. Lo que estas pruebas persiguen no es que el
-// camino feliz ande (eso ya se ve usándolo): es que **nunca se pierda música**
-// en los caminos que no se pueden ensayar a mano sin dos teléfonos y mucha
-// paciencia — un corte a la mitad de una transferencia, los dos lados editando
-// lo mismo sin verse, un borrado viajando.
+// Two full devices —each with its own database, managed folder, and trash—
+// actually synchronizing over a loopback socket, with the same code that
+// runs in the app. What these tests chase isn't that the happy path works
+// (that's already visible from using it): it's that **music is never lost**
+// on the paths that can't be rehearsed by hand without two phones and a lot
+// of patience — a cut in the middle of a transfer, both sides editing the
+// same thing without seeing each other, a deletion traveling.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -864,21 +872,21 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    /// Ninguna prueba mueve más de unos megabytes: si algo se queda esperando
-    /// es un bug, y vale más un error que una suite colgada.
+    /// No test moves more than a few megabytes: if something is left waiting
+    /// it's a bug, and an error is worth more than a hung suite.
     const TEST_IO_TIMEOUT: Duration = Duration::from_secs(20);
 
-    /// Un dispositivo de mentira, con todo lo que el motor necesita de uno de
-    /// verdad. Es la otra implementación de `Host` (la primera es `AppHandle`).
+    /// A fake device, with everything the engine needs from a real one. It's
+    /// the other implementation of `Host` (the first is `AppHandle`).
     struct Device {
         dir: PathBuf,
         db: Mutex<Connection>,
-        /// Copia del socket de este lado, para poder cortar la red a mano.
+        /// Copy of this side's socket, to be able to cut the network by hand.
         sock: Mutex<Option<TcpStream>>,
-        /// Corta la conexión cuando una transferencia pase estos bytes.
+        /// Cuts the connection once a transfer passes this many bytes.
         cut_after: Mutex<Option<u64>>,
-        /// Avance visto, para poder afirmar que una reanudación arrancó donde
-        /// había quedado y no desde cero.
+        /// Progress seen, to be able to assert that a resumption started
+        /// where it left off and not from scratch.
         seen: Mutex<Vec<(u64, u64)>>,
     }
 
@@ -895,7 +903,7 @@ mod tests {
             let cut = *self.cut_after.lock().unwrap();
             if let Some(n) = cut {
                 if p.done >= n {
-                    // Se va la wifi justo acá.
+                    // The wifi drops right here.
                     if let Some(s) = self.sock.lock().unwrap().as_ref() {
                         let _ = s.shutdown(Shutdown::Both);
                     }
@@ -916,7 +924,7 @@ mod tests {
             std::fs::create_dir_all(&dir).unwrap();
             let conn = Connection::open_in_memory().unwrap();
             crate::db::init_schema(&conn).unwrap();
-            // Fuerza la identidad: el manifest la necesita y así queda fija.
+            // Forces the identity: the manifest needs it and this way it's fixed.
             crate::db::this_device_uid(&conn).unwrap();
             Self {
                 dir,
@@ -931,7 +939,7 @@ mod tests {
             self.with_db(|c| Ok(crate::db::this_device_uid(c)?)).unwrap()
         }
 
-        /// Un track con archivo real en la carpeta gestionada.
+        /// A track with a real file in the managed folder.
         fn add_track(&self, filename: &str, bytes: &[u8], title: &str) -> String {
             let path = self.dir.join(filename);
             std::fs::write(&path, bytes).unwrap();
@@ -945,7 +953,7 @@ mod tests {
                 &hash,
                 bytes.len() as u64,
                 title,
-                "Artista",
+                "Artist",
                 "",
                 "",
                 0,
@@ -978,10 +986,10 @@ mod tests {
             crate::db::add_tracks_to_playlist(&mut conn, playlist, &ids).unwrap();
         }
 
-        /// Borrado local, tal como lo deja `db::delete_tracks`: fila afuera,
-        /// tombstone adentro, archivo fuera de la biblioteca. Lo que hace la
-        /// app con el archivo (papelera del OS) no es asunto de la red, y en
-        /// una prueba mandaría archivos temporales a la papelera de verdad.
+        /// Local deletion, just like `db::delete_tracks` leaves it: row out,
+        /// tombstone in, file out of the library. What the app does with the
+        /// file (OS trash) isn't the network's business, and in a test it
+        /// would send temporary files to the real trash.
         fn delete_track(&self, uid: &str) {
             let conn = self.db.lock().unwrap();
             let path: String = conn
@@ -1005,7 +1013,7 @@ mod tests {
             v
         }
 
-        /// Títulos de una playlist, en el orden que define el rank.
+        /// Titles of a playlist, in the order defined by rank.
         fn order_in(&self, playlist: &str) -> Vec<String> {
             let conn = self.db.lock().unwrap();
             let mut stmt = conn
@@ -1037,8 +1045,8 @@ mod tests {
             v
         }
 
-        /// Archivos de audio de la carpeta gestionada (sin papelera ni
-        /// parciales, que viven en subdirectorios `.sway-*`).
+        /// Audio files in the managed folder (excluding trash and partials,
+        /// which live in `.sway-*` subdirectories).
         fn audio_files(&self) -> Vec<PathBuf> {
             let mut v: Vec<PathBuf> = std::fs::read_dir(&self.dir)
                 .unwrap()
@@ -1050,7 +1058,7 @@ mod tests {
             v
         }
 
-        /// Todo lo que quedó en la papelera de la biblioteca.
+        /// Everything left in the library's trash.
         fn trashed(&self) -> Vec<Vec<u8>> {
             let dir = crate::trash::trash_dir(&self.dir);
             std::fs::read_dir(dir)
@@ -1088,8 +1096,8 @@ mod tests {
         }
     }
 
-    /// Las dos puntas de un canal cifrado sobre loopback, con las copias de los
-    /// sockets anotadas en cada dispositivo para poder cortar la red.
+    /// Both ends of an encrypted channel over loopback, with the socket
+    /// copies noted on each device so the network can be cut.
     fn link(a: &Device, b: &Device) -> (Session, Session) {
         let (ka, _) = generate_keypair().unwrap();
         let (kb, _) = generate_keypair().unwrap();
@@ -1111,8 +1119,8 @@ mod tests {
         (client, srv)
     }
 
-    /// Una corrida completa: `a` sincroniza, `b` atiende. Es exactamente lo que
-    /// pasa entre la PC y el celular, con el hilo del servidor de este lado.
+    /// A full run: `a` syncs, `b` serves. It's exactly what happens between
+    /// the PC and the phone, with the server thread on this side.
     fn sync_once(a: &Device, b: &Device) -> Result<SyncResult> {
         let (mut ca, mut sb) = link(a, b);
         let a_uid = a.uid();
@@ -1131,32 +1139,32 @@ mod tests {
 
     // -----------------------------------------------------------------------
 
-    /// El caso base, y la propiedad que más se rompió en device: converger una
-    /// vez es fácil, quedarse quieto después es lo difícil. Un sync que repite
-    /// trabajo en cada corrida es el síntoma de todos los bugs de ping-pong de
-    /// la Fase 5.
+    /// The base case, and the property that broke the most on-device:
+    /// converging once is easy, staying put afterward is the hard part. A
+    /// sync that repeats work on every run is the symptom of all the
+    /// ping-pong bugs from Phase 5.
     #[test]
-    fn dos_bibliotecas_convergen_y_la_segunda_corrida_no_mueve_nada() {
+    fn two_libraries_converge_and_the_second_run_moves_nothing() {
         let a = Device::new("conv-a");
         let b = Device::new("conv-b");
-        let t1 = a.add_track("uno.flac", &audio(2048, 1), "Uno");
-        let t2 = a.add_track("dos.flac", &audio(3000, 2), "Dos");
-        a.add_track("tres.flac", &audio(1500, 3), "Tres");
+        let t1 = a.add_track("uno.flac", &audio(2048, 1), "One");
+        let t2 = a.add_track("dos.flac", &audio(3000, 2), "Two");
+        a.add_track("tres.flac", &audio(1500, 3), "Three");
         let gigs = a.folder("Gigs");
         let set = a.playlist("Set", Some(gigs));
-        // Al revés del orden de importación: el orden manual es dato, no un
-        // efecto secundario de cómo entraron los archivos.
+        // Reverse of the import order: the manual order is data, not a side
+        // effect of how the files came in.
         a.add_to_playlist(set, &[&t2, &t1]);
 
-        let r = sync_once(&a, &b).expect("el primer sync tiene que andar");
-        assert_eq!(r.sent, 3, "los tres archivos viajan");
+        let r = sync_once(&a, &b).expect("the first sync has to work");
+        assert_eq!(r.sent, 3, "all three files travel");
         assert_eq!(r.received, 0);
 
-        assert_eq!(a.track_uids(), b.track_uids(), "misma identidad de los dos lados");
+        assert_eq!(a.track_uids(), b.track_uids(), "same identity on both sides");
         assert_eq!(b.audio_files().len(), 3);
         assert_eq!(b.playlist_names(), vec!["Gigs".to_string(), "Set".to_string()]);
-        assert_eq!(b.order_in("Set"), vec!["Dos".to_string(), "Uno".to_string()]);
-        // La jerarquía viaja por uid, no por id local.
+        assert_eq!(b.order_in("Set"), vec!["Two".to_string(), "One".to_string()]);
+        // The hierarchy travels by uid, not local id.
         let parent: String = {
             let conn = b.db.lock().unwrap();
             conn.query_row(
@@ -1169,108 +1177,109 @@ mod tests {
         };
         assert_eq!(parent, "Gigs");
 
-        let r2 = sync_once(&a, &b).expect("la segunda corrida tiene que andar");
+        let r2 = sync_once(&a, &b).expect("the second run has to work");
         assert_eq!(
             (r2.sent, r2.received, r2.organized),
             (0, 0, 0),
-            "ya está todo: no puede volver a mover nada"
+            "everything's already there: it can't move anything again"
         );
-        // Y tampoco al revés: si el otro lado creyera que le falta algo, el
-        // par quedaría mandándose lo mismo para siempre.
-        let r3 = sync_once(&b, &a).expect("la vuelta también");
+        // And not the other way either: if the other side thought it was
+        // missing something, the pair would end up sending each other the
+        // same thing forever.
+        let r3 = sync_once(&b, &a).expect("the reverse direction too");
         assert_eq!((r3.sent, r3.received, r3.organized), (0, 0, 0));
     }
 
-    /// El caso que no se puede probar a mano sin pelearse con la wifi: la red
-    /// se corta a la mitad de un archivo. No se pierde nada, y la corrida
-    /// siguiente **reanuda** en vez de bajar todo de nuevo.
+    /// The case that can't be tested by hand without fighting the wifi: the
+    /// network cuts out in the middle of a file. Nothing is lost, and the
+    /// next run **resumes** instead of downloading everything again.
     #[test]
-    fn un_corte_a_la_mitad_no_pierde_nada_y_la_reanudacion_sigue_donde_iba() {
+    fn a_cut_midway_loses_nothing_and_resumption_picks_up_where_it_left_off() {
         let a = Device::new("cut-a");
         let b = Device::new("cut-b");
         let bytes = audio(2_500_000, 7);
-        a.add_track("largo.flac", &bytes, "Largo");
+        a.add_track("largo.flac", &bytes, "Long");
 
-        // Lo pide B, así que es B quien reanuda: el offset lo lleva el pedido.
+        // B requests it, so B is the one that resumes: the offset is carried by the request.
         b.cut_after(1_000_000);
-        let err = sync_once(&b, &a).expect_err("la red se cortó, el sync no puede decir que anduvo");
-        assert!(is_disconnect(&err), "un corte es un corte, no un error raro: {err}");
+        let err = sync_once(&b, &a).expect_err("the network cut out, the sync can't say it worked");
+        assert!(is_disconnect(&err), "a cut is a cut, not some weird error: {err}");
 
-        assert!(b.track_uids().is_empty(), "nada a medio bajar entra a la biblioteca");
-        assert!(b.audio_files().is_empty(), "y no queda un archivo trucho en la carpeta");
+        assert!(b.track_uids().is_empty(), "nothing half-downloaded enters the library");
+        assert!(b.audio_files().is_empty(), "and no broken file is left in the folder");
         let partials = b.partials();
-        assert_eq!(partials.len(), 1, "lo bajado sobrevive como parcial");
+        assert_eq!(partials.len(), 1, "what was downloaded survives as a partial");
         let partial_len = std::fs::metadata(&partials[0]).unwrap().len();
         assert!(
             partial_len >= 1_000_000 && partial_len < bytes.len() as u64,
-            "el parcial tiene lo que llegó ({partial_len} bytes)"
+            "the partial has what arrived ({partial_len} bytes)"
         );
-        assert_eq!(a.audio_files().len(), 1, "el que envía no pierde nada nunca");
+        assert_eq!(a.audio_files().len(), 1, "the sender never loses anything");
 
         b.forget_progress();
-        let r = sync_once(&b, &a).expect("y ahora sí");
+        let r = sync_once(&b, &a).expect("and now it works");
         assert_eq!(r.received, 1);
         assert!(
             b.first_progress() >= 1_000_000,
-            "arrancó de cero: la reanudación no sirvió de nada"
+            "started from zero: the resumption was useless"
         );
-        assert_eq!(b.audio_files().len(), 1, "un archivo, no dos");
-        assert_eq!(std::fs::read(&b.audio_files()[0]).unwrap(), bytes, "y es el mismo");
-        assert!(b.partials().is_empty(), "el parcial se consume al terminar");
+        assert_eq!(b.audio_files().len(), 1, "one file, not two");
+        assert_eq!(std::fs::read(&b.audio_files()[0]).unwrap(), bytes, "and it's the same one");
+        assert!(b.partials().is_empty(), "the partial is consumed once it's done");
     }
 
-    /// Un borrado viaja, pero el archivo **no se destruye**: queda en la
-    /// papelera de la biblioteca 30 días. Y no vuelve solo en la corrida
-    /// siguiente, que es lo que haría un merge ingenuo por unión.
+    /// A deletion travels, but the file **isn't destroyed**: it stays in the
+    /// library's trash for 30 days. And it doesn't come back on its own in
+    /// the next run, which is what a naive union merge would do.
     #[test]
-    fn un_borrado_viaja_deja_el_archivo_en_la_papelera_y_no_resucita() {
+    fn a_deletion_travels_leaves_the_file_in_the_trash_and_does_not_come_back() {
         let a = Device::new("del-a");
         let b = Device::new("del-b");
         let bytes = audio(4096, 11);
-        let uid = a.add_track("chau.flac", &bytes, "Chau");
-        a.add_track("queda.flac", &audio(2048, 12), "Queda");
+        let uid = a.add_track("chau.flac", &bytes, "Bye");
+        a.add_track("queda.flac", &audio(2048, 12), "Stays");
         sync_once(&a, &b).unwrap();
         assert_eq!(b.audio_files().len(), 2);
 
         a.delete_track(&uid);
         sync_once(&a, &b).unwrap();
 
-        assert_eq!(b.track_uids().len(), 1, "el borrado se aplicó del otro lado");
+        assert_eq!(b.track_uids().len(), 1, "the deletion was applied on the other side");
         assert_eq!(b.audio_files().len(), 1);
         assert!(
             b.trashed().contains(&bytes),
-            "pero el archivo sigue existiendo, en la papelera"
+            "but the file still exists, in the trash"
         );
 
         let r = sync_once(&a, &b).unwrap();
-        assert_eq!((r.sent, r.received), (0, 0), "lo borrado no puede volver");
+        assert_eq!((r.sent, r.received), (0, 0), "what was deleted can't come back");
         assert_eq!(a.track_uids().len(), 1);
         assert_eq!(b.track_uids().len(), 1);
     }
 
-    /// Los dos lados editan sin verse. La regla es la misma de siempre: gana
-    /// el más nuevo campo por campo, y ante duda se conserva — las membresías
-    /// se unen, no se pisan.
+    /// Both sides edit without seeing each other. The rule is the usual one:
+    /// the newest wins field by field, and when in doubt it's kept —
+    /// memberships are merged, not overwritten.
     #[test]
-    fn editar_los_dos_lados_sin_verse_no_pierde_ninguno_de_los_dos_cambios() {
+    fn editing_both_sides_without_seeing_each_other_loses_neither_change() {
         let a = Device::new("split-a");
         let b = Device::new("split-b");
-        let t1 = a.add_track("uno.flac", &audio(2048, 31), "Uno");
-        let t2 = a.add_track("dos.flac", &audio(2048, 32), "Dos");
+        let t1 = a.add_track("uno.flac", &audio(2048, 31), "One");
+        let t2 = a.add_track("dos.flac", &audio(2048, 32), "Two");
         let set = a.playlist("Set", None);
         a.add_to_playlist(set, &[&t1]);
         sync_once(&a, &b).unwrap();
 
-        // Sin verse: cada uno le cambia el nombre a la misma playlist y le
-        // agrega algo distinto.
+        // Without seeing each other: each one renames the same playlist and
+        // adds something different to it.
         {
             let conn = b.db.lock().unwrap();
             let id: i64 = conn
                 .query_row("SELECT id FROM playlists WHERE name = 'Set'", [], |r| r.get(0))
                 .unwrap();
-            // El de B es el cambio VIEJO: se hizo antes de que se vieran.
+            // B's is the OLD change: it was made before they met.
             conn.execute(
-                "UPDATE playlists SET name = 'Sábado', updated_at = ?1 WHERE id = ?2",
+                "UPDATE playlists SET name = 'Saturday', updated_at = ?1 WHERE id = ?2",
                 rusqlite::params![crate::db::now_ms() - 10_000, id],
             )
             .unwrap();
@@ -1281,63 +1290,64 @@ mod tests {
 
         {
             let conn = a.db.lock().unwrap();
-            crate::db::rename_playlist(&conn, set, "Viernes").unwrap();
+            crate::db::rename_playlist(&conn, set, "Friday").unwrap();
         }
         a.add_to_playlist(set, &[&t2]);
 
         sync_once(&a, &b).unwrap();
 
-        for (quien, d) in [("A", &a), ("B", &b)] {
-            let mut nombres = d.playlist_names();
-            nombres.sort();
+        for (who, d) in [("A", &a), ("B", &b)] {
+            let mut names = d.playlist_names();
+            names.sort();
             assert_eq!(
-                nombres,
-                vec!["Viernes".to_string(), "Warmup".to_string()],
-                "{quien}: gana el rename más nuevo y la playlist nueva del otro no se pierde"
+                names,
+                vec!["Friday".to_string(), "Warmup".to_string()],
+                "{who}: the newer rename wins and the other side's new playlist isn't lost"
             );
-            let mut orden = d.order_in("Viernes");
-            orden.sort();
+            let mut order = d.order_in("Friday");
+            order.sort();
             assert_eq!(
-                orden,
-                vec!["Dos".to_string(), "Uno".to_string()],
-                "{quien}: las membresías se unen"
+                order,
+                vec!["Two".to_string(), "One".to_string()],
+                "{who}: memberships are merged"
             );
-            assert_eq!(d.order_in("Warmup"), vec!["Dos".to_string()], "{quien}: y la de la playlist nueva también");
+            assert_eq!(d.order_in("Warmup"), vec!["Two".to_string()], "{who}: and so is the new playlist's");
         }
 
         let r = sync_once(&a, &b).unwrap();
         assert_eq!(
             (r.sent, r.received, r.organized),
             (0, 0, 0),
-            "después de resolver el conflicto tienen que quedarse quietos"
+            "after resolving the conflict they have to stay put"
         );
     }
 
-    /// El ciclo completo de la sync selectiva, que es donde más fácil se
-    /// perdería música: desmarcar una playlist, liberar el espacio, y volver a
-    /// marcarla. Las tres cosas que tienen que valer son que liberar **no
-    /// destruye** (va a la papelera), que lo liberado no vuelve solo mientras
-    /// esté fuera de scope, y que al re-marcarlo se rescata del disco en vez de
-    /// bajarlo de nuevo por la red — que con una biblioteca de 20 GB no es un
-    /// detalle de eficiencia sino la diferencia entre usable y no usable.
+    /// The full cycle of selective sync, which is where music would most
+    /// easily get lost: unchecking a playlist, freeing the space, and
+    /// checking it again. The three things that have to hold are that
+    /// freeing **doesn't destroy** (it goes to the trash), that what was
+    /// freed doesn't come back on its own while it's out of scope, and that
+    /// re-checking it rescues it from disk instead of downloading it again
+    /// over the network — which with a 20 GB library isn't an efficiency
+    /// detail but the difference between usable and unusable.
     #[test]
-    fn liberar_espacio_no_destruye_y_volver_a_marcar_rescata_sin_red() {
+    fn freeing_space_does_not_destroy_and_re_checking_rescues_without_network() {
         let a = Device::new("scope-a");
         let b = Device::new("scope-b");
-        let fiesta_bytes = audio(4096, 41);
-        let t1 = a.add_track("set.flac", &audio(2048, 42), "DelSet");
-        let t2 = a.add_track("fiesta.flac", &fiesta_bytes, "DeLaFiesta");
+        let party_bytes = audio(4096, 41);
+        let t1 = a.add_track("set.flac", &audio(2048, 42), "FromSet");
+        let t2 = a.add_track("fiesta.flac", &party_bytes, "FromParty");
         let set = a.playlist("Set", None);
-        let fiesta = a.playlist("Fiesta", None);
+        let fiesta = a.playlist("Party", None);
         a.add_to_playlist(set, &[&t1]);
         a.add_to_playlist(fiesta, &[&t2]);
 
-        // Lo inicia B: así queda anotado que A tiene copia de los dos archivos,
-        // que es lo que después habilita liberar espacio sin riesgo.
+        // Started by B: this way it gets noted that A has a copy of both
+        // files, which is what later enables freeing space with no risk.
         let r = sync_once(&b, &a).unwrap();
         assert_eq!(r.received, 2);
 
-        // B pasa a selectivo y se queda sólo con "Set".
+        // B switches to selective and keeps only "Set".
         let b_uid = b.uid();
         let fiesta_uid: String = {
             let conn = b.db.lock().unwrap();
@@ -1346,30 +1356,30 @@ mod tests {
                 .query_row("SELECT uid FROM playlists WHERE name = 'Set'", [], |r| r.get(0))
                 .unwrap();
             let f: String = conn
-                .query_row("SELECT uid FROM playlists WHERE name = 'Fiesta'", [], |r| r.get(0))
+                .query_row("SELECT uid FROM playlists WHERE name = 'Party'", [], |r| r.get(0))
                 .unwrap();
             crate::scope::set_playlist(&conn, &b_uid, &s, true).unwrap();
             f
         };
 
-        // Liberar espacio: sólo lo que consta en otro dispositivo.
+        // Free space: only what's confirmed to exist on another device.
         let (n, _) = {
             let conn = b.db.lock().unwrap();
             let items = crate::scope::evictable(&conn, &b.dir).unwrap();
-            assert_eq!(items.len(), 1, "sólo el que quedó fuera de scope");
+            assert_eq!(items.len(), 1, "only the one that fell out of scope");
             crate::scope::evict(&conn, &b.dir, &items).unwrap()
         };
         assert_eq!(n, 1);
-        assert_eq!(b.audio_files().len(), 1, "el archivo salió de la biblioteca");
-        assert!(b.trashed().contains(&fiesta_bytes), "pero está en la papelera, no destruido");
-        assert_eq!(b.track_uids().len(), 2, "y la fila se queda: el track se sigue viendo");
+        assert_eq!(b.audio_files().len(), 1, "the file left the library");
+        assert!(b.trashed().contains(&party_bytes), "but it's in the trash, not destroyed");
+        assert_eq!(b.track_uids().len(), 2, "and the row stays: the track is still visible");
 
-        // Fuera de scope no vuelve solo, por más que el otro lo tenga.
+        // Out of scope doesn't come back on its own, no matter that the other side has it.
         let r = sync_once(&b, &a).unwrap();
-        assert_eq!(r.received, 0, "desmarcado es desmarcado");
+        assert_eq!(r.received, 0, "unchecked is unchecked");
         assert_eq!(b.audio_files().len(), 1);
 
-        // Se vuelve a marcar: el archivo tiene que salir de la papelera.
+        // It's checked again: the file has to come out of the trash.
         {
             let conn = b.db.lock().unwrap();
             crate::scope::set_playlist(&conn, &b_uid, &fiesta_uid, true).unwrap();
@@ -1377,14 +1387,14 @@ mod tests {
         let r = sync_once(&b, &a).unwrap();
         assert_eq!(
             r.received, 0,
-            "estaba a un rename de distancia: no puede haber viajado por la red"
+            "it was a rename away: it can't have traveled over the network"
         );
-        assert_eq!(b.audio_files().len(), 2, "y sin embargo volvió");
-        let vuelto = b
+        assert_eq!(b.audio_files().len(), 2, "and yet it came back");
+        let came_back = b
             .audio_files()
             .into_iter()
             .map(|p| std::fs::read(p).unwrap())
-            .any(|c| c == fiesta_bytes);
-        assert!(vuelto, "con los mismos bytes, verificados por hash");
+            .any(|c| c == party_bytes);
+        assert!(came_back, "with the same bytes, verified by hash");
     }
 }

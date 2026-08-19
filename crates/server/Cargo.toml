@@ -1,7 +1,7 @@
 [package]
 name = "sway-server"
 version = "0.1.0"
-description = "Server de archivo y sync de Sway — sin interfaz, para dejar prendido"
+description = "Sway's archive and sync server — no interface, meant to be left running"
 edition = "2021"
 
 [lib]
@@ -13,22 +13,22 @@ name = "sway-server"
 path = "src/main.rs"
 
 [dependencies]
-# El mismo motor que corre adentro de la app. Que sea literalmente el mismo
-# codigo es todo el punto: un server con su propia implementacion del
-# protocolo seria una segunda cosa que mantener sincronizada, y la que se
-# quede atras corrompe bibliotecas.
+# The same engine that runs inside the app. Being literally the same code is
+# the whole point: a server with its own implementation of the protocol
+# would be a second thing to keep in sync, and the one that falls behind
+# corrupts libraries.
 sway-core = { path = "../core" }
 anyhow = "1"
 log = "0.4"
 env_logger = "0.11.11"
 serde = { version = "1", features = ["derive"] }
-# El archivo de configuracion lo edita una persona en una terminal por SSH.
+# The config file is edited by a person in a terminal over SSH.
 toml = "0.8"
-# Token de vinculacion: v4 es aleatorio, que es lo unico que se le pide.
+# Pairing token: v4 is random, which is the only thing asked of it.
 uuid = { version = "1", features = ["v4"] }
 
-# Para saber si la consola la abrio un doble click (y entonces hay que dejarla
-# abierta para que se pueda leer) o si es una terminal o un servicio (donde
-# esperar una tecla seria colgarse). Ver `hold_window_open` en main.rs.
+# To tell whether the console was opened by a double click (in which case it
+# has to stay open so it can be read) or is a terminal or a service (where
+# waiting for a keypress would mean hanging). See `hold_window_open` in main.rs.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Console"] }

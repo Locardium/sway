@@ -1,7 +1,7 @@
-// Backend de playback para Android/iOS: tauri-plugin-native-audio (Media3/
-// ExoPlayer), validado en Fase 0.5 (spike-android-audio/). A diferencia de
-// desktop, este plugin se controla directo desde JS — no hay un Player de
-// Rust que envolver acá, el propio plugin nativo es el puente.
+// Playback backend for Android/iOS: tauri-plugin-native-audio (Media3/
+// ExoPlayer), validated in Phase 0.5 (spike-android-audio/). Unlike desktop,
+// this plugin is controlled directly from JS — there's no Rust Player to
+// wrap here, the native plugin itself is the bridge.
 import { invoke } from '@tauri-apps/api/core';
 import {
   initialize,
@@ -22,8 +22,8 @@ function ensureInitialized() {
   return initialized;
 }
 
-// file:// + path tal cual (storage interno de la app, sin espacios que
-// rompan por falta de encoding en esta fase — ver PRODUCT.md Fase 4).
+// file:// + path as-is (app's internal storage, no spaces to break things
+// from missing encoding at this phase — see PRODUCT.md Phase 4).
 function toFileUri(path: string) {
   return 'file://' + path.replace(/\\/g, '/');
 }
@@ -60,20 +60,20 @@ export async function playbackPosition(): Promise<number> {
   return Math.floor(st.currentTime || 0);
 }
 
-// El plugin no expone control de volumen — Android usa los botones de
-// hardware. No-op a proposito (ver PlayerBar showVolume en App.tsx).
+// The plugin doesn't expose volume control — Android uses the hardware
+// buttons. No-op on purpose (see PlayerBar showVolume in App.tsx).
 export async function setVolume(_volume: number) {}
 
-// --- Estado empujado por el plugin ------------------------------------------
+// --- State pushed by the plugin ---------------------------------------------
 //
-// El plugin emite su estado en cada tick (25ms en foreground, 250ms en
-// background). Escucharlo en vez de hacer polling desde JS da dos cosas que
-// el polling no da: fin de track de verdad (`status: 'ended'`) en vez de
-// adivinarlo comparando la posicion contra la duracion, y play/pause tocado
-// desde la notificacion o el lockscreen.
+// The plugin emits its state on every tick (25ms in foreground, 250ms in
+// background). Listening to it instead of polling from JS gives two things
+// polling doesn't: a real track end (`status: 'ended'`) instead of guessing
+// it by comparing position against duration, and play/pause toggled from the
+// notification or the lockscreen.
 //
-// Para que esto siga vivo con la app en background, `MainActivity.kt` evita
-// que el WebView se pause (ahi esta el porque).
+// For this to stay alive with the app in the background, `MainActivity.kt`
+// prevents the WebView from pausing (see the reason there).
 
 export type PlaybackEvent =
   | { type: 'position'; ms: number }
@@ -82,44 +82,45 @@ export type PlaybackEvent =
 
 let endedSent = false;
 
-/// Cuanto antes del final se cambia de track con la app fuera de pantalla.
+/// How long before the end the track is switched while the app is off screen.
 ///
-/// Cuando el player llega a `STATE_ENDED`, la notificacion del plugin deja de
-/// ser "ongoing" y su servicio SALE de foreground. Arrancar el track siguiente
-/// lo hace volver, y `Service.startForeground()` desde background esta
-/// prohibido en Android 12+: crashea con
-/// ForegroundServiceStartNotAllowedException. Cambiando de track mientras
-/// todavia suena, la notificacion nunca deja de ser "ongoing", el servicio
-/// nunca sale de foreground y el problema no existe — es la misma ruta que ya
-/// funciona al tocar "siguiente" en la notificacion.
+/// When the player reaches `STATE_ENDED`, the plugin's notification stops
+/// being "ongoing" and its service LEAVES foreground. Starting the next track
+/// brings it back, and `Service.startForeground()` from background is
+/// forbidden on Android 12+: it crashes with
+/// ForegroundServiceStartNotAllowedException. By switching tracks while the
+/// current one is still playing, the notification never stops being
+/// "ongoing", the service never leaves foreground, and the problem doesn't
+/// exist — it's the same path that already works when tapping "next" on the
+/// notification.
 ///
-/// Solo aplica con la app fuera de pantalla: en foreground el proceso tiene
-/// permiso de sobra y no hace falta recortarle nada al track. El margen tiene
-/// que cubrir un par de ticks del plugin, que en background son de 250ms.
+/// Only applies with the app off screen: in foreground the process has
+/// plenty of permission and there's no need to trim the track at all. The
+/// margin has to cover a couple of plugin ticks, which in background are 250ms.
 const NEAR_END_LEAD_MS = 500;
 
 let appVisible = true;
 let endedEarly = false;
 
-/// Visibilidad real de la app, empujada por `MainActivity` (ver el
-/// `eval` de onPause/onResume). No se usa `document.visibilityState` porque
-/// MainActivity resume el WebView a mano cuando la Activity pausa, asi que el
-/// documento se sigue reportando visible.
+/// The app's real visibility, pushed by `MainActivity` (see the
+/// `eval` in onPause/onResume). `document.visibilityState` isn't used because
+/// MainActivity resumes the WebView by hand when the Activity pauses, so the
+/// document keeps reporting itself as visible.
 export function setAppVisible(visible: boolean) {
   appVisible = visible;
 }
 
-/// Descarta el estado derivado tras un cambio de posicion hecho a proposito
-/// (seek, stop, track nuevo).
+/// Discards the derived state after a deliberate position change (seek,
+/// stop, new track).
 function quiet() {
   endedSent = false;
   endedEarly = false;
 }
 
-/// Traduce el chorro de estados del plugin a eventos con sentido para la app.
-/// `emit` recibe posicion como mucho cada `POSITION_MS` (el tick nativo es
-/// demasiado rapido para meterlo en estado de React), pero los saltos y el
-/// fin de track salen al instante.
+/// Translates the plugin's stream of states into events that make sense for
+/// the app. `emit` receives position at most every `POSITION_MS` (the native
+/// tick is too fast to put into React state), but seeks and track end fire
+/// instantly.
 const POSITION_MS = 200;
 let lastPositionEmit = 0;
 
@@ -129,9 +130,9 @@ function handleState(st: NativeAudioState, emit: (e: PlaybackEvent) => void) {
   const now = Date.now();
   const ms = Math.round((st.currentTime || 0) * 1000);
 
-  // Play/pause tambien se toca desde la notificacion y el lockscreen, no solo
-  // desde la app: sin esto el boton de la app se queda mostrando el estado
-  // que ya no es.
+  // Play/pause can also be toggled from the notification and the lockscreen,
+  // not just from the app: without this, the app's button keeps showing a
+  // state that's no longer true.
   if (st.status !== 'ended' && st.isPlaying !== lastReportedPlaying) {
     lastReportedPlaying = st.isPlaying;
     emit({ type: 'playing', value: st.isPlaying });

@@ -14,7 +14,7 @@ export function Modal({ title, onClose, children, wide }: ModalProps) {
   const [closing, setClosing] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout>>();
 
-  // Reproduce la animacion de salida y recien despues desmonta (via onClose).
+  // Plays the exit animation and only unmounts afterwards (via onClose).
   function close() {
     if (closing) return;
     setClosing(true);
@@ -33,17 +33,17 @@ export function Modal({ title, onClose, children, wide }: ModalProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // El teclado del teléfono tapa el campo que estás escribiendo.
+  // The phone's keyboard covers the field you're typing into.
   //
-  // `adjustResize` en el manifest achica la ventana, pero eso solo no alcanza:
-  // el campo puede quedar igual abajo del recorte, y escribís a ciegas. Acá se
-  // lo trae al centro de lo que queda visible.
+  // `adjustResize` in the manifest shrinks the window, but that alone isn't
+  // enough: the field can still end up below the cut, so you'd be typing
+  // blind. This brings it to the center of what's left visible.
   //
-  // Va con un respiro porque el teclado tarda en aparecer: pedir el scroll
-  // antes de que la ventana se achique es medir contra la altura vieja, o sea
-  // no moverse. Y se repite cuando `visualViewport` avisa que efectivamente
-  // cambió, que es lo que cubre a los teclados lentos y a los que crecen al
-  // aparecer la barra de sugerencias.
+  // There's a delay because the keyboard takes time to appear: requesting the
+  // scroll before the window shrinks measures against the old height, i.e.
+  // doesn't move at all. And it repeats whenever `visualViewport` reports an
+  // actual change, which covers slow keyboards and ones that grow when the
+  // suggestion bar appears.
   const modalRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const node = modalRef.current;

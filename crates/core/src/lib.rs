@@ -1,34 +1,34 @@
-//! El motor de Sway: biblioteca, identidad de archivos y sincronización.
+//! Sway's engine: library, file identity and sync.
 //!
-//! Acá vive todo lo que no necesita que haya una pantalla. La app Tauri
-//! (`app/src-tauri`) y el server de archivo (Fase 6.2) son dos frentes sobre
-//! este mismo crate, y esa es la razón por la que existe: el server corre
-//! headless en un Ubuntu sin escritorio y no puede compilar `tauri`.
+//! This is where everything that doesn't need a screen lives. The Tauri app
+//! (`app/src-tauri`) and the file server (Phase 6.2) are two fronts on top
+//! of this same crate, and that's the reason it exists: the server runs
+//! headless on an Ubuntu box without a desktop and can't compile `tauri`.
 //!
-//! Lo que NO entra: pairing con confirmación humana, descubrimiento mDNS,
-//! export a iTunes XML, reproducción. Eso sigue del lado de la app.
+//! What does NOT belong here: pairing with human confirmation, mDNS
+//! discovery, iTunes XML export, playback. That stays on the app side.
 //!
-//! El punto de entrada del sync es `engine::Host`: quien use este crate le
-//! dice al motor cómo llegar a la base, dónde están los archivos y qué hacer
-//! cuando algo cambia.
+//! The sync entry point is `engine::Host`: whoever uses this crate tells
+//! the engine how to reach the database, where the files are, and what to
+//! do when something changes.
 
-/// Reexportado para que quien use el crate no tenga que declarar `rusqlite`
-/// por su cuenta: dos versiones distintas de la misma biblioteca en el mismo
-/// binario son dos tipos `Connection` incompatibles, y el error que da no se
-/// parece en nada a la causa.
+/// Re-exported so that whoever uses the crate doesn't have to declare
+/// `rusqlite` on their own: two different versions of the same library in
+/// the same binary are two incompatible `Connection` types, and the error
+/// you get looks nothing like the cause.
 pub use rusqlite;
 
-/// Dónde se dejan los tiempos, además del log. Lo setea quien use el crate
-/// (en la app, el `setup` de Tauri).
+/// Where timings are dropped, in addition to the log. Set by whoever uses
+/// the crate (in the app, Tauri's `setup`).
 static PERF_FILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
-/// TEMPORAL — diagnóstico.
+/// TEMPORARY — diagnostics.
 ///
-/// En Android los `log::*` van a logcat, pero hay dispositivos que lo traen
-/// apagado a nivel sistema (`live.logcat=disable`, que ni el shell de adb puede
-/// cambiar): ahí el buffer entero devuelve cero líneas y no hay forma de ver un
-/// tiempo. Un archivo al lado de la DB se puede sacar con `run-as` sin tocar
-/// ninguna configuración del teléfono.
+/// On Android `log::*` goes to logcat, but some devices ship it disabled at
+/// the system level (`live.logcat=disable`, which not even the adb shell can
+/// change): there the whole buffer returns zero lines and there's no way to
+/// see a timing. A file next to the DB can be pulled out with `run-as`
+/// without touching any phone setting.
 pub fn perf_line(line: &str) {
     use std::io::Write;
     let Some(path) = PERF_FILE.get() else { return };
@@ -37,7 +37,7 @@ pub fn perf_line(line: &str) {
     }
 }
 
-/// Dónde escribir los tiempos. Sin esto, `perf_line` no hace nada.
+/// Where to write the timings. Without this, `perf_line` does nothing.
 pub fn set_perf_file(path: std::path::PathBuf) {
     let _ = PERF_FILE.set(path);
 }

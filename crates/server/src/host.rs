@@ -1,9 +1,9 @@
-//! El motor de sync corriendo sin nadie adelante.
+//! The sync engine running with nobody in front of it.
 //!
-//! La app implementa `Host` sobre su `AppHandle` (base en el estado de Tauri,
-//! avisos como eventos de ventana) y la suite de integridad lo implementa
-//! sobre un directorio temporal. Esta es la tercera implementación, y la más
-//! chata de las tres: una base, una carpeta, y el resto al log.
+//! The app implements `Host` over its `AppHandle` (backed by Tauri's state,
+//! notifications as window events), and the integrity suite implements it
+//! over a temporary directory. This is the third implementation, and the
+//! flattest of the three: a database, a folder, and the rest goes to the log.
 
 use anyhow::{anyhow, Result};
 use std::collections::VecDeque;
@@ -17,32 +17,32 @@ use sway_core::rusqlite::Connection;
 pub struct ServerHost {
     db: Mutex<Connection>,
     music_dir: PathBuf,
-    /// Qué se movió acá y quién lo movió, para poder avisarle a los demás.
+    /// What moved here and who moved it, so the others can be notified.
     changes: Mutex<Changes>,
     changed: Condvar,
 }
 
-/// Cuántos cambios se recuerdan con su autor.
+/// How many changes are remembered along with their author.
 ///
-/// Sesenta y cuatro es holgado: entre que un dispositivo empieza a esperar y
-/// que se le contesta pasan segundos, y harían falta 64 cambios de OTROS
-/// dispositivos en esa ventana para que se olvide alguno. Y olvidarse no
-/// pierde nada: se contesta que sí, que es un sync de más y no uno de menos.
+/// Sixty-four is generous: seconds pass between a device starting to wait and
+/// getting an answer, and it would take 64 changes from OTHER devices in that
+/// window for one to be forgotten. And forgetting one costs nothing: it just
+/// answers yes, meaning one sync too many, never one too few.
 const REMEMBER: usize = 64;
 
 #[derive(Default)]
 struct Changes {
-    /// Identifica ESTA corrida del server. Se sortea al arrancar.
+    /// Identifies THIS run of the server. Randomized on startup.
     ///
-    /// Sin esto, la revisión 57 de hoy y la 57 de después de un reinicio son
-    /// el mismo número, y un dispositivo con la marca guardada concluiría que
-    /// está al día justo cuando se perdió todo lo del medio.
+    /// Without this, today's revision 57 and the revision 57 after a restart
+    /// are the same number, and a device with a saved mark would conclude
+    /// it's up to date right when everything in between was lost.
     epoch: u64,
-    /// Cuántas veces se movió la biblioteca desde que arrancó el proceso. No
-    /// es persistente ni tiene por qué serlo: un reinicio corta las conexiones
-    /// que estaban esperando, así que nadie se queda con un número viejo.
+    /// How many times the library moved since the process started. It isn't
+    /// persistent and doesn't need to be: a restart drops the connections
+    /// that were waiting, so nobody is left holding a stale number.
     rev: u64,
-    /// Los últimos, con el uid de quien los hizo.
+    /// The most recent ones, with the uid of whoever made them.
     recent: VecDeque<(u64, String)>,
 }
 
@@ -51,17 +51,18 @@ impl Changes {
         Mark { epoch: self.epoch, rev: self.rev }
     }
 
-    /// ¿Pasó algo después de `since` que `ignoring` no sepa ya?
+    /// Did something happen after `since` that `ignoring` doesn't already know about?
     ///
-    /// El autor importa: sin esto, el dispositivo que empuja un cambio se
-    /// despierta a sí mismo y sale a sincronizar de nuevo lo que él acaba de
-    /// mandar — un manifiesto entero por internet, en cada cambio local.
+    /// The author matters: without this, the device that pushes a change
+    /// wakes itself up and goes out to sync again the very thing it just
+    /// sent — a whole manifest over the internet, on every local change.
     fn news_for(&self, since: u64, ignoring: &str) -> bool {
         if self.rev <= since {
             return false;
         }
-        // Se olvidó parte de lo que pasó desde entonces: no hay forma de saber
-        // de quién era, y quedarse callado sería peor que un sync de más.
+        // Part of what happened since then was forgotten: there's no way to
+        // know whose it was, and staying quiet would be worse than one sync
+        // too many.
         if self.recent.front().map(|(r, _)| *r > since + 1).unwrap_or(true) {
             return true;
         }
@@ -75,8 +76,9 @@ impl ServerHost {
             db: Mutex::new(conn),
             music_dir,
             changes: Mutex::new(Changes {
-                // Al azar y no la hora: dos arranques dentro del mismo
-                // milisegundo darían la misma, y "improbable" no es "no pasa".
+                // Random and not the time: two startups within the same
+                // millisecond would produce the same value, and "unlikely"
+                // isn't "never happens".
                 epoch: uuid::Uuid::new_v4().as_u128() as u64,
                 ..Changes::default()
             }),
@@ -91,20 +93,20 @@ impl Host for ServerHost {
         f(&conn)
     }
 
-    // `with_db_read` queda como el default (la misma conexión). En la app hay
-    // una segunda conexión de sólo lectura porque la pantalla no puede quedar
-    // esperando a que el sync suelte el lock; acá no hay pantalla.
+    // `with_db_read` stays as the default (the same connection). The app has
+    // a second read-only connection because its screen can't be left waiting
+    // for sync to release the lock; there's no screen here.
 
     fn music_dir(&self) -> PathBuf {
         self.music_dir.clone()
     }
 
-    // `expect_path` no hace nada: no hay watcher de carpeta, así que nadie va
-    // a intentar auto-importar lo que deja el sync.
+    // `expect_path` does nothing: there's no folder watcher, so nobody is
+    // going to try to auto-import what sync leaves behind.
 
     fn progress(&self, p: &Progress) {
-        // Sólo los extremos de cada archivo. Un server que corre semanas no
-        // puede escribir una línea por chunk.
+        // Only the ends of each file. A server that runs for weeks can't
+        // write a line per chunk.
         if p.done == 0 {
             log::info!(
                 "[sync] {} {}/{}: {}",
@@ -118,9 +120,9 @@ impl Host for ServerHost {
         }
     }
 
-    // `library_changed` sigue sin hacer nada: no hay UI que recargar. Avisarle
-    // a los demás es otra cosa, y entra por `note_change_by`, que sí sabe
-    // quién causó el cambio.
+    // `library_changed` still does nothing: there's no UI to reload.
+    // Notifying the others is a separate thing, and goes through
+    // `note_change_by`, which does know who caused the change.
 
     fn note_change_by(&self, peer_uid: &str) {
         let Ok(mut c) = self.changes.lock() else { return };
@@ -130,8 +132,8 @@ impl Host for ServerHost {
         while c.recent.len() > REMEMBER {
             c.recent.pop_front();
         }
-        // A todos los que esperan: puede haber varios dispositivos a la vez, y
-        // cada uno decide por su cuenta si el cambio le interesa.
+        // To everyone waiting: there can be several devices at once, and each
+        // one decides on its own whether the change matters to it.
         self.changed.notify_all();
     }
 
@@ -147,9 +149,9 @@ impl Host for ServerHost {
             .changed
             .wait_timeout_while(changes, max, |c| !c.news_for(since.rev, ignoring))
         {
-            // Las dos respuestas salen del mismo guard: si la revisión se
-            // leyera después de soltarlo, un cambio entrado en el medio se
-            // colaría dentro de la marca que se manda como "estás al día".
+            // Both answers come from the same guard: if the revision were
+            // read after releasing it, a change landing in between would
+            // sneak into the mark sent as "you're up to date".
             Ok((c, _)) => Seen {
                 news: c.news_for(since.rev, ignoring),
                 mark: c.mark(),
@@ -164,84 +166,86 @@ mod tests {
     use super::*;
 
     const PC: &str = "uid-pc";
-    const CELU: &str = "uid-celu";
+    const PHONE: &str = "uid-phone";
 
     fn host() -> ServerHost {
         ServerHost::new(Connection::open_in_memory().unwrap(), PathBuf::from("."))
     }
 
-    /// Sin cambios, la espera se cumple sola. Es lo que después se traduce en
-    /// un latido: la conexión sigue viva y no se avisó nada.
+    /// With no changes, the wait times out on its own. This later translates
+    /// into a heartbeat: the connection is still alive and nothing was
+    /// announced.
     #[test]
-    fn sin_cambios_la_espera_vence() {
+    fn with_no_changes_the_wait_times_out() {
         let h = host();
         let rev = h.revision().unwrap();
         assert!(!h.wait_revision(rev, PC, Duration::from_millis(80)).news);
     }
 
-    /// El cambio de otro corta la espera enseguida, sin agotar el plazo.
+    /// Another device's change cuts the wait short right away, without using up the deadline.
     #[test]
-    fn el_cambio_de_otro_corta_la_espera() {
+    fn another_devices_change_cuts_the_wait_short() {
         let h = std::sync::Arc::new(host());
         let rev = h.revision().unwrap();
         let bg = std::sync::Arc::clone(&h);
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));
-            bg.note_change_by(CELU);
+            bg.note_change_by(PHONE);
         });
         let start = std::time::Instant::now();
         assert!(h.wait_revision(rev, PC, Duration::from_secs(10)).news);
-        assert!(start.elapsed() < Duration::from_secs(5), "esperó el plazo entero");
+        assert!(start.elapsed() < Duration::from_secs(5), "waited out the full deadline");
     }
 
-    /// Lo que empujó uno mismo no es novedad para uno mismo. Sin esto, cada
-    /// cambio local termina en un sync de vuelta contra el archivo que no trae
-    /// nada.
+    /// What you pushed yourself isn't news to yourself. Without this, every
+    /// local change ends up syncing back against the archive with nothing to
+    /// bring.
     #[test]
-    fn lo_propio_no_despierta_a_nadie() {
+    fn your_own_push_does_not_wake_you_up() {
         let h = host();
         let rev = h.revision().unwrap();
         h.note_change_by(PC);
         assert!(!h.wait_revision(rev, PC, Duration::from_millis(80)).news);
-        // Al otro sí le interesa.
-        assert!(h.wait_revision(rev, CELU, Duration::from_millis(80)).news);
+        // The other one does care, though.
+        assert!(h.wait_revision(rev, PHONE, Duration::from_millis(80)).news);
     }
 
-    /// Un cambio ocurrido ANTES de empezar a esperar también cuenta: la
-    /// referencia la pone quien espera. Sin esto, un cambio caído entre dos
-    /// latidos no despertaría a nadie.
+    /// A change that happened BEFORE the wait started also counts: the
+    /// reference is set by whoever is waiting. Without this, a change landing
+    /// between two heartbeats wouldn't wake anyone.
     #[test]
-    fn un_cambio_anterior_a_la_espera_tambien_cuenta() {
+    fn a_change_before_the_wait_started_still_counts() {
         let h = host();
         let rev = h.revision().unwrap();
-        h.note_change_by(CELU);
+        h.note_change_by(PHONE);
         assert!(h.wait_revision(rev, PC, Duration::from_millis(80)).news);
     }
 
-    /// Lo que se contesta como "estás al día" y la revisión que se manda salen
-    /// de la misma mirada. Si se leyeran por separado, el latido podría decir
-    /// "al día en la revisión N" con una novedad ya adentro de N, y quien
-    /// espera avanzaría su referencia por encima de algo que nunca le llegó.
+    /// What gets reported as "you're up to date" and the revision sent out
+    /// come from the same look. If they were read separately, the heartbeat
+    /// could say "up to date at revision N" with news already inside N, and
+    /// whoever's waiting would move its reference past something that never
+    /// actually arrived.
     #[test]
-    fn la_revision_que_se_informa_es_la_que_se_miro() {
+    fn the_reported_revision_is_the_one_that_was_looked_at() {
         let h = host();
         let rev = h.revision().unwrap();
         h.note_change_by(PC);
         h.note_change_by(PC);
         let seen = h.wait_revision(rev, PC, Duration::from_millis(80));
-        assert!(!seen.news, "eran propios");
+        assert!(!seen.news, "they were its own");
         assert_eq!(
             seen.mark.rev,
             rev.rev + 2,
-            "la revisión informada tiene que ser la actual"
+            "the reported revision has to be the current one"
         );
-        assert_eq!(seen.mark.epoch, rev.epoch, "la corrida no cambia sola");
+        assert_eq!(seen.mark.epoch, rev.epoch, "the run doesn't change on its own");
     }
 
-    /// Con más cambios de los que se recuerdan ya no se sabe de quién era cada
-    /// uno, así que se avisa igual.
+    /// With more changes than are remembered, it's no longer known whose each
+    /// one was, so it announces anyway.
     #[test]
-    fn cuando_se_olvida_lo_viejo_se_avisa_igual() {
+    fn when_the_old_ones_are_forgotten_it_still_announces() {
         let h = host();
         let rev = h.revision().unwrap();
         for _ in 0..REMEMBER + 1 {

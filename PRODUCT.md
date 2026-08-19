@@ -6,30 +6,30 @@ product
 
 ## Users
 
-DJs (empezando por el propio autor) que organizan su biblioteca musical local: importan carpetas de FLAC/MP3, arman jerarquías de carpetas/playlists para sets, pre-escuchan tracks y después exportan a software DJ legacy (Rekordbox vía iTunes XML, Serato). Contexto de uso: sesiones largas de organización en desktop, típicamente de noche, pantalla única, mucho teclado y drag&drop.
+DJs (starting with the author himself) who organize their local music library: import folders of FLAC/MP3, build folder/playlist hierarchies for sets, pre-listen to tracks, and then export to legacy DJ software (Rekordbox via iTunes XML, Serato). Usage context: long organization sessions on desktop, typically at night, single screen, lots of keyboard and drag&drop.
 
 ## Product Purpose
 
-Sway es un reproductor/organizador DJ multiplataforma (Tauri). Reemplaza el flujo iTunes/Explorer para curar la biblioteca: importar, taggear, ordenar manualmente playlists jerárquicas, y proyectar esa jerarquía a formatos legacy. Éxito = organizar un set de 50 tracks más rápido y más cómodo que en Rekordbox mismo, sin perder metadata.
+Sway is a cross-platform DJ player/organizer (Tauri). It replaces the iTunes/Explorer flow for curating the library: importing, tagging, manually ordering hierarchical playlists, and projecting that hierarchy to legacy formats. Success = organizing a 50-track set faster and more comfortably than in Rekordbox itself, without losing metadata.
 
 ## Brand Personality
 
-Profundo, preciso, fluido. Interfaz oscura de cabina — negro profundo real (no gris oscuro), un solo acento azul/celeste frío que evoca "sway" (movimiento, agua). Densidad de información alta pero con jerarquía clara; el track y su metadata son los protagonistas.
+Deep, precise, fluid. Dark booth interface — true deep black (not dark gray), a single cold blue/light-blue accent evoking "sway" (movement, water). High information density with clear hierarchy; the track and its metadata are the protagonists.
 
 ## Anti-references
 
-- Clon genérico de Spotify/streaming consumer (cards de álbumes gigantes, hero banners, "recomendados para vos").
-- Planilla fría tipo Excel/foobar2000 sin jerarquía visual.
-- Naranja/coral como acento (descartado explícitamente pese al reference Playcloud; del reference se toma: negro profundo, player bar flotante, panel derecho colapsable, top bar mínima).
+- Generic Spotify/streaming consumer clone (giant album cards, hero banners, "recommended for you").
+- Cold Excel/foobar2000-style spreadsheet with no visual hierarchy.
+- Orange/coral as accent (explicitly discarded despite the Playcloud reference; taken from the reference: deep black, floating player bar, collapsible right panel, minimal top bar).
 
 ## Design Principles
 
-1. **La tabla es el instrumento** — la vista de tracks es donde se vive; densidad alta, orden manual sagrado, columnas configurables.
-2. **Drag&drop es el verbo principal** — todo lo que se organiza se arrastra; los targets y los indicadores de drop deben ser obvios.
-3. **Oscuridad de cabina** — negro profundo, contraste alto en texto primario, el acento se gana su lugar (playing, drop targets, foco).
-4. **Sin ceremonia** — acciones directas: click derecho, doble click, Supr, atajos; nada de wizards ni confirmaciones innecesarias (solo para lo destructivo).
-5. **Legacy-first** — nada en la UI puede romper la proyección a iTunes XML/Serato (jerarquía carpeta/playlist, orden manual).
+1. **The table is the instrument** — the track view is where you live; high density, sacred manual order, configurable columns.
+2. **Drag&drop is the main verb** — everything that gets organized is dragged; drop targets and indicators must be obvious.
+3. **Booth darkness** — deep black, high contrast in primary text, the accent earns its place (playing, drop targets, focus).
+4. **No ceremony** — direct actions: right click, double click, Delete, shortcuts; no wizards or unnecessary confirmations (only for destructive actions).
+5. **Legacy-first** — nothing in the UI can break the projection to iTunes XML/Serato (folder/playlist hierarchy, manual order).
 
 ## Accessibility & Inclusion
 
-Contraste WCAG AA mínimo (4.5:1 texto normal) sobre fondos oscuros. Reduced motion respetado en toda animación. Targets de click ≥ 24px. Operación por teclado en tabla (selección, Supr, Ctrl+A) y modales (Enter/Escape).
+Minimum WCAG AA contrast (4.5:1 normal text) on dark backgrounds. Reduced motion respected throughout all animation. Click targets ≥ 24px. Keyboard operation in the table (selection, Delete, Ctrl+A) and modals (Enter/Escape).

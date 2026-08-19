@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/mobile-schema.json",
   "identifier": "mobile",
-  "description": "Permisos solo para Android/iOS (native-audio no compila en desktop)",
+  "description": "Permissions only for Android/iOS (native-audio does not compile on desktop)",
   "windows": ["main"],
   "platforms": ["android", "iOS"],
   "permissions": ["native-audio:default"]

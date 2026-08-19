@@ -1,6 +1,6 @@
-//! Ubicacion de SO + backup + escritura del iTunes Music Library.xml. Todo lo
-//! que sabe de rutas de Windows y de "de quien es este archivo" vive acá,
-//! separado del generador puro en `export_xml`.
+//! OS location + backup + writing of the iTunes Music Library.xml. Everything
+//! that knows about Windows paths and "who owns this file" lives here,
+//! separate from the pure generator in `export_xml`.
 
 use crate::db;
 use crate::export_xml;
@@ -14,22 +14,23 @@ use tauri::AppHandle;
 #[cfg(target_os = "windows")]
 use tauri::Manager;
 
-/// Key que `export_xml::generate_xml` mete en todo archivo que escribe Sway.
-/// Sirve para distinguir "esto lo escribimos nosotros" (no hace falta
-/// backup) de "esto es ajeno" (library original del user, o el archivo
-/// reescrito por el iTunes/Music real desde la ultima vez que escribimos).
+/// Key that `export_xml::generate_xml` puts into every file Sway writes.
+/// Used to distinguish "we wrote this" (no backup needed) from "this is
+/// foreign" (the user's original library, or the file rewritten by real
+/// iTunes/Music since the last time we wrote it).
 const MARKER: &str = "<key>Sway Generator</key>";
 
-/// Ubicacion estandar de la library de iTunes en Windows
-/// (`<Musica>\iTunes\iTunes Music Library.xml`). Solo Windows por ahora:
-/// Fase 0 valido el formato ahi; el Music.app moderno de Mac requiere que el
-/// user habilite "Share Library XML" a mano y la ruta ahi no esta validada.
+/// Standard location of the iTunes library on Windows
+/// (`<Music>\iTunes\iTunes Music Library.xml`). Windows only for now:
+/// Phase 0 validated the format there; the modern Mac Music.app requires the
+/// user to manually enable "Share Library XML" and the path there hasn't
+/// been validated.
 #[cfg(target_os = "windows")]
 pub fn itunes_library_path(app: &AppHandle) -> Result<PathBuf> {
     let dir = app
         .path()
         .audio_dir()
-        .context("no se pudo resolver la carpeta de Musica")?
+        .context("could not resolve the Music folder")?
         .join("iTunes");
     std::fs::create_dir_all(&dir)?;
     Ok(dir.join("iTunes Music Library.xml"))
@@ -37,13 +38,13 @@ pub fn itunes_library_path(app: &AppHandle) -> Result<PathBuf> {
 
 #[cfg(not(target_os = "windows"))]
 pub fn itunes_library_path(_app: &AppHandle) -> Result<PathBuf> {
-    anyhow::bail!("auto-sync a iTunes solo soportado en Windows por ahora")
+    anyhow::bail!("auto-sync to iTunes is only supported on Windows for now")
 }
 
-/// Si `target` existe y NO tiene nuestro marcador, lo renombra en el MISMO
-/// path (misma carpeta que el original) antes de que lo pisemos. Si tiene el
-/// marcador (lo escribimos nosotros la ultima vez) no hace nada — backupear
-/// algo propio no tiene sentido.
+/// If `target` exists and does NOT have our marker, renames it in the SAME
+/// path (same folder as the original) before we overwrite it. If it has the
+/// marker (we wrote it last time) does nothing — backing up our own file
+/// makes no sense.
 fn backup_if_foreign(target: &Path) -> Result<()> {
     if !target.exists() {
         return Ok(());
@@ -58,8 +59,8 @@ fn backup_if_foreign(target: &Path) -> Result<()> {
         .and_then(|s| s.to_str())
         .unwrap_or("iTunes Music Library");
     let ext = target.extension().and_then(|s| s.to_str()).unwrap_or("xml");
-    // Primera vez: nombre estable "original". Si ya existe (iTunes real
-    // volvio a escribir el archivo despues), un timestamp para no pisarlo.
+    // First time: stable "original" name. If it already exists (real iTunes
+    // wrote the file again afterward), a timestamp so it isn't overwritten.
     let preferred = dir.join(format!("{stem}.original.{ext}"));
     let backup_path = if !preferred.exists() {
         preferred
@@ -71,8 +72,8 @@ fn backup_if_foreign(target: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Genera + backupea-si-hace-falta + escribe. Camino compartido por el boton
-/// manual "Sync now" y el auto-sync.
+/// Generates + backs up if needed + writes. Shared path used by the manual
+/// "Sync now" button and by auto-sync.
 pub fn write_now(app: &AppHandle, conn: &Connection, music_dir: &Path) -> Result<()> {
     let xml = export_xml::generate_xml(conn, music_dir)?;
     let target = itunes_library_path(app)?;
@@ -81,17 +82,17 @@ pub fn write_now(app: &AppHandle, conn: &Connection, music_dir: &Path) -> Result
     Ok(())
 }
 
-/// Fire-and-forget: solo escribe si el toggle persistido esta prendido.
-/// Nunca debe interrumpir la accion real del user si la escritura falla.
+/// Fire-and-forget: only writes if the persisted toggle is on.
+/// Must never interrupt the user's real action if the write fails.
 pub fn write_if_enabled(app: &AppHandle, conn: &Connection, music_dir: &Path) {
     match db::get_auto_sync_xml(conn) {
         Ok(true) => {
             if let Err(e) = write_now(app, conn, music_dir) {
-                eprintln!("[xml_sync] auto-sync fallo: {e}");
+                eprintln!("[xml_sync] auto-sync failed: {e}");
             }
         }
         Ok(false) => {}
-        Err(e) => eprintln!("[xml_sync] no se pudo leer el toggle de auto-sync: {e}"),
+        Err(e) => eprintln!("[xml_sync] could not read the auto-sync toggle: {e}"),
     }
 }
 
@@ -120,7 +121,7 @@ mod tests {
         let target = dir.join("iTunes Music Library.xml");
         std::fs::write(&target, "<plist><key>Sway Generator</key><true/></plist>").unwrap();
         backup_if_foreign(&target).unwrap();
-        assert!(target.exists(), "el archivo propio no se debe mover");
+        assert!(target.exists(), "our own file must not be moved");
         assert!(!dir.join("iTunes Music Library.original.xml").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -131,7 +132,7 @@ mod tests {
         let target = dir.join("iTunes Music Library.xml");
         std::fs::write(&target, "<plist><key>Application Version</key><string>12.13.10.3</string></plist>").unwrap();
         backup_if_foreign(&target).unwrap();
-        assert!(!target.exists(), "el original se renombro, no debe seguir en el path original");
+        assert!(!target.exists(), "the original was renamed, it must not still be at the original path");
         let renamed = dir.join("iTunes Music Library.original.xml");
         assert!(renamed.exists());
         let _ = std::fs::remove_dir_all(&dir);
@@ -144,14 +145,15 @@ mod tests {
         std::fs::write(&target, "foreign v1").unwrap();
         backup_if_foreign(&target).unwrap();
         assert!(dir.join("iTunes Music Library.original.xml").exists());
-        // Sway escribe una version propia (con marcador), despues iTunes real
-        // la vuelve a pisar con otra version ajena -> el .original ya existe,
-        // no hay que perder la primera: la segunda va con timestamp.
+        // Sway writes its own version (with marker), then real iTunes
+        // overwrites it again with another foreign version -> the .original
+        // already exists, the first one must not be lost: the second gets a
+        // timestamp.
         std::fs::write(&target, "<key>Sway Generator</key>").unwrap();
-        std::fs::write(&target, "foreign v2 (iTunes real reescribio)").unwrap();
+        std::fs::write(&target, "foreign v2 (real iTunes rewrote it)").unwrap();
         backup_if_foreign(&target).unwrap();
         let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).collect();
-        // .original.xml (v1) + un .bak-<timestamp>.xml (v2) = 2 backups.
+        // .original.xml (v1) + one .bak-<timestamp>.xml (v2) = 2 backups.
         let bak_count = entries
             .iter()
             .filter(|e| e.file_name().to_string_lossy().contains(".bak-"))

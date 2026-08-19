@@ -11,16 +11,16 @@ export interface Track {
   genre: string;
   durationMs: number;
   bpm: number | null;
-  /// El archivo está en este dispositivo. `false` = la fila quedó pero el
-  /// audio se liberó por sync selectiva, o todavía no se bajó.
+  /// The file is on this device. `false` = the row stayed but the audio was
+  /// freed by selective sync, or hasn't been downloaded yet.
   present: boolean;
-  /// Entra en lo que este dispositivo sincroniza. `false` = ninguna de sus
-  /// playlists está marcada; el archivo que ya está no se toca, pero no se va
-  /// a bajar ni a actualizar.
+  /// Part of what this device syncs. `false` = none of its playlists are
+  /// checked; the file that's already here is left alone, but it won't be
+  /// downloaded or updated.
   ///
-  /// Con `present` decide cómo se ve: fuera de scope y con archivo se muestra
-  /// apagado y no suena; fuera de scope y sin archivo se esconde de la vista
-  /// principal.
+  /// Together with `present` it decides how it looks: out of scope with a
+  /// file shows dimmed and doesn't play; out of scope without a file is
+  /// hidden from the main view.
   inScope: boolean;
   uid: string | null;
 }
@@ -29,29 +29,29 @@ export type NodeKind = 'folder' | 'playlist';
 
 export interface PlaylistNode {
   id: number;
-  /// Identidad compartida entre dispositivos (la usa el editor de scope).
+  /// Identity shared across devices (used by the scope editor).
   uid: string | null;
   name: string;
   kind: NodeKind;
   parentId: number | null;
   position: number;
   trackCount: number;
-  /// De cuántos de esos tracks hay archivo acá. Es lo que se ve al abrir una
-  /// playlist desmarcada.
+  /// How many of those tracks have a file here. This is what's shown when
+  /// opening an unchecked playlist.
   presentCount: number;
-  /// Cuántos de esos tracks siguen ocupando lugar **por esta playlist**: hay
-  /// archivo acá y no entran en el scope. Un tema que además está en una
-  /// playlist marcada se ve igual, pero no cuenta acá — su archivo lo sostiene
-  /// la otra, así que ésta no lo va a soltar nunca. Decide si la playlist
-  /// sigue en el árbol, no qué se muestra adentro.
+  /// How many of those tracks still take up space **because of this
+  /// playlist**: there's a file here and they're not in scope. A track that's
+  /// also in a checked playlist still shows, but doesn't count here — its
+  /// file is held by the other one, so this one will never release it.
+  /// Decides whether the playlist stays in the tree, not what shows inside.
   strandedCount: number;
-  /// Entra en lo que este dispositivo sincroniza. `false` = desmarcada: se ve
-  /// apagada mientras siga ocupando lugar y desaparece de la vista principal
-  /// cuando se liberó. En el editor de scope se ve siempre.
+  /// Part of what this device syncs. `false` = unchecked: shows dimmed while
+  /// still taking up space and disappears from the main view once freed. The
+  /// scope editor always shows it.
   inScope: boolean;
 }
 
-// Playlists / folders (jerarquia virtual).
+// Playlists / folders (virtual hierarchy).
 export const listPlaylists = () => invoke<PlaylistNode[]>('list_playlists');
 export const createPlaylist = (name: string, kind: NodeKind, parentId: number | null) =>
   invoke<number>('create_playlist', { name, kind, parentId });
@@ -61,7 +61,7 @@ export const deletePlaylist = (id: number) => invoke<void>('delete_playlist', { 
 export const movePlaylist = (id: number, parentId: number | null, index: number) =>
   invoke<void>('move_playlist', { id, parentId, index });
 
-// Tracks dentro de una playlist.
+// Tracks within a playlist.
 export const playlistTracks = (playlistId: number) =>
   invoke<Track[]>('playlist_tracks', { playlistId });
 export const addTracksToPlaylist = (playlistId: number, trackIds: number[]) =>
@@ -71,23 +71,23 @@ export const removeTracksFromPlaylist = (playlistId: number, trackIds: number[])
 export const reorderPlaylistTracks = (playlistId: number, trackIds: number[], index: number) =>
   invoke<void>('reorder_playlist_tracks', { playlistId, trackIds, index });
 
-// Import: escanea una carpeta, lee tags e inserta tracks. Devuelve cuantos.
+// Import: scans a folder, reads tags and inserts tracks. Returns how many.
 export const importFolder = (folder: string) => invoke<number>('import_folder', { folder });
-// Import de archivos/carpetas sueltos (drop del OS). Devuelve ids de tracks.
+// Import of loose files/folders (OS drop). Returns track ids.
 export const importFiles = (paths: string[]) => invoke<number[]>('import_files', { paths });
-// Import desde un picker (Android/iOS): uri puede ser content:// o file://.
+// Import from a picker (Android/iOS): uri can be content:// or file://.
 export const importFromUri = (uri: string, name: string) =>
   invoke<number>('import_from_uri', { uri, name });
 export const listTracks = () => invoke<Track[]>('list_tracks');
-// Borra de la biblioteca (no toca archivos en disco).
+// Deletes from the library (doesn't touch files on disk).
 export const deleteTracks = (ids: number[]) => invoke<void>('delete_tracks', { ids });
-// Ids de las playlists que contienen el track.
+// Ids of the playlists that contain the track.
 export const trackPlaylists = (id: number) => invoke<number[]>('track_playlists', { id });
 
-// Playback: desktop mueve un Player de Rust (rodio/symphonia) via invoke;
-// Android/iOS no tienen ese Player — el plugin nativo (Media3/ExoPlayer) se
-// controla directo desde JS (ver nativeAudio.ts). Mismo contrato, dos
-// implementaciones, elegidas una sola vez por plataforma.
+// Playback: desktop drives a Rust Player (rodio/symphonia) via invoke;
+// Android/iOS don't have that Player — the native plugin (Media3/ExoPlayer)
+// is controlled directly from JS (see nativeAudio.ts). Same contract, two
+// implementations, chosen once per platform.
 const android = isAndroid();
 
 const desktopPlayTrack = (id: number) => invoke<void>('play_track', { id });
@@ -98,9 +98,9 @@ const desktopSeekTo = (secs: number) => invoke<void>('seek_to', { secs });
 const desktopPlaybackPosition = () => invoke<number>('playback_position');
 const desktopSetVolume = (volume: number) => invoke<void>('set_volume', { volume });
 
-// Android empuja su estado por evento (posicion, fin de track y los botones
-// de la notificacion — ver nativeAudio.ts). Desktop no tiene equivalente: ahi
-// queda null y la app cae al poll de posicion de siempre.
+// Android pushes its state via events (position, track end, and the
+// notification buttons — see nativeAudio.ts). Desktop has no equivalent: it
+// stays null there and the app falls back to the usual position polling.
 export type { PlaybackEvent } from './nativeAudio';
 export const subscribePlayback = android ? nativeAudio.subscribePlayback : null;
 export const setAppVisible = nativeAudio.setAppVisible;
@@ -113,23 +113,23 @@ export const seekTo = android ? nativeAudio.seekTo : desktopSeekTo;
 export const playbackPosition = android ? nativeAudio.playbackPosition : desktopPlaybackPosition;
 export const setVolume = android ? nativeAudio.setVolume : desktopSetVolume;
 
-// Caratula embebida como data-URL (null si el archivo no tiene).
+// Embedded cover art as a data-URL (null if the file has none).
 export const coverThumb = (id: number) => invoke<string | null>('cover_thumb', { id });
-// Abre el explorador del OS mostrando el archivo.
+// Opens the OS file explorer showing the file.
 export const revealTrack = (id: number) => invoke<void>('reveal_track', { id });
 
-// Auto-sync del iTunes Music Library.xml (Fase 2). "Sync now" siempre
-// escribe; syncXmlAfterChange es fire-and-forget y respeta el toggle.
+// Auto-sync of the iTunes Music Library.xml (Phase 2). "Sync now" always
+// writes; syncXmlAfterChange is fire-and-forget and respects the toggle.
 export const exportLibraryXmlNow = () => invoke<void>('export_library_xml_now');
 export const syncXmlAfterChange = () => invoke<void>('sync_xml_after_change');
 export const getAutoSyncXml = () => invoke<boolean>('get_auto_sync_xml');
 export const setAutoSyncXml = (enabled: boolean) => invoke<void>('set_auto_sync_xml', { enabled });
 
-// Sync P2P en la LAN (Fase 5).
+// P2P sync on the LAN (Phase 5).
 
-/// Tiene que coincidir con `discovery::PROTO` del lado Rust. Un peer que
-/// anuncia otra version se lista igual, pero marcado: mejor no ofrecer
-/// sincronizar que fallar a mitad de camino.
+/// Has to match `discovery::PROTO` on the Rust side. A peer announcing a
+/// different version is still listed, but flagged: better not to offer
+/// syncing than to fail halfway through.
 export const SYNC_PROTO = '1';
 
 export interface Peer {
@@ -141,46 +141,46 @@ export interface Peer {
   port: number;
   lastSeen: number;
   paired: boolean;
-  /// Visible en la red ahora mismo. Los pareados se listan igual cuando no
-  /// están: siguen siendo tus dispositivos aunque el celu esté sin wifi.
+  /// Visible on the network right now. Paired devices are still listed when
+  /// they're not: they stay your devices even if the phone has no wifi.
   online: boolean;
 }
 
-/// [uid, name] de este dispositivo. El uid no se puede cambiar (lo
-/// referencian tombstones y clocks); el nombre es solo para reconocerlo desde
-/// el otro lado.
+/// [uid, name] of this device. The uid can't change (tombstones and clocks
+/// reference it); the name is just for recognizing it from the other side.
 export const deviceIdentity = () => invoke<[string, string]>('device_identity');
 export const setDeviceName = (name: string) => invoke<void>('set_device_name', { name });
 export const listPeers = () => invoke<Peer[]>('list_peers');
 
-/// Manda una consulta mDNS nueva. Las respuestas llegan por `peers-changed`,
-/// no en el retorno: los peers contestan cuando contestan.
+/// Sends a fresh mDNS query. Responses arrive via `peers-changed`, not in the
+/// return value: peers answer whenever they answer.
 export const refreshPeers = () => invoke<void>('refresh_peers');
 
-/// Vincula, o si ya está vinculado pide los conteos del otro lado. Vuelve
-/// enseguida: el resultado llega por eventos, porque del otro lado puede
-/// haber una persona tardando en confirmar el código.
+/// Pairs, or if already paired, asks for the other side's counts. Returns
+/// right away: the result arrives via events, because on the other side
+/// someone might take a while to confirm the code.
 export const connectPeer = (uid: string) => invoke<void>('connect_peer', { uid });
 export const confirmPairing = (uid: string, accept: boolean) =>
   invoke<boolean>('confirm_pairing', { uid, accept });
 export const unpairDevice = (uid: string) => invoke<void>('unpair_device', { uid });
 
-/// Vincula con un server de archivo, que vive fuera de la red local y por eso
-/// no aparece solo. Esta sí contesta en la misma llamada —del otro lado no hay
-/// nadie que tarde en decidir— y devuelve el nombre que declaró el server.
+/// Pairs with a file server, which lives outside the local network and so
+/// doesn't show up on its own. This one does answer in the same call — on the
+/// other side there's no one taking their time to decide — and returns the
+/// name the server declared.
 export const pairWithServer = (host: string, port: number, token: string) =>
   invoke<string>('pair_with_server', { host, port, token });
 
-/// Plataforma que declara el server. La lista de dispositivos la usa para no
-/// mostrarlo como algo que debería aparecer en la red.
+/// Platform the server declares. The device list uses it to avoid showing it
+/// as something that should appear on the network.
 export const PLATFORM_SERVER = 'server';
 
-// --- Red medida y batería (Fase 6.7) ---------------------------------------
+// --- Metered network and battery (Phase 6.7) -------------------------------
 
-/// Cada campo puede ser `null`, y eso significa "no se sabe" — que es distinto
-/// de saber que no. Una PC de escritorio devuelve `batteryPct: null` porque no
-/// tiene batería, y con eso la pantalla sabe que no tiene que ofrecer la
-/// opción.
+/// Each field can be `null`, and that means "unknown" — which is different
+/// from knowing it's false. A desktop PC returns `batteryPct: null` because
+/// it has no battery, and with that the screen knows not to offer the
+/// option.
 export interface Conditions {
   metered: boolean | null;
   batteryPct: number | null;
@@ -188,9 +188,9 @@ export interface Conditions {
 }
 
 export interface SyncLimits {
-  /// Sincronizar con el server aunque la red se pague por dato.
+  /// Sync with the server even on a metered connection.
   onMetered: boolean;
-  /// Debajo de este porcentaje no se sincroniza solo. 0 = sin límite.
+  /// Below this percentage, it won't sync on its own. 0 = no limit.
   minBattery: number;
 }
 
@@ -199,12 +199,12 @@ export const syncConditions = () =>
 export const setSyncLimits = (onMetered: boolean, minBattery: number) =>
   invoke<void>('set_sync_limits', { onMetered, minBattery });
 
-/// Lo que la pantalla puede medir y Rust no.
+/// What the screen can measure and Rust can't.
 ///
-/// En Android el estado de la red y la batería sólo se leen desde Java, y el
-/// contexto de JNI no está inicializado del lado de Rust. El webview sí tiene
-/// `navigator.getBattery()` y `navigator.connection`, así que se reportan
-/// desde acá. En desktop no hace falta: Rust los lee directo.
+/// On Android, network and battery state can only be read from Java, and the
+/// JNI context isn't initialized on the Rust side. The webview does have
+/// `navigator.getBattery()` and `navigator.connection`, so they're reported
+/// from here. Not needed on desktop: Rust reads them directly.
 export const reportConditions = (c: Conditions) =>
   invoke<void>('report_conditions', {
     metered: c.metered,
@@ -225,9 +225,9 @@ interface BatteryLike {
   addEventListener?: (type: string, cb: () => void) => void;
 }
 
-/// Mide lo que el webview puede medir. Todo lo que no se puede saber vuelve en
-/// `null`, nunca inventado: frenar un sync por un dato adivinado sería peor
-/// que no frenarlo.
+/// Measures what the webview can measure. Anything unknowable comes back as
+/// `null`, never made up: blocking a sync over a guessed value would be worse
+/// than not blocking it.
 async function measure(): Promise<Conditions> {
   const nav = navigator as Navigator & {
     connection?: NetworkInformationLike;
@@ -237,8 +237,8 @@ async function measure(): Promise<Conditions> {
   let metered: boolean | null = null;
   const conn = nav.connection;
   if (conn) {
-    // `type` es lo único que responde de verdad la pregunta. `saveData` es el
-    // usuario pidiendo ahorrar datos, que a los efectos de esto es lo mismo.
+    // `type` is the only thing that really answers the question. `saveData`
+    // is the user asking to save data, which for these purposes is the same.
     if (conn.type === 'cellular') metered = true;
     else if (conn.type === 'wifi' || conn.type === 'ethernet') metered = false;
     if (conn.saveData) metered = true;
@@ -252,15 +252,15 @@ async function measure(): Promise<Conditions> {
       batteryPct = Math.round(b.level * 100);
       charging = b.charging;
     } catch {
-      // Sin batería o sin permiso: queda en null, que es la respuesta honesta.
+      // No battery or no permission: stays null, which is the honest answer.
     }
   }
   return { metered, batteryPct, charging };
 }
 
-/// Arranca el reporte periódico. Sólo en Android: en desktop Rust lee mejor de
-/// lo que puede leer el webview, y pisarle sus datos con `null` sería perder
-/// información.
+/// Starts periodic reporting. Only on Android: on desktop Rust reads better
+/// than the webview can, and overwriting its data with `null` would lose
+/// information.
 export function watchConditions(): () => void {
   if (!android) return () => {};
   let stopped = false;
@@ -271,8 +271,8 @@ export function watchConditions(): () => void {
       .catch(() => {});
   };
   push();
-  // La red cambia sola (wifi que se cae, datos que entran) y la batería baja
-  // despacio: un minuto alcanza para las dos y no despierta al teléfono.
+  // The network changes on its own (wifi dropping, data kicking in) and the
+  // battery drains slowly: a minute covers both and doesn't wake the phone up.
   const timer = setInterval(push, 60_000);
   return () => {
     stopped = true;
@@ -280,8 +280,8 @@ export function watchConditions(): () => void {
   };
 }
 
-/// Payload del evento `pairing-request`: hay que mostrar `code` y esperar que
-/// el usuario confirme. El mismo código aparece en las dos pantallas.
+/// Payload of the `pairing-request` event: `code` must be shown while waiting
+/// for the user to confirm. The same code appears on both screens.
 export interface PairingRequest {
   uid: string;
   name: string;
@@ -297,8 +297,8 @@ export interface PairingDone {
   error: string | null;
 }
 
-/// Lo que pasaría si se sincronizara ahora (Fase 5.3). Sólo se calcula y se
-/// muestra: nada de esto se ejecuta todavía.
+/// What would happen if syncing now (Phase 5.3). It's only calculated and
+/// shown: none of this executes yet.
 export interface SyncPlan {
   pullFiles: { trackUid: string; hash: string; filename: string; size: number }[];
   pushFiles: { trackUid: string; hash: string; filename: string; size: number }[];
@@ -310,10 +310,10 @@ export interface SyncPlan {
   pushMemberships: number;
   deletesIn: number;
   deletesOut: number;
-  /// Tracks locales que todavía no tienen hash: no participan del plan.
+  /// Local tracks that still don't have a hash: they don't take part in the plan.
   unhashed: number;
-  /// Archivos que no se traen / no se mandan porque quedaron fuera del scope
-  /// selectivo. No son trabajo pendiente: es la sync selectiva funcionando.
+  /// Files not pulled / not pushed because they fell outside the selective
+  /// scope. Not pending work: this is selective sync working as intended.
   outOfScopeIn: number;
   outOfScopeOut: number;
 }
@@ -328,8 +328,8 @@ export interface SyncPlanEvent {
 
 export const previewSync = (uid: string) => invoke<void>('preview_sync', { uid });
 
-/// Ejecuta la transferencia de archivos del plan (Fase 5.4). Sólo archivos:
-/// metadata, playlists y borrados llegan en 5.5/5.6.
+/// Executes the plan's file transfer (Phase 5.4). Files only: metadata,
+/// playlists, and deletions arrive in 5.5/5.6.
 export const syncFiles = (uid: string) => invoke<void>('sync_files', { uid });
 
 export interface SyncProgress {
@@ -349,23 +349,23 @@ export interface SyncDone {
   sent: number;
   failed: number;
   bytes: number;
-  /// Registros de organización aplicados (metadata, playlists, membresías).
+  /// Organization records applied (metadata, playlists, memberships).
   organized: number;
-  /// Lo disparó el sync automático, no el usuario.
+  /// Triggered by auto-sync, not the user.
   auto: boolean;
   error: string | null;
 }
 
-// --- Scope selectivo y espacio (Fase 5.7) -----------------------------------
+// --- Selective scope and space (Phase 5.7) ----------------------------------
 
 export interface Scope {
   /// all | selected
   mode: string;
-  /// Qué hace ESE dispositivo: `both | send | receive | off`. Entre dos, algo
-  /// se mueve sólo si uno manda y el otro recibe.
+  /// What THAT device does: `both | send | receive | off`. Between two
+  /// devices, something only moves if one sends and the other receives.
   direction: string;
-  /// Uids marcados a mano. Lo que cuelga de una carpeta marcada entra sin
-  /// figurar acá — el árbol lo resuelve el backend.
+  /// Uids checked by hand. What hangs off a checked folder is included
+  /// without showing up here — the backend resolves the tree.
   selected: string[];
 }
 
@@ -376,8 +376,8 @@ export const setScopeDirection = (deviceUid: string, direction: string) =>
   invoke<void>('set_scope_direction', { deviceUid, direction });
 export const setScopePlaylist = (deviceUid: string, playlistUid: string, selected: boolean) =>
   invoke<void>('set_scope_playlist', { deviceUid, playlistUid, selected });
-/// Varias filas de una: marcar una carpeta cambia todas las playlists de
-/// adentro, y de a una son N viajes y N commits.
+/// Several rows in one go: checking a folder changes every playlist inside
+/// it, and doing it one by one would be N round trips and N commits.
 export const setScopePlaylists = (deviceUid: string, changes: { uid: string; on: boolean }[]) =>
   invoke<void>('set_scope_playlists', { deviceUid, changes });
 
@@ -385,15 +385,15 @@ export interface Storage {
   libraryBytes: number;
   tracksPresent: number;
   tracksAbsent: number;
-  /// Lo que se puede liberar ahora sin arriesgar nada: fuera de scope y con
-  /// copia confirmada en otro dispositivo vinculado.
+  /// What can be freed right now without risking anything: out of scope and
+  /// with a confirmed copy on another paired device.
   freeableCount: number;
   freeableBytes: number;
 }
 
 export const storageStatus = () => invoke<Storage>('storage_status');
-/// Manda a la papelera (30 días) los archivos fuera de scope. Devuelve
-/// [cuántos, bytes]. No borra nada de la biblioteca: las filas quedan.
+/// Sends files out of scope to the trash (30 days). Returns [how many,
+/// bytes]. Doesn't delete anything from the library: the rows stay.
 export const freeSpace = () => invoke<[number, number]>('free_space');
 
 export interface LogEntry {
@@ -405,8 +405,8 @@ export interface LogEntry {
 export const syncHistory = (uid: string, limit = 20) =>
   invoke<LogEntry[]>('sync_history', { uid, limit });
 
-/// Sync automático: al cambiar algo acá, cuando aparece un dispositivo, y
-/// cada tanto como red de contención.
+/// Auto-sync: when something changes here, when a device shows up, and every
+/// so often as a safety net.
 export const getAutoSyncP2p = () => invoke<boolean>('get_auto_sync_p2p');
 export const setAutoSyncP2p = (enabled: boolean) =>
   invoke<void>('set_auto_sync_p2p', { enabled });

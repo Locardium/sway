@@ -1,39 +1,39 @@
-//! Enterarse de lo que cambió en otro dispositivo, sin preguntar cada tanto.
+//! Find out what changed on another device, without asking every so often.
 //!
-//! El sync lo maneja siempre el que llama: el que atiende responde pedidos y
-//! no decide nada. Entre dos dispositivos con pantalla eso alcanza, porque el
-//! que cambia algo llama al otro y se lo empuja. Contra el server de archivo
-//! no: los cambios hechos afuera de casa llegan al server enseguida, pero el
-//! server no llama a nadie —y no puede, que es justo el punto de que los
-//! dispositivos marquen hacia él y no al revés—, así que la PC no se entera
-//! hasta su próxima pasada periódica. Diez minutos, y hasta veinticinco si la
-//! red local todavía estaba ocupada.
+//! Sync is always driven by the caller: the one being asked responds to
+//! requests and decides nothing. Between two devices with a screen that's
+//! enough, because whoever changes something calls the other and pushes it.
+//! Against the file server it's not: changes made away from home reach the
+//! server right away, but the server doesn't call anyone —and it can't, which
+//! is exactly the point of devices dialing out to it and not the other way
+//! around—, so the PC doesn't find out until its next periodic pass. Ten
+//! minutes, and up to twenty-five if the local network was still busy.
 //!
-//! Acá se invierte quién espera sin invertir quién llama: la app abre una
-//! conexión contra el server, manda `Watch` y se queda escuchando. El server
-//! contesta `Changed` recién cuando su biblioteca se mueve. La conexión sale
-//! de adentro hacia afuera, como todas las demás, así que sigue sin hacer
-//! falta que nadie sea alcanzable desde internet.
+//! Here who waits gets flipped without flipping who calls: the app opens a
+//! connection to the server, sends `Watch` and sits there listening. The
+//! server answers `Changed` only when its library moves. The connection goes
+//! from the inside out, like all the others, so it still doesn't require
+//! anyone to be reachable from the internet.
 //!
-//! **Por qué esperar y no preguntar:** una conexión parada no cuesta nada
-//! mientras no pasa nada. Preguntar cada 10 segundos —que es lo que ya hacía
-//! el sondeo de alcanzabilidad— son 8640 conexiones por día contra el server,
-//! y en un celular cada una despierta la radio. Mientras esta conexión está
-//! viva el sondeo saltea a ese dispositivo (ver `discovery::probe_once`): la
-//! conexión misma es la prueba de que está alcanzable, y una mejor que un
-//! connect, porque se corta en el momento en que deja de estarlo. Lo único que
-//! viaja en reposo es un latido cada 45 segundos.
+//! **Why wait instead of asking:** an idle connection costs nothing while
+//! nothing happens. Asking every 10 seconds —which is what the reachability
+//! poll already did— is 8640 connections per day against the server, and on a
+//! phone each one wakes up the radio. While this connection is alive the poll
+//! skips that device (see `discovery::probe_once`): the connection itself is
+//! proof that it's reachable, and a better one than a connect, because it
+//! drops the instant it stops being reachable. The only thing that travels at
+//! rest is a heartbeat every 45 seconds.
 //!
-//! **En un celular esta conexión se cae todo el tiempo, y está bien.** Cambia
-//! de wifi a datos, la corta el NAT de la operadora, Doze la mata con la
-//! pantalla apagada: medido contra el server de casa, vivía entre 17 y 47
-//! segundos por vez. Por eso lo que importa no es que dure, sino que
-//! **reconectar sea barato**: se manda la última revisión conocida y el otro
-//! lado contesta si de verdad nos perdimos algo. Un corte sale un handshake,
-//! no un inventario entero. Y por eso también la espera creciente sólo crece
-//! cuando no se puede ni conectar — un corte después de un rato conectado no
-//! es un server caído, y tratarlo como tal degrada el aviso instantáneo a un
-//! sondeo de cinco minutos justo donde más falta hace.
+//! **On a phone this connection drops all the time, and that's fine.** It
+//! switches from wifi to data, the carrier's NAT cuts it, Doze kills it with
+//! the screen off: measured against the home server, it lived between 17 and
+//! 47 seconds at a time. That's why what matters isn't that it lasts, but
+//! that **reconnecting be cheap**: the last known revision is sent and the
+//! other side answers whether we truly missed something. A drop costs a
+//! handshake, not a whole inventory. And that's also why the growing wait
+//! only grows when it can't even connect — a drop after a while connected is
+//! not a downed server, and treating it as one degrades the instant notice
+//! to a five-minute poll right where it's needed most.
 
 use crate::AppState;
 use std::collections::HashSet;
@@ -42,139 +42,139 @@ use std::time::Duration;
 use sway_core::wire::{Mark, Msg};
 use tauri::{AppHandle, Emitter, Manager};
 
-/// Cuánto se espera un latido antes de dar la conexión por muerta.
+/// How long to wait for a heartbeat before declaring the connection dead.
 ///
-/// Dos latidos y pico (`engine::WATCH_HEARTBEAT` son 45 segundos): perder uno
-/// suelto no puede costar una reconexión, pero tampoco se puede pasar un rato
-/// largo creyendo que hay alguien del otro lado. Es también el techo de lo que
-/// un dispositivo caído puede seguir apareciendo verde, porque mientras dura
-/// esta conexión el sondeo no lo toca.
+/// A bit over two heartbeats (`engine::WATCH_HEARTBEAT` is 45 seconds):
+/// missing one alone can't cost a reconnection, but you also can't spend a
+/// long while believing there's someone on the other end. It's also the
+/// ceiling on how long a downed device can keep showing up green, because
+/// while this connection lasts the poll doesn't touch it.
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Espera después de un corte, y su techo. Se duplica en cada intento
-/// fallido: un server apagado no merece un intento cada quince segundos toda
-/// la noche.
+/// Wait after a drop, and its ceiling. Doubles on every failed attempt: a
+/// server that's off doesn't deserve an attempt every fifteen seconds all
+/// night long.
 const RETRY_MIN: Duration = Duration::from_secs(15);
 const RETRY_MAX: Duration = Duration::from_secs(5 * 60);
 
-/// Lo que se espera cuando la conexión venía andando y se cortó.
+/// What's waited when the connection was running fine and then dropped.
 ///
-/// Corto a propósito, y es lo que se nota al reiniciar el server: la conexión
-/// muere en el acto (el cierre llega como un corte, no como un silencio), así
-/// que lo único que separa al dispositivo de volver a estar al día es esta
-/// espera. Con quince segundos, reiniciar el server se sentía como que
-/// "tardaba en darse cuenta".
+/// Short on purpose, and it's what you notice when the server restarts: the
+/// connection dies on the spot (the shutdown arrives as a drop, not as
+/// silence), so the only thing keeping the device from being up to date
+/// again is this wait. With fifteen seconds, restarting the server felt like
+/// it "took a while to notice."
 ///
-/// No hace falta más: si el corte se repite, la conexión igual vive decenas de
-/// segundos entre uno y otro, así que esto no es un bucle de reintentos — es
-/// un handshake cada tanto. Y si se cae en el acto, de eso se ocupa el conteo
-/// de caídas instantáneas.
+/// No more is needed: if the drop repeats, the connection still lives for
+/// tens of seconds between one and the next, so this isn't a retry loop —
+/// it's an occasional handshake. And if it drops on the spot, that's handled
+/// by the instant-drop count.
 const RETRY_AFTER_DROP: Duration = Duration::from_secs(3);
 
-/// Cada cuánto se vuelve a mirar si el sync sigue en pausa (apagado, red
-/// medida, poca batería). No es un error: es una decisión que puede cambiar.
+/// How often it checks whether sync is still on hold (off, metered network,
+/// low battery). Not an error: it's a decision that can change.
 const HOLD_RETRY: Duration = Duration::from_secs(60);
 
-/// Cuánto se espera cuando el otro lado no sabe reportar cambios (un server
-/// anterior a esto). No se arregla reintentando; sólo se vuelve a probar cada
-/// tanto por si lo actualizaron.
+/// How long to wait when the other side doesn't know how to report changes
+/// (a server older than this feature). It's not fixed by retrying; it's just
+/// probed again every so often in case it got updated.
 const UNSUPPORTED_RETRY: Duration = Duration::from_secs(60 * 60);
 
-/// Una espera que dura menos que esto no fue una espera: la conexión se abrió
-/// y se cayó en el acto.
+/// A wait shorter than this wasn't a wait: the connection opened and dropped
+/// on the spot.
 ///
-/// Un segundo, no cinco. Lo que esto tiene que reconocer es un server que lee
-/// el pedido, no lo entiende y corta: eso pasa en menos de lo que tarda una
-/// ida y vuelta, no en segundos. Cinco segundos era un umbral prestado del
-/// aire, y todo lo que cae adentro sin ser un server viejo —un corte de red
-/// justo después de conectar, un handover del celular— se contaba como una
-/// prueba en contra del otro lado.
+/// One second, not five. What this needs to recognize is a server that reads
+/// the request, doesn't understand it, and disconnects: that happens in less
+/// than a round trip, not in seconds. Five seconds was a threshold borrowed
+/// from thin air, and everything that fell inside it without being an old
+/// server —a network drop right after connecting, a phone handover— was
+/// counted as evidence against the other side.
 const TOO_QUICK: Duration = Duration::from_secs(1);
 
-/// Cuántas caídas instantáneas seguidas alcanzan para dejar de insistir.
+/// How many instant drops in a row are enough to stop insisting.
 ///
-/// Un server viejo no contesta `Watch`: acepta la conexión, no entiende el
-/// pedido y corta. Eso no se arregla reintentando, así que después de unas
-/// cuantas se deja de insistir y se vuelve a la pasada periódica.
+/// An old server doesn't answer `Watch`: it accepts the connection, doesn't
+/// understand the request, and disconnects. That's not fixed by retrying, so
+/// after a few it stops insisting and falls back to the periodic pass.
 ///
-/// **Sólo cuenta con la sesión ya abierta.** Un server apagado también falla
-/// al instante, y ése sí se arregla solo en cuanto vuelva: contarlo acá era
-/// dejar de mirar durante una hora cada vez que se reinicia el server, que es
-/// justo cuando uno está esperando ver si anda.
+/// **Only counts within the already-open session.** A powered-off server also
+/// fails instantly, and that one fixes itself as soon as it's back: counting
+/// it here meant an hour of not watching every time the server restarts,
+/// which is exactly when you're waiting to see if it's working.
 ///
-/// Cinco y no tres porque el precio de los dos errores cambió. Equivocarse
-/// para el otro lado cuesta poco: desde que reconectar es un handshake y no un
-/// inventario, insistir contra un server viejo es barato. Equivocarse para
-/// este lado cuesta una hora de no mirar nada, en silencio — que es la forma
-/// de falla que este archivo ya tuvo dos veces.
+/// Five and not three because the cost of the two mistakes changed. Being
+/// wrong about the other side costs little: since reconnecting is a
+/// handshake and not an inventory, insisting against an old server is cheap.
+/// Being wrong about this side costs an hour of watching nothing, silently —
+/// which is the kind of failure this file already had twice.
 const TOO_QUICK_LIMIT: u32 = 5;
 
-/// Cada cuánto se revisa si apareció un server nuevo para mirar.
+/// How often it checks whether a new server showed up to watch.
 const SUPERVISE: Duration = Duration::from_secs(30);
 
-/// Cada cuánto se compara la biblioteca entera aunque nadie haya avisado nada.
+/// How often the whole library is compared even if nobody announced anything.
 ///
-/// Los avisos alcanzan mientras funcionen. Esto es para cuando no: un bug en
-/// la cuenta de revisiones, un cambio que se aplicó a medias, cualquier cosa
-/// que deje las dos bibliotecas distintas sin que nadie se entere. Sin esta
-/// pasada, una divergencia así no se arregla nunca — porque el aviso que
-/// tendría que dispararla es justamente el que falló.
+/// Notifications are enough while they work. This is for when they don't: a
+/// bug in the revision count, a change that applied only halfway, anything
+/// that leaves the two libraries different without anyone finding out.
+/// Without this pass, such a divergence never gets fixed — because the
+/// notification that should trigger it is exactly the one that failed.
 ///
-/// Seis horas y no diez minutos porque la comparación no es gratis: es el
-/// inventario entero, y con 5000 temas son 4 MB. Cuatro veces por día es una
-/// red de contención; cada diez minutos era el gasto principal de la app.
+/// Six hours and not ten minutes because the comparison isn't free: it's the
+/// whole inventory, and with 5000 tracks that's 4 MB. Four times a day is a
+/// safety net; every ten minutes was the app's main expense.
 const FULL_CHECK: Duration = Duration::from_secs(6 * 60 * 60);
 
-/// Quién está siendo vigilado, y el timbre para despertarlo.
+/// Who's being watched, and the bell to wake them up.
 ///
-/// `threads` y `live` son dos listas y no una porque contestan preguntas
-/// distintas: la primera evita lanzar dos watchers para el mismo dispositivo y
-/// lo sigue teniendo mientras reconecta; la segunda es sólo mientras la
-/// conexión está realmente abierta, que es lo que le dice al sondeo que no se
-/// moleste. Confundirlas dejaría un dispositivo caído pintado de verde durante
-/// todo el backoff.
+/// `threads` and `live` are two lists and not one because they answer
+/// different questions: the first avoids launching two watchers for the same
+/// device and keeps tracking it while it reconnects; the second is only
+/// while the connection is actually open, which is what tells the poll not
+/// to bother. Confusing them would leave a downed device painted green
+/// through the whole backoff.
 #[derive(Default)]
 pub struct Watchers {
     threads: Mutex<HashSet<String>>,
     live: Mutex<HashSet<String>>,
-    /// Timbres pendientes, por uid.
+    /// Pending bells, by uid.
     ///
-    /// El server no puede avisar que se prendió —no sabe llegar a un
-    /// dispositivo detrás de un NAT, y que marquen ellos es justamente lo que
-    /// hace que esto ande sin abrir nada—. Pero el sondeo de alcanzabilidad sí
-    /// lo ve, cada diez segundos. Sin este timbre esa noticia no le llegaba a
-    /// nadie: el watcher seguía durmiendo su espera creciente, hasta cinco
-    /// minutos, contra un server que ya estaba levantado.
+    /// The server can't announce that it turned on —it doesn't know how to
+    /// reach a device behind a NAT, and having them dial out is exactly what
+    /// makes this work without opening anything—. But the reachability poll
+    /// does see it, every ten seconds. Without this bell that news reached
+    /// nobody: the watcher kept sleeping its growing wait, up to five
+    /// minutes, against a server that was already up.
     ring: Mutex<HashSet<String>>,
     bell: Condvar,
 }
 
 impl Watchers {
-    /// ¿Hay una conexión de espera abierta contra este dispositivo?
+    /// Is there an open waiting connection against this device?
     pub fn is_live(&self, uid: &str) -> bool {
         self.live.lock().map(|l| l.contains(uid)).unwrap_or(false)
     }
 
-    /// ¿Hay un watcher a cargo de este dispositivo, aunque esté esperando?
+    /// Is there a watcher in charge of this device, even if it's waiting?
     pub fn is_watched(&self, uid: &str) -> bool {
         self.threads.lock().map(|t| t.contains(uid)).unwrap_or(false)
     }
 
-    /// "Dejá de esperar, probá ahora." Lo toca quien se entera de algo que el
-    /// watcher no puede ver desde donde está: que el server volvió, que
-    /// cambiaron las condiciones de red.
+    /// "Stop waiting, try now." Touched by whoever finds out something the
+    /// watcher can't see from where it is: that the server is back, that
+    /// network conditions changed.
     pub fn wake(&self, uid: &str) {
         if let Ok(mut ring) = self.ring.lock() {
             ring.insert(uid.to_string());
         }
-        // A todos: cada watcher mira si el timbre era para él.
+        // To everyone: each watcher checks whether the bell was for it.
         self.bell.notify_all();
     }
 
-    /// Espera hasta `max`, o hasta que toquen el timbre para este uid.
+    /// Waits up to `max`, or until the bell rings for this uid.
     ///
-    /// Un timbre que llegó mientras el watcher estaba ocupado no se pierde:
-    /// queda anotado y hace que la próxima espera termine en el acto.
+    /// A bell that arrived while the watcher was busy isn't lost: it stays
+    /// recorded and makes the next wait end immediately.
     fn nap(&self, uid: &str, max: Duration) {
         let Ok(ring) = self.ring.lock() else {
             std::thread::sleep(max);
@@ -189,23 +189,24 @@ impl Watchers {
     }
 }
 
-/// Qué hacer después de que una espera terminó mal.
+/// What to do after a wait ended badly.
 #[derive(Debug, PartialEq)]
 enum Next {
-    /// Volver a intentar dentro de tanto.
+    /// Retry after this long.
     Retry(Duration),
-    /// Dejar de insistir por un rato largo: esto no se arregla reintentando.
+    /// Stop insisting for a long while: this isn't fixed by retrying.
     StandDown,
 }
 
-/// Cuánto esperar antes del próximo intento, y cuántas veces seguidas se cayó
-/// en el acto.
+/// How long to wait before the next attempt, and how many times in a row it
+/// dropped instantly.
 ///
-/// Vive aparte del bucle para poder probarlo. No es ceremonia: los dos bugs
-/// que tuvo esto vivían exactamente acá —la espera que crecía hasta cinco
-/// minutos y no volvía nunca, y el server apagado contado como server viejo—
-/// y ninguno de los dos se ve leyendo el código. Se ven mirando un log veinte
-/// minutos después, cuando ya te comiste el problema.
+/// Lives apart from the loop so it can be tested. It's not ceremony: the two
+/// bugs this ever had lived exactly here —the wait that grew to five minutes
+/// and never came back down, and the powered-off server counted as an old
+/// server— and neither is visible by reading the code. They're seen by
+/// staring at a log twenty minutes later, once you've already eaten the
+/// problem.
 #[derive(Debug)]
 struct Backoff {
     wait: Duration,
@@ -217,28 +218,28 @@ impl Backoff {
         Backoff { wait: RETRY_MIN, quick_failures: 0 }
     }
 
-    /// Llegó un aviso: todo lo anterior deja de contar.
+    /// A notification arrived: everything before it stops counting.
     fn news(&mut self) {
         *self = Backoff::new();
     }
 
-    /// No se pudo abrir la sesión. La espera crece, pero no se saca ninguna
-    /// conclusión sobre el otro lado: un server apagado vuelve.
+    /// Couldn't open the session. The wait grows, but no conclusion is drawn
+    /// about the other side: a powered-off server comes back.
     fn unreachable(&mut self) -> Duration {
         let now = self.wait;
         self.wait = (self.wait * 2).min(RETRY_MAX);
         now
     }
 
-    /// La sesión existió y se cortó después de `alive`.
+    /// The session existed and dropped after `alive`.
     fn dropped(&mut self, alive: Duration) -> Next {
         if alive >= TOO_QUICK {
-            // Se conectó, esperó un rato y recién ahí se cayó: el otro lado
-            // está bien, lo que falla es la red de acá —o el server se acaba
-            // de reiniciar—. Reintentar rápido: dejar crecer la espera acá
-            // convierte el aviso instantáneo en un sondeo de cinco minutos,
-            // justo en el dispositivo donde más falta hace y sin que nada lo
-            // reporte.
+            // It connected, waited a while, and only then dropped: the other
+            // side is fine, what's failing is the network on this end —or
+            // the server just restarted—. Retry quickly: letting the wait
+            // grow here turns the instant notice into a five-minute poll,
+            // right on the device that needs it most and with nothing
+            // reporting it.
             *self = Backoff::new();
             return Next::Retry(RETRY_AFTER_DROP);
         }
@@ -253,42 +254,42 @@ impl Backoff {
     }
 }
 
-/// Qué terminó la espera.
+/// What ended the wait.
 enum Outcome {
-    /// El otro lado avisó que hay novedades.
+    /// The other side announced there's news.
     Changed,
-    /// Habla el protocolo pero no sabe avisar.
+    /// Speaks the protocol but doesn't know how to announce.
     Unsupported,
-    /// No se pudo ni abrir la sesión: apagado, sin red, reiniciándose.
+    /// Couldn't even open the session: off, no network, restarting.
     ///
-    /// Va separado del resto porque desde afuera se ve igual que un server
-    /// que corta la conexión apenas la abre —los dos fallan en el acto—, y
-    /// significan cosas opuestas: uno se arregla solo en cuanto vuelva, el
-    /// otro no se arregla nunca. Confundirlos hacía que reiniciar el server
-    /// dejara a los dispositivos sin mirar durante una hora.
+    /// Kept separate from the rest because from the outside it looks the
+    /// same as a server that drops the connection as soon as it opens —both
+    /// fail instantly—, and they mean opposite things: one fixes itself as
+    /// soon as it's back, the other never fixes itself. Confusing them left
+    /// devices not watching for an hour every time the server restarted.
     Unreachable,
 }
 
-/// Mantiene un watcher por cada server vinculado.
+/// Keeps one watcher per paired server.
 ///
-/// Es un hilo supervisor y no una lista fija porque los servers se agregan y
-/// se sacan con la app abierta: vincular uno tiene que empezar a mirarlo sin
-/// reiniciar.
+/// It's a supervisor thread and not a fixed list because servers get added
+/// and removed while the app is open: pairing one has to start watching it
+/// without a restart.
 pub fn spawn(handle: AppHandle) {
     std::thread::spawn(move || {
-        // Sin server vinculado no hay nada que mirar, y eso se ve igual que
-        // "esto no arrancó". Decirlo una vez ahorra buscar el problema del
-        // lado equivocado.
+        // With no paired server there's nothing to watch, and that looks
+        // exactly like "this never started." Saying it once saves looking
+        // for the problem in the wrong place.
         let mut announced = false;
         loop {
-            let nuevos = servers_to_watch(&handle);
+            let new_ones = servers_to_watch(&handle);
             if !announced {
                 announced = true;
-                if nuevos.is_empty() {
+                if new_ones.is_empty() {
                     log::info!("[watch] no server paired: nothing to watch");
                 }
             }
-            for uid in nuevos {
+            for uid in new_ones {
                 let handle = handle.clone();
                 std::thread::spawn(move || watcher(handle, uid));
             }
@@ -297,9 +298,9 @@ pub fn spawn(handle: AppHandle) {
     });
 }
 
-/// Servers vinculados que todavía no tienen watcher. Los marca en el acto:
-/// entre listarlos y arrancar el hilo hay una ventana en la que el supervisor
-/// podría volver a pasar y lanzar un segundo watcher para el mismo.
+/// Paired servers that don't have a watcher yet. Marks them on the spot:
+/// between listing them and starting the thread there's a window where the
+/// supervisor could pass again and launch a second watcher for the same one.
 fn servers_to_watch(handle: &AppHandle) -> Vec<String> {
     let state = handle.state::<AppState>();
     let uids: Vec<String> = {
@@ -323,27 +324,27 @@ fn servers_to_watch(handle: &AppHandle) -> Vec<String> {
         .collect()
 }
 
-/// Un watcher: espera novedades, sincroniza cuando le avisan, y vuelta a
-/// empezar.
+/// A watcher: waits for news, syncs when told, and starts over.
 ///
-/// Vive hasta que el dispositivo deja de estar vinculado. Un corte de red no
-/// lo termina —reconecta, que es barato— porque terminar dejaría al server sin
-/// nadie mirándolo hasta que el supervisor lo notara.
+/// Lives until the device is no longer paired. A network drop doesn't end
+/// it —it reconnects, which is cheap— because ending it would leave the
+/// server unwatched until the supervisor noticed.
 fn watcher(handle: AppHandle, uid: String) {
     log::info!("[watch] watching {uid} for changes");
     let mut retry = Backoff::new();
-    // Hasta dónde sabemos de la biblioteca del otro. Sale de la base, así que
-    // sobrevive al cierre de la app: si nada cambió mientras no estábamos, el
-    // server lo dice y no se compara ni se transfiere nada. `None` = no
-    // sabemos nada de él, y entonces hay que comparar todo.
+    // How much we know about the other side's library. Comes from the
+    // database, so it survives the app closing: if nothing changed while we
+    // were away, the server says so and nothing gets compared or
+    // transferred. `None` = we know nothing about it, so everything has to
+    // be compared.
     let mut since: Option<Mark> = stored_mark(&handle, &uid);
     let mut saved = since;
-    // Cuándo fue la última comparación completa.
+    // When the last full comparison happened.
     let mut last_full = std::time::Instant::now();
-    // Último motivo de pausa anunciado. Sin esto habría que elegir entre una
-    // línea por minuto o ninguna, y ninguna es peor: un watcher en pausa se ve
-    // exactamente igual que uno que nunca arrancó, que es justo lo que uno
-    // está tratando de distinguir cuando el sync "no anda".
+    // Last announced pause reason. Without this you'd have to choose between
+    // a line per minute or none, and none is worse: a paused watcher looks
+    // exactly like one that never started, which is exactly what you're
+    // trying to tell apart when sync "isn't working."
     let mut paused: Option<String> = None;
     while still_paired(&handle, &uid) {
         if let Some(reason) = on_hold(&handle) {
@@ -358,19 +359,20 @@ fn watcher(handle: AppHandle, uid: String) {
             log::info!("[watch] watching {uid} again ({before} no longer applies)");
         }
 
-        // Ponerse al día ANTES de esperar, pero sólo la primera vez: mientras
-        // la app estuvo cerrada pudo cambiar cualquier cosa, y quedarse
-        // esperando novedades nuevas no traería nada de eso. De ahí en más
-        // alcanza con la referencia — el otro lado sabe si nos perdimos algo y
-        // lo contesta en el acto.
+        // Catch up BEFORE waiting, but only the first time: while the app
+        // was closed anything could have changed, and just waiting for new
+        // news wouldn't bring any of that. From then on the reference is
+        // enough — the other side knows if we missed something and answers
+        // right away.
         //
-        // La diferencia se nota en un celular, donde la conexión no llega al
-        // minuto (cambia de wifi a datos, la corta el NAT de la operadora) y
-        // se reconecta todo el tiempo. Arrastrar una puesta al día en cada
-        // reconexión salía más caro que la pasada periódica que esto venía a
-        // mejorar: un inventario entero por internet cada medio minuto.
-        // Cada tanto se compara todo aunque nadie haya avisado nada: los
-        // avisos alcanzan mientras funcionen, y esto es para cuando no.
+        // The difference shows on a phone, where the connection doesn't
+        // reach a minute (switches from wifi to data, the carrier's NAT cuts
+        // it) and reconnects all the time. Dragging a catch-up into every
+        // reconnection would cost more than the periodic pass this was
+        // meant to improve on: a whole inventory over the internet every
+        // half minute. Every so often everything is compared even if nobody
+        // announced anything: notifications are enough while they work, and
+        // this is for when they don't.
         if since.is_some() && last_full.elapsed() >= FULL_CHECK {
             log::info!("[watch] full check with {uid}");
             since = None;
@@ -382,9 +384,10 @@ fn watcher(handle: AppHandle, uid: String) {
 
         let started = std::time::Instant::now();
         let outcome = wait_for_news(&handle, &uid, &mut since);
-        // Antes de mirar cómo terminó: lo que se haya aprendido de la marca
-        // vale igual, y sobre todo si terminó mal. Es justo la conexión que se
-        // cortó la que no tiene que hacernos empezar de cero la próxima vez.
+        // Before looking at how it ended: whatever was learned about the
+        // mark counts either way, and especially if it ended badly. It's
+        // exactly the connection that dropped that must not make us start
+        // over from scratch next time.
         if since != saved {
             remember_mark(&handle, &uid, since);
             saved = since;
@@ -400,10 +403,10 @@ fn watcher(handle: AppHandle, uid: String) {
                 since = None;
                 nap(&handle, &uid, UNSUPPORTED_RETRY);
             }
-            // Todavía no está: se espera y se vuelve a probar, sin sacar
-            // ninguna conclusión sobre lo que el otro lado sabe hacer. La
-            // espera puede ser larga, pero la corta el sondeo en cuanto vea
-            // que el server volvió.
+            // Not there yet: wait and try again, without drawing any
+            // conclusion about what the other side knows how to do. The
+            // wait can be long, but the poll cuts it short as soon as it
+            // sees the server is back.
             Ok(Outcome::Unreachable) => {
                 let d = retry.unreachable();
                 nap(&handle, &uid, d);
@@ -416,8 +419,8 @@ fn watcher(handle: AppHandle, uid: String) {
                         log::info!(
                             "[watch] {uid} keeps dropping the connection right away; leaving it to the periodic sync"
                         );
-                        // La referencia no sirve de nada después de una hora
-                        // sin mirar: al volver hay que ponerse al día igual.
+                        // The reference is useless after an hour without
+                        // watching: on return you have to catch up anyway.
                         since = None;
                         nap(&handle, &uid, UNSUPPORTED_RETRY);
                     }
@@ -431,32 +434,33 @@ fn watcher(handle: AppHandle, uid: String) {
     }
 }
 
-/// Una corrida contra el server, esperando a que termine.
+/// One run against the server, waiting for it to finish.
 ///
-/// La red local primero, por lo mismo que en `autosync`: bajar por la LAN lo
-/// que después el server ya no va a tener que mandar es la diferencia entre un
-/// segundo y varios minutos de internet.
+/// The local network first, for the same reason as in `autosync`: pulling
+/// over the LAN what the server would otherwise have to send is the
+/// difference between one second and several minutes over the internet.
 fn catch_up(handle: &AppHandle, uid: &str) {
     let lan = crate::autosync::lan_peers(handle);
     crate::pairing::wait_until_idle(handle, &lan, crate::autosync::LAN_FIRST_MAX_WAIT);
     crate::pairing::run_sync_blocking(handle.clone(), uid.to_string(), true);
 }
 
-/// Abre la conexión, pide que le avisen, y se queda escuchando.
+/// Opens the connection, asks to be notified, and sits listening.
 ///
-/// `since` entra con la última revisión conocida —con ella el otro lado
-/// contesta en el acto si nos perdimos algo, en vez de parkear como si nada
-/// hubiera pasado mientras estuvimos desconectados— y **sale actualizada**,
-/// incluso si esto termina en error: es lo que hace que la reconexión
-/// pregunte por lo último y no por lo de cuando se conectó.
+/// `since` comes in with the last known revision —with it the other side
+/// answers right away whether we missed anything, instead of parking as if
+/// nothing happened while we were disconnected— and **comes out updated**,
+/// even if this ends in an error: that's what makes reconnection ask about
+/// the latest and not about what it was when it connected.
 fn wait_for_news(
     handle: &AppHandle,
     uid: &str,
     since: &mut Option<Mark>,
 ) -> anyhow::Result<Outcome> {
-    // No poder conectar no es un error de la espera: es que todavía no hay
-    // con quién esperar. Se distingue acá y no más arriba porque es el único
-    // punto que sabe si la sesión llegó a existir.
+    // Not being able to connect isn't a waiting error: it's that there's
+    // nobody to wait with yet. Distinguished here and not further up because
+    // this is the only point that knows whether the session ever came to
+    // exist.
     let mut sess = match crate::pairing::open_session_with(handle, uid, READ_TIMEOUT) {
         Ok(sess) => sess,
         Err(e) => {
@@ -468,10 +472,10 @@ fn wait_for_news(
     let _live = Live::start(handle, uid);
     loop {
         match sess.recv()? {
-            // Sigue vivo y sin novedades. La referencia se mueve igual: si
-            // esto se corta después de horas parkeado, la reconexión pregunta
-            // por lo último y no por lo de ayer — que en un server con mucho
-            // movimiento se contesta con un "puede ser" y un sync de más.
+            // Still alive with no news. The reference moves anyway: if this
+            // drops after hours of parking, reconnection asks about the
+            // latest and not about yesterday's — which on a busy server gets
+            // answered with a "maybe" and an extra sync.
             Msg::Ping { mark } => {
                 *since = Some(mark);
                 continue;
@@ -489,9 +493,8 @@ fn wait_for_news(
     }
 }
 
-/// Mientras existe, este dispositivo cuenta como conectado y el sondeo de
-/// alcanzabilidad lo saltea. Se deshace solo cuando la conexión termina, pase
-/// lo que pase.
+/// While it exists, this device counts as connected and the reachability
+/// poll skips it. It's dropped only when the connection ends, no matter how.
 struct Live(AppHandle, String);
 
 impl Live {
@@ -510,34 +513,35 @@ impl Live {
 impl Drop for Live {
     fn drop(&mut self) {
         let state = self.0.state::<AppState>();
-        // A variable propia y no como binding del `if let`: ahí sería un
-        // temporario que vive más que `state`, y no compila.
+        // Its own variable and not an `if let` binding: there it would be a
+        // temporary that outlives `state`, and it wouldn't compile.
         let live = state.watchers.live.lock();
         if let Ok(mut live) = live {
             live.remove(&self.1);
         }
-        // Que el dispositivo esté caído no lo decide esto: el corte puede ser
-        // de un segundo. El sondeo lo vuelve a tomar apenas sale de la lista y
-        // dice la verdad en menos de quince segundos.
+        // Whether the device is down isn't decided here: the drop can be a
+        // one-second blip. The poll picks it back up as soon as it leaves
+        // the list and tells the truth within fifteen seconds.
     }
 }
 
-/// Duerme, pero con el oído puesto: cualquiera que se entere de que este
-/// dispositivo volvió a estar al alcance corta la espera.
+/// Sleeps, but with an ear open: anyone who finds out this device is back
+/// within reach cuts the wait short.
 fn nap(handle: &AppHandle, uid: &str, max: Duration) {
     handle.state::<AppState>().watchers.nap(uid, max);
 }
 
-/// La marca guardada de este dispositivo.
+/// This device's stored mark.
 fn stored_mark(handle: &AppHandle, uid: &str) -> Option<Mark> {
     let state = handle.state::<AppState>();
     let conn = state.db.lock().ok()?;
     sway_core::pairing::watch_mark(&conn, uid)
 }
 
-/// La guarda. Sólo cuando cambió: el latido llega cada 45 segundos y casi
-/// siempre trae la misma marca, y no vale tomar el lock de la base —el mismo
-/// que necesita la pantalla— para escribir lo que ya estaba.
+/// Saves it. Only when it changed: the heartbeat arrives every 45 seconds
+/// and almost always carries the same mark, and it's not worth taking the
+/// database lock —the same one the screen needs— to write what was already
+/// there.
 fn remember_mark(handle: &AppHandle, uid: &str, mark: Option<Mark>) {
     let state = handle.state::<AppState>();
     let Ok(conn) = state.db.lock() else { return };
@@ -549,17 +553,17 @@ fn remember_mark(handle: &AppHandle, uid: &str, mark: Option<Mark>) {
 fn still_paired(handle: &AppHandle, uid: &str) -> bool {
     let state = handle.state::<AppState>();
     let Ok(conn) = state.db.lock() else {
-        return true; // no se pudo mirar: no es motivo para abandonar
+        return true; // couldn't check: not a reason to give up
     };
     conn.query_row("SELECT 1 FROM devices WHERE uid = ?1", [uid], |_| Ok(()))
         .is_ok()
 }
 
-/// Por qué no corresponde tener una conexión abierta ahora mismo.
+/// Why there shouldn't be an open connection right now.
 ///
-/// Si el sync automático está apagado, o la red se paga por dato y el usuario
-/// pidió no gastarla, que le avisen no sirve de nada: el aviso terminaría en
-/// un sync que no se va a hacer.
+/// If automatic sync is off, or the network is metered and the user asked
+/// not to spend it, being notified is useless: the notification would end
+/// in a sync that isn't going to happen.
 fn on_hold(handle: &AppHandle) -> Option<String> {
     let state = handle.state::<AppState>();
     let conditions = crate::power::current(&state);
@@ -575,29 +579,30 @@ fn on_hold(handle: &AppHandle) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// Un server apagado vuelve. La espera crece para no martillarlo, pero
-    /// nunca se concluye que el server no sabe avisar: contarlo así dejaba a
-    /// los dispositivos sin mirar durante una hora cada vez que se reinicia el
-    /// server — o sea justo cuando uno está esperando ver si anda.
+    /// A powered-off server comes back. The wait grows to avoid hammering
+    /// it, but it's never concluded that the server can't announce: counting
+    /// it that way left devices not watching for an hour every time the
+    /// server restarted — exactly when you're waiting to see if it works.
     #[test]
-    fn un_server_apagado_nunca_se_da_por_perdido() {
+    fn a_powered_off_server_is_never_given_up_on() {
         let mut b = Backoff::new();
         for _ in 0..20 {
             let d = b.unreachable();
             assert!(d <= RETRY_MAX);
         }
-        assert_eq!(b.wait, RETRY_MAX, "la espera tiene techo");
-        assert_eq!(b.quick_failures, 0, "no puede acumular nada");
+        assert_eq!(b.wait, RETRY_MAX, "the wait has a ceiling");
+        assert_eq!(b.quick_failures, 0, "it can't accumulate anything");
     }
 
-    /// Una conexión que vivió un rato y se cayó es la red de acá, no un server
-    /// caído: se reintenta rápido. Sin esto, un celular que pierde la conexión
-    /// cada cuarenta segundos terminaba mirando cada cinco minutos, y el aviso
-    /// instantáneo se degradaba solo a un sondeo peor que el tick periódico.
+    /// A connection that lived a while and dropped is the network here, not
+    /// a downed server: it retries quickly. Without this, a phone that loses
+    /// the connection every forty seconds ended up watching every five
+    /// minutes, and the instant notice degraded on its own into a poll worse
+    /// than the periodic tick.
     #[test]
-    fn una_conexion_que_vivio_no_hace_crecer_la_espera() {
+    fn a_connection_that_was_alive_does_not_grow_the_wait() {
         let mut b = Backoff::new();
-        // Antes de esto, varias caídas dejaban la espera arriba.
+        // Before this, several drops left the wait high.
         b.unreachable();
         b.unreachable();
         assert!(b.wait > RETRY_MIN);
@@ -605,53 +610,54 @@ mod tests {
         assert_eq!(
             b.dropped(Duration::from_secs(45)),
             Next::Retry(RETRY_AFTER_DROP),
-            "una conexión que venía andando se reintenta enseguida"
+            "a connection that was running fine retries right away"
         );
-        assert_eq!(b.wait, RETRY_MIN, "una conexión sana resetea la espera");
+        assert_eq!(b.wait, RETRY_MIN, "a healthy connection resets the wait");
     }
 
-    /// Una sesión que se abre y se cae en el acto, una y otra vez, es un
-    /// server que no entiende el pedido. Eso no se arregla reintentando.
+    /// A session that opens and drops on the spot, over and over, is a
+    /// server that doesn't understand the request. That's not fixed by
+    /// retrying.
     #[test]
-    fn caerse_en_el_acto_varias_veces_es_dejar_de_insistir() {
+    fn dropping_on_the_spot_several_times_means_stand_down() {
         let mut b = Backoff::new();
-        let instante = Duration::from_millis(20);
+        let instant = Duration::from_millis(20);
         for _ in 0..TOO_QUICK_LIMIT - 1 {
-            assert!(matches!(b.dropped(instante), Next::Retry(_)));
+            assert!(matches!(b.dropped(instant), Next::Retry(_)));
         }
-        assert_eq!(b.dropped(instante), Next::StandDown);
+        assert_eq!(b.dropped(instant), Next::StandDown);
     }
 
-    /// Y una caída instantánea suelta, entre conexiones sanas, no cuenta para
-    /// eso: se vuelve a empezar de cero.
+    /// And a single instant drop, among healthy connections, doesn't count
+    /// toward that: it starts over from zero.
     #[test]
-    fn una_caida_instantanea_suelta_no_acumula() {
+    fn a_lone_instant_drop_does_not_accumulate() {
         let mut b = Backoff::new();
         b.dropped(Duration::from_millis(20));
         b.dropped(Duration::from_secs(45));
         assert_eq!(b.quick_failures, 0);
-        // Y desde ahí hacen falta todas de nuevo.
-        let instante = Duration::from_millis(20);
+        // And from there all of them are needed again.
+        let instant = Duration::from_millis(20);
         for _ in 0..TOO_QUICK_LIMIT - 1 {
-            assert!(matches!(b.dropped(instante), Next::Retry(_)));
+            assert!(matches!(b.dropped(instant), Next::Retry(_)));
         }
-        assert_eq!(b.dropped(instante), Next::StandDown);
+        assert_eq!(b.dropped(instant), Next::StandDown);
     }
 
-    /// Sin timbre, la espera dura lo que tiene que durar.
+    /// Without a bell, the wait lasts as long as it has to.
     #[test]
-    fn sin_timbre_la_espera_se_cumple() {
+    fn without_a_bell_the_wait_runs_its_course() {
         let w = Watchers::default();
         let start = std::time::Instant::now();
         w.nap("srv", Duration::from_millis(120));
         assert!(start.elapsed() >= Duration::from_millis(100));
     }
 
-    /// El sondeo ve que el server volvió y corta la espera. Sin esto, un
-    /// server que se prende queda sin nadie mirándolo hasta cinco minutos,
-    /// porque el server no puede avisar y el watcher está durmiendo.
+    /// The poll sees the server is back and cuts the wait short. Without
+    /// this, a server that turns on stays unwatched for up to five minutes,
+    /// because the server can't announce and the watcher is asleep.
     #[test]
-    fn el_timbre_corta_la_espera() {
+    fn the_bell_cuts_the_wait_short() {
         let w = std::sync::Arc::new(Watchers::default());
         let bg = std::sync::Arc::clone(&w);
         std::thread::spawn(move || {
@@ -660,14 +666,14 @@ mod tests {
         });
         let start = std::time::Instant::now();
         w.nap("srv", Duration::from_secs(10));
-        assert!(start.elapsed() < Duration::from_secs(5), "durmió el plazo entero");
+        assert!(start.elapsed() < Duration::from_secs(5), "slept the full duration");
     }
 
-    /// Un timbre que llega mientras el watcher está ocupado no se pierde: la
-    /// próxima espera termina en el acto. Si no, la noticia de que el server
-    /// volvió se cae justo cuando llega en el peor momento.
+    /// A bell that arrives while the watcher is busy isn't lost: the next
+    /// wait ends immediately. Otherwise the news that the server is back
+    /// gets dropped right when it arrives at the worst moment.
     #[test]
-    fn un_timbre_anterior_a_la_espera_no_se_pierde() {
+    fn a_bell_rung_before_the_wait_is_not_lost() {
         let w = Watchers::default();
         w.wake("srv");
         let start = std::time::Instant::now();
@@ -675,20 +681,21 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(5));
     }
 
-    /// Y es para uno solo: el timbre de un dispositivo no despierta al watcher
-    /// de otro.
+    /// And it's for one only: one device's bell doesn't wake another's
+    /// watcher.
     #[test]
-    fn el_timbre_es_para_uno_solo() {
+    fn the_bell_is_for_one_only() {
         let w = Watchers::default();
-        w.wake("otro");
+        w.wake("other");
         let start = std::time::Instant::now();
         w.nap("srv", Duration::from_millis(120));
         assert!(start.elapsed() >= Duration::from_millis(100));
     }
 
-    /// Un aviso borra todo lo anterior: la conexión funcionó de punta a punta.
+    /// A notification erases everything before it: the connection worked
+    /// end to end.
     #[test]
-    fn un_aviso_deja_todo_como_al_principio() {
+    fn a_notification_resets_everything_to_the_start() {
         let mut b = Backoff::new();
         b.unreachable();
         b.dropped(Duration::from_millis(20));

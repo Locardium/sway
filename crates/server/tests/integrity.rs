@@ -1,13 +1,14 @@
-//! Integridad del archivo: un server y dispositivos de verdad, sobre loopback.
+//! Archive integrity: a real server and real devices, over loopback.
 //!
-//! La Fase 5.8 dejó dos motores sincronizando en un mismo proceso para poder
-//! probar lo que a mano no se prueba. Esto suma el tercer participante, que es
-//! el que trae los casos nuevos: un dispositivo que perdió todo y lo recupera,
-//! y —el que no puede fallar nunca— un dispositivo vacío que **no** convence al
-//! archivo de que no había nada.
+//! Phase 5.8 left two engines syncing within a single process so cases that
+//! can't be tested by hand could be tested. This adds the third participant,
+//! which is the one that brings the new cases: a device that lost everything
+//! and recovers it, and —the one that can never fail— an empty device that
+//! does **not** convince the archive that there was nothing.
 //!
-//! Nada está simulado: el server es el mismo binario, con su socket, su base y
-//! su hilo; los dispositivos hablan el protocolo real y mueven bytes reales.
+//! Nothing is simulated: the server is the real binary, with its socket, its
+//! database and its thread; the devices speak the real protocol and move
+//! real bytes.
 
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -20,9 +21,9 @@ use sway_core::{db, pairing};
 use sway_server::host::ServerHost;
 use sway_server::serve::{self, Server};
 
-const TOKEN: &str = "token-de-la-suite";
-/// Ninguna prueba mueve más de unos kilobytes: si algo se queda esperando es
-/// un bug, y vale más un error que una suite colgada.
+const TOKEN: &str = "suite-token";
+/// No test moves more than a few kilobytes: if something is left waiting it's
+/// a bug, and an error is worth more than a suite that hangs.
 const IO_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn tmpdir(tag: &str) -> PathBuf {
@@ -45,11 +46,11 @@ fn mem_db() -> Connection {
 }
 
 // ---------------------------------------------------------------------------
-// Un dispositivo
+// A device
 // ---------------------------------------------------------------------------
 
-/// Lo mínimo que el motor necesita de un dispositivo real: una base y una
-/// carpeta donde viven los archivos.
+/// The bare minimum the engine needs from a real device: a database and a
+/// folder where the files live.
 struct Device {
     dir: PathBuf,
     db: Mutex<Connection>,
@@ -78,7 +79,7 @@ impl Device {
         self.with_db(|c| Ok(db::this_device_uid(c)?)).unwrap()
     }
 
-    /// Un track con archivo real en la carpeta gestionada.
+    /// A track with a real file in the managed folder.
     fn add_track(&self, filename: &str, bytes: &[u8], title: &str) -> String {
         let path = self.dir.join(filename);
         std::fs::write(&path, bytes).unwrap();
@@ -92,7 +93,7 @@ impl Device {
             &hash,
             bytes.len() as u64,
             title,
-            "Artista",
+            "Artist",
             "",
             "",
             0,
@@ -128,7 +129,7 @@ impl Device {
         audio_files_in(&self.dir)
     }
 
-    /// Se vincula con el server y queda listo para sincronizar.
+    /// Pairs with the server and is ready to sync.
     fn pair_with(&self, addr: &str, server_uid: &str) {
         let mut sess = self.connect(addr);
         let (uid, name) = self.with_db(|c| Ok(pairing::me(c)?)).unwrap();
@@ -140,8 +141,8 @@ impl Device {
         })
         .unwrap();
         match sess.recv().unwrap() {
-            Msg::PairResponse { accepted } => assert!(accepted, "el server no aceptó el token"),
-            other => panic!("se esperaba PairResponse, llegó {other:?}"),
+            Msg::PairResponse { accepted } => assert!(accepted, "the server rejected the token"),
+            other => panic!("expected PairResponse, got {other:?}"),
         }
         sess.send(&Msg::PairAck { accepted: true }).unwrap();
         let key = match sess.recv().unwrap() {
@@ -151,8 +152,8 @@ impl Device {
         sess.send(&self.hello()).unwrap();
         drop(sess);
 
-        // Del lado del dispositivo el vínculo también se guarda: sin la fila,
-        // sincronizar después sería hablar con un desconocido.
+        // The pairing is also saved on the device's side: without the row,
+        // syncing afterward would be talking to a stranger.
         self.with_db(|c| pairing::store_device(c, server_uid, "Server", "server", &key))
             .unwrap();
     }
@@ -182,12 +183,12 @@ impl Device {
         Session::connect(stream, &private).unwrap()
     }
 
-    /// Se queda esperando a que el server avise de novedades, como hace el
-    /// watcher de la app. Devuelve la revisión que le contestaron, o `None` si
-    /// se acabó la paciencia sin que nadie dijera nada.
+    /// Waits for the server to announce news, the way the app's watcher does.
+    /// Returns the revision it was told about, or `None` if patience ran out
+    /// with nobody saying anything.
     ///
-    /// `since` es la última revisión conocida, igual que en el watcher: con
-    /// ella el server contesta en el acto lo que pasó mientras no estábamos.
+    /// `since` is the last known revision, just like in the watcher: with it
+    /// the server answers right away with what happened while we were away.
     fn wait_for_news(
         &self,
         addr: &str,
@@ -205,14 +206,14 @@ impl Device {
             match sess.recv() {
                 Ok(Msg::Ping { .. }) => continue,
                 Ok(Msg::Changed { mark }) => return Some(mark),
-                // Se acabó el plazo de lectura: nadie avisó nada.
+                // The read deadline ran out: nobody announced anything.
                 Err(_) => return None,
-                Ok(other) => panic!("respuesta inesperada a Watch: {other:?}"),
+                Ok(other) => panic!("unexpected response to Watch: {other:?}"),
             }
         }
     }
 
-    /// Una corrida completa contra el server, igual que la que dispara la app.
+    /// A full run against the server, the same one the app triggers.
     fn sync_with(&self, addr: &str, server_uid: &str) -> engine::SyncResult {
         let mut sess = self.connect(addr);
         sess.send(&self.hello()).unwrap();
@@ -233,7 +234,7 @@ impl Drop for Device {
 }
 
 // ---------------------------------------------------------------------------
-// El server
+// The server
 // ---------------------------------------------------------------------------
 
 struct Archive {
@@ -246,10 +247,10 @@ impl Archive {
     fn start(tag: &str) -> Self {
         let dir = tmpdir(tag);
         let conn = mem_db();
-        db::set_device_name(&conn, "Server de prueba").unwrap();
+        db::set_device_name(&conn, "Test Server").unwrap();
         let host = Arc::new(ServerHost::new(conn, dir.clone()));
-        // Igual que el binario: el archivo se declara queriendo todo, en las
-        // dos direcciones.
+        // Same as the binary: the archive declares itself as wanting
+        // everything, in both directions.
         host.with_db(|c| {
             let me = db::this_device_uid(c)?;
             sway_core::scope::set_mode(c, &me, sway_core::scope::Mode::All)?;
@@ -278,7 +279,7 @@ impl Archive {
             .unwrap()
     }
 
-    /// Hasta dónde va el archivo ahora mismo.
+    /// How far the archive has gotten right now.
     fn mark(&self) -> Mark {
         self.server.host.revision().unwrap()
     }
@@ -301,7 +302,7 @@ impl Archive {
         audio_files_in(&self.dir)
     }
 
-    /// Lo que quedó en la papelera del server.
+    /// What's left in the server's trash.
     fn trashed(&self) -> Vec<Vec<u8>> {
         std::fs::read_dir(sway_core::trash::trash_dir(&self.dir))
             .map(|rd| {
@@ -337,225 +338,229 @@ fn audio(n: usize, seed: u8) -> Vec<u8> {
 
 // ---------------------------------------------------------------------------
 
-/// El caso base: lo que hay en un dispositivo termina en el archivo, con los
-/// bytes, no sólo con la fila.
+/// The base case: what a device has ends up in the archive, bytes and all,
+/// not just the row.
 #[test]
-fn lo_que_tiene_un_dispositivo_termina_en_el_archivo() {
+fn what_a_device_has_ends_up_in_the_archive() {
     let srv = Archive::start("sube");
     let pc = Device::new("sube-pc");
     let srv_uid = srv.uid();
     pc.pair_with(&srv.addr, &srv_uid);
 
-    pc.add_track("uno.flac", &audio(4096, 1), "Uno");
-    pc.add_track("dos.flac", &audio(4096, 2), "Dos");
+    pc.add_track("uno.flac", &audio(4096, 1), "One");
+    pc.add_track("dos.flac", &audio(4096, 2), "Two");
     let r = pc.sync_with(&srv.addr, &srv_uid);
 
-    assert_eq!(r.sent, 2, "los dos archivos tenían que viajar");
-    assert_eq!(srv.track_titles(), vec!["Dos", "Uno"]);
-    assert_eq!(srv.audio_files().len(), 2, "y quedar en disco, no sólo en la base");
+    assert_eq!(r.sent, 2, "both files had to travel");
+    assert_eq!(srv.track_titles(), vec!["One", "Two"]);
+    assert_eq!(srv.audio_files().len(), 2, "and end up on disk, not just in the database");
 }
 
-/// Sincronizar de nuevo sin haber tocado nada no mueve un byte. Converger una
-/// vez es fácil; quedarse quieto después es lo que se rompe.
+/// Syncing again without touching anything moves zero bytes. Converging once
+/// is easy; staying still afterward is what tends to break.
 #[test]
-fn la_segunda_corrida_no_mueve_nada() {
+fn the_second_run_moves_nothing() {
     let srv = Archive::start("quieto");
     let pc = Device::new("quieto-pc");
     let srv_uid = srv.uid();
     pc.pair_with(&srv.addr, &srv_uid);
-    pc.add_track("uno.flac", &audio(2048, 3), "Uno");
+    pc.add_track("uno.flac", &audio(2048, 3), "One");
 
     pc.sync_with(&srv.addr, &srv_uid);
-    let segunda = pc.sync_with(&srv.addr, &srv_uid);
+    let second = pc.sync_with(&srv.addr, &srv_uid);
 
-    assert_eq!((segunda.sent, segunda.received), (0, 0));
-    assert_eq!(segunda.organized, 0, "tampoco organización");
+    assert_eq!((second.sent, second.received), (0, 0));
+    assert_eq!(second.organized, 0, "no organization either");
 }
 
-/// Reinstalaste la app y no queda nada. Te vinculás de nuevo con el token y
-/// sincronizás: vuelve todo, archivos incluidos.
+/// You reinstalled the app and nothing's left. You pair again with the token
+/// and sync: everything comes back, files included.
 #[test]
-fn un_dispositivo_que_perdio_todo_lo_recupera_del_archivo() {
+fn a_device_that_lost_everything_recovers_it_from_the_archive() {
     let srv = Archive::start("restore");
     let srv_uid = srv.uid();
 
-    let viejo = Device::new("restore-viejo");
-    viejo.pair_with(&srv.addr, &srv_uid);
-    viejo.add_track("uno.flac", &audio(4096, 11), "Uno");
-    viejo.add_track("dos.flac", &audio(4096, 12), "Dos");
-    viejo.sync_with(&srv.addr, &srv_uid);
-    drop(viejo);
+    let old = Device::new("restore-viejo");
+    old.pair_with(&srv.addr, &srv_uid);
+    old.add_track("uno.flac", &audio(4096, 11), "One");
+    old.add_track("dos.flac", &audio(4096, 12), "Two");
+    old.sync_with(&srv.addr, &srv_uid);
+    drop(old);
 
-    // La reinstalación es un dispositivo nuevo: identidad nueva, base vacía,
-    // carpeta vacía. Lo único que trae es el token.
-    let nuevo = Device::new("restore-nuevo");
-    nuevo.pair_with(&srv.addr, &srv_uid);
-    assert!(nuevo.track_uids().is_empty());
+    // The reinstall is a new device: new identity, empty database, empty
+    // folder. The only thing it brings is the token.
+    let new = Device::new("restore-nuevo");
+    new.pair_with(&srv.addr, &srv_uid);
+    assert!(new.track_uids().is_empty());
 
-    let r = nuevo.sync_with(&srv.addr, &srv_uid);
+    let r = new.sync_with(&srv.addr, &srv_uid);
 
-    assert_eq!(r.received, 2, "tenía que bajar los dos");
-    assert_eq!(nuevo.track_uids().len(), 2);
-    assert_eq!(nuevo.audio_files().len(), 2, "los archivos, no sólo las filas");
+    assert_eq!(r.received, 2, "both had to come down");
+    assert_eq!(new.track_uids().len(), 2);
+    assert_eq!(new.audio_files().len(), 2, "the files, not just the rows");
 }
 
-/// **El que no puede fallar nunca.**
+/// **The one that can never fail.**
 ///
-/// Un dispositivo con la base vacía no tiene tombstones: no está diciendo que
-/// algo se borró, está diciendo que no sabe nada. Si el archivo interpretara
-/// ese silencio como un borrado, un teléfono reseteado se llevaría puesta la
-/// única copia que quedaba de todo.
+/// A device with an empty database has no tombstones: it's not saying
+/// something was deleted, it's saying it doesn't know anything. If the
+/// archive interpreted that silence as a deletion, a factory-reset phone
+/// would take down the only remaining copy of everything with it.
 #[test]
-fn un_dispositivo_vacio_no_borra_nada_del_archivo() {
+fn an_empty_device_deletes_nothing_from_the_archive() {
     let srv = Archive::start("vacio");
     let srv_uid = srv.uid();
 
     let pc = Device::new("vacio-pc");
     pc.pair_with(&srv.addr, &srv_uid);
-    pc.add_track("uno.flac", &audio(4096, 21), "Uno");
-    pc.add_track("dos.flac", &audio(4096, 22), "Dos");
+    pc.add_track("uno.flac", &audio(4096, 21), "One");
+    pc.add_track("dos.flac", &audio(4096, 22), "Two");
     pc.sync_with(&srv.addr, &srv_uid);
     assert_eq!(srv.track_titles().len(), 2);
 
-    let reseteado = Device::new("vacio-reset");
-    reseteado.pair_with(&srv.addr, &srv_uid);
-    reseteado.sync_with(&srv.addr, &srv_uid);
+    let reset = Device::new("vacio-reset");
+    reset.pair_with(&srv.addr, &srv_uid);
+    reset.sync_with(&srv.addr, &srv_uid);
 
-    assert_eq!(srv.track_titles(), vec!["Dos", "Uno"], "el archivo se vació");
-    assert_eq!(srv.audio_files().len(), 2, "y perdió los archivos");
+    assert_eq!(srv.track_titles(), vec!["One", "Two"], "the archive got emptied");
+    assert_eq!(srv.audio_files().len(), 2, "and lost the files");
 
-    // Y el que quedó vivo tampoco pierde nada cuando vuelve a sincronizar.
+    // And the one that stayed alive loses nothing either the next time it syncs.
     pc.sync_with(&srv.addr, &srv_uid);
     assert_eq!(pc.track_uids().len(), 2);
     assert_eq!(pc.audio_files().len(), 2);
 }
 
-/// Un borrado sí viaja, y en el server el archivo no se destruye: queda en su
-/// papelera, que es lo único que hace rescatable un borrado por error.
+/// A deletion does travel, and on the server the file isn't destroyed: it
+/// stays in its trash, which is the only thing that makes an accidental
+/// deletion recoverable.
 #[test]
-fn un_borrado_viaja_pero_el_archivo_queda_en_la_papelera_del_server() {
+fn a_deletion_travels_but_the_file_stays_in_the_servers_trash() {
     let srv = Archive::start("borrado");
     let srv_uid = srv.uid();
     let pc = Device::new("borrado-pc");
     pc.pair_with(&srv.addr, &srv_uid);
 
     let bytes = audio(4096, 31);
-    let uid = pc.add_track("uno.flac", &bytes, "Uno");
-    pc.add_track("dos.flac", &audio(4096, 32), "Dos");
+    let uid = pc.add_track("uno.flac", &bytes, "One");
+    pc.add_track("dos.flac", &audio(4096, 32), "Two");
     pc.sync_with(&srv.addr, &srv_uid);
     assert_eq!(srv.track_titles().len(), 2);
 
     pc.delete_track(&uid);
     pc.sync_with(&srv.addr, &srv_uid);
 
-    assert_eq!(srv.track_titles(), vec!["Dos"], "el borrado tenía que llegar");
+    assert_eq!(srv.track_titles(), vec!["Two"], "the deletion had to arrive");
     assert_eq!(srv.audio_files().len(), 1);
     assert!(
         srv.trashed().contains(&bytes),
-        "pero los bytes siguen rescatables en la papelera del server"
+        "but the bytes are still recoverable in the server's trash"
     );
 
-    // Y no resucita en la vuelta siguiente.
-    let otra = pc.sync_with(&srv.addr, &srv_uid);
-    assert_eq!((otra.sent, otra.received), (0, 0));
+    // And it doesn't come back on the next pass.
+    let another = pc.sync_with(&srv.addr, &srv_uid);
+    assert_eq!((another.sent, another.received), (0, 0));
     assert_eq!(pc.track_uids().len(), 1);
 }
 
-/// Dos dispositivos que nunca se ven entre sí, cada uno en su red: el archivo
-/// es lo que los conecta. Es el caso que motivó toda la fase.
+/// Two devices that never see each other, each on its own network: the
+/// archive is what connects them. This is the case that motivated the whole
+/// phase.
 #[test]
-fn dos_dispositivos_que_no_se_ven_se_sincronizan_por_el_archivo() {
+fn two_devices_that_cannot_see_each_other_sync_through_the_archive() {
     let srv = Archive::start("puente");
     let srv_uid = srv.uid();
 
-    let celu = Device::new("puente-celu");
-    celu.pair_with(&srv.addr, &srv_uid);
-    celu.add_track("de-afuera.flac", &audio(4096, 41), "De afuera");
-    celu.sync_with(&srv.addr, &srv_uid);
+    let phone = Device::new("puente-celu");
+    phone.pair_with(&srv.addr, &srv_uid);
+    phone.add_track("de-afuera.flac", &audio(4096, 41), "From outside");
+    phone.sync_with(&srv.addr, &srv_uid);
 
-    // El otro estaba apagado mientras todo esto pasaba.
+    // The other one was off while all this was happening.
     let pc = Device::new("puente-pc");
     pc.pair_with(&srv.addr, &srv_uid);
     let r = pc.sync_with(&srv.addr, &srv_uid);
 
     assert_eq!(r.received, 1);
-    assert_eq!(pc.audio_files().len(), 1, "llegó sin que el celu estuviera");
+    assert_eq!(pc.audio_files().len(), 1, "it arrived without the phone being present");
 }
 
-/// El agujero de la Fase 6: un cambio hecho afuera de casa llega al server
-/// enseguida, pero el otro dispositivo no tiene forma de enterarse porque el
-/// server no llama a nadie. Con `Watch` sí: el que espera se entera en cuanto
-/// el archivo se mueve, sin preguntar cada tanto.
+/// Phase 6's gap: a change made away from home reaches the server right
+/// away, but the other device has no way of finding out because the server
+/// doesn't call anyone. With `Watch` it does: whoever's waiting finds out as
+/// soon as the archive moves, without polling periodically.
 #[test]
-fn un_cambio_de_otro_dispositivo_despierta_al_que_espera() {
+fn a_change_from_another_device_wakes_up_the_one_waiting() {
     let srv = Archive::start("aviso");
     let srv_uid = srv.uid();
 
     let pc = Device::new("aviso-pc");
     pc.pair_with(&srv.addr, &srv_uid);
-    // Al día antes de ponerse a esperar: es lo que hace el watcher, y sin eso
-    // la prueba no distinguiría un aviso de una puesta al día.
+    // Up to date before starting to wait: that's what the watcher does, and
+    // without it the test wouldn't be able to tell a notification apart from
+    // an initial catch-up.
     pc.sync_with(&srv.addr, &srv_uid);
 
-    let celu = Device::new("aviso-celu");
-    celu.pair_with(&srv.addr, &srv_uid);
-    celu.add_track("recien-importado.flac", &audio(4096, 77), "Recién importado");
+    let phone = Device::new("aviso-celu");
+    phone.pair_with(&srv.addr, &srv_uid);
+    phone.add_track("recien-importado.flac", &audio(4096, 77), "Just imported");
 
     std::thread::scope(|s| {
-        let esperando = s.spawn(|| pc.wait_for_news(&srv.addr, IO_TIMEOUT, None));
-        // Que la espera esté realmente parada antes de mover nada: si el
-        // cambio pasara primero, el aviso llegaría igual pero la prueba no
-        // estaría probando lo que dice.
+        let waiting = s.spawn(|| pc.wait_for_news(&srv.addr, IO_TIMEOUT, None));
+        // Make sure the wait is actually parked before moving anything: if
+        // the change happened first, the notification would still arrive but
+        // the test wouldn't be testing what it claims to.
         std::thread::sleep(Duration::from_millis(300));
-        celu.sync_with(&srv.addr, &srv_uid);
+        phone.sync_with(&srv.addr, &srv_uid);
         assert!(
-            esperando.join().unwrap().is_some(),
-            "el server no avisó de un cambio que acababa de aplicar"
+            waiting.join().unwrap().is_some(),
+            "the server did not announce a change it had just applied"
         );
     });
 
-    // Y lo que sigue al aviso es un sync normal, que trae el track.
+    // And what follows the notification is a normal sync, which brings the track.
     let r = pc.sync_with(&srv.addr, &srv_uid);
     assert_eq!(r.received, 1);
 }
 
-/// Sin novedades no se avisa nada: un aviso de más manda a todos los
-/// dispositivos a sincronizar por gusto, y contra el archivo eso es un
-/// manifiesto entero por internet.
+/// With no news, nothing gets announced: one notification too many sends
+/// every device off to sync for no reason, and against the archive that's a
+/// whole manifest over the internet.
 #[test]
-fn sin_cambios_nadie_avisa_nada() {
+fn with_no_changes_nobody_gets_notified() {
     let srv = Archive::start("silencio");
     let srv_uid = srv.uid();
 
     let pc = Device::new("silencio-pc");
     pc.pair_with(&srv.addr, &srv_uid);
-    pc.add_track("propio.flac", &audio(2048, 12), "Propio");
-    // El sync de este mismo dispositivo mueve la biblioteca del archivo, pero
-    // no es novedad PARA ÉL: cuando se pone a esperar, lo suyo ya está del
-    // lado viejo de la comparación.
+    pc.add_track("propio.flac", &audio(2048, 12), "Own track");
+    // This device's own sync moves the archive's library, but it's not news
+    // TO IT: by the time it starts waiting, its own change is already on the
+    // old side of the comparison.
     pc.sync_with(&srv.addr, &srv_uid);
 
-    // Corta la espera esta prueba, no el server: del otro lado se queda
-    // esperando hasta que pase algo, que es justamente lo que se prueba.
-    const PACIENCIA: Duration = Duration::from_millis(1500);
+    // This test cuts the wait short, not the server: on the other end it
+    // stays waiting until something happens, which is exactly what's being
+    // tested.
+    const PATIENCE: Duration = Duration::from_millis(1500);
     let start = std::time::Instant::now();
     assert!(
-        pc.wait_for_news(&srv.addr, PACIENCIA, None).is_none(),
-        "avisó de un cambio que no existe"
+        pc.wait_for_news(&srv.addr, PATIENCE, None).is_none(),
+        "announced a change that does not exist"
     );
     assert!(
-        start.elapsed() >= PACIENCIA,
-        "cortó antes de tiempo: no llegó a esperar"
+        start.elapsed() >= PATIENCE,
+        "cut short instead of actually waiting"
     );
 }
 
-/// Lo que empuja un dispositivo no es novedad PARA ESE dispositivo, ni siquiera
-/// si estaba esperando cuando lo empujó. Sin esta distinción, cada vez que
-/// importás algo el aviso te vuelve de rebote y salís a sincronizar contra el
-/// archivo lo que acabás de mandar: un manifiesto entero por internet, por
-/// gusto, en cada cambio local.
+/// What a device pushes isn't news TO THAT DEVICE, even if it was waiting
+/// when it pushed it. Without this distinction, every time you import
+/// something the notification bounces back to you and you go sync against
+/// the archive the very thing you just sent: a whole manifest over the
+/// internet, for nothing, on every local change.
 #[test]
-fn lo_que_empuja_uno_mismo_no_lo_despierta() {
+fn what_a_device_pushes_itself_does_not_wake_it_up() {
     let srv = Archive::start("rebote");
     let srv_uid = srv.uid();
 
@@ -563,32 +568,32 @@ fn lo_que_empuja_uno_mismo_no_lo_despierta() {
     pc.pair_with(&srv.addr, &srv_uid);
     pc.sync_with(&srv.addr, &srv_uid);
 
-    const PACIENCIA: Duration = Duration::from_millis(1500);
+    const PATIENCE: Duration = Duration::from_millis(1500);
     std::thread::scope(|s| {
-        let esperando = s.spawn(|| pc.wait_for_news(&srv.addr, PACIENCIA, None));
+        let waiting = s.spawn(|| pc.wait_for_news(&srv.addr, PATIENCE, None));
         std::thread::sleep(Duration::from_millis(300));
-        // Con la espera ya parada, este mismo dispositivo empuja algo — que es
-        // lo que hace el sync automático cuando importás música.
-        pc.add_track("importado-recien.flac", &audio(4096, 31), "Importado recién");
+        // With the wait already parked, this same device pushes something —
+        // which is what automatic sync does when you import music.
+        pc.add_track("importado-recien.flac", &audio(4096, 31), "Just imported");
         pc.sync_with(&srv.addr, &srv_uid);
         assert!(
-            esperando.join().unwrap().is_none(),
-            "le avisó de su propio cambio"
+            waiting.join().unwrap().is_none(),
+            "it was notified of its own change"
         );
     });
 }
 
-/// Reconectar tiene que ser barato. En un celular la conexión no llega al
-/// minuto —cambia de wifi a datos, la corta el NAT de la operadora—, así que
-/// se reconecta todo el tiempo; si cada vez hubiera que arrastrar una puesta
-/// al día por las dudas, esto saldría más caro que la pasada periódica que
-/// vino a mejorar.
+/// Reconnecting has to be cheap. On a phone the connection doesn't last a
+/// minute —it switches from wifi to mobile data, the carrier's NAT cuts it—,
+/// so it reconnects constantly; if every time it had to drag along a full
+/// catch-up just in case, this would end up costing more than the periodic
+/// polling it was meant to improve on.
 ///
-/// Con la revisión conocida no hace falta: el server sabe qué pasó mientras no
-/// estábamos y lo contesta en el acto, sin parkear y sin que nadie tenga que
-/// sincronizar para averiguarlo.
+/// With the known revision it doesn't have to: the server knows what
+/// happened while we were away and answers on the spot, without parking and
+/// without anyone having to sync just to find out.
 #[test]
-fn al_reconectar_te_dicen_lo_que_te_perdiste_sin_sincronizar() {
+fn reconnecting_tells_you_what_you_missed_without_syncing() {
     let srv = Archive::start("reconecta");
     let srv_uid = srv.uid();
 
@@ -596,40 +601,40 @@ fn al_reconectar_te_dicen_lo_que_te_perdiste_sin_sincronizar() {
     pc.pair_with(&srv.addr, &srv_uid);
     pc.sync_with(&srv.addr, &srv_uid);
 
-    // Lo que la PC conoce del archivo antes de que pase nada.
-    let conocida = srv.mark();
-    let al_dia = pc
+    // What the PC knows about the archive before anything happens.
+    let known = srv.mark();
+    let up_to_date = pc
         .wait_for_news(&srv.addr, Duration::from_millis(300), None)
         .is_none();
-    assert!(al_dia, "no había novedades todavía");
+    assert!(up_to_date, "there was no news yet");
 
-    // Con la PC desconectada, el celu empuja algo.
-    let celu = Device::new("reconecta-celu");
-    celu.pair_with(&srv.addr, &srv_uid);
-    celu.add_track("mientras-no-estabas.flac", &audio(4096, 55), "Mientras no estabas");
-    celu.sync_with(&srv.addr, &srv_uid);
+    // With the PC disconnected, the phone pushes something.
+    let phone = Device::new("reconecta-celu");
+    phone.pair_with(&srv.addr, &srv_uid);
+    phone.add_track("mientras-no-estabas.flac", &audio(4096, 55), "While you were away");
+    phone.sync_with(&srv.addr, &srv_uid);
 
-    // La PC vuelve preguntando por la marca que traía. Tiene que contestar en
-    // el acto, sin esperar el plazo entero.
+    // The PC comes back asking about the mark it had. It has to answer on
+    // the spot, without waiting out the full deadline.
     let start = std::time::Instant::now();
-    let rev = pc.wait_for_news(&srv.addr, IO_TIMEOUT, Some(conocida));
-    assert!(rev.is_some(), "no le contó lo que se perdió");
+    let rev = pc.wait_for_news(&srv.addr, IO_TIMEOUT, Some(known));
+    assert!(rev.is_some(), "did not report what was missed");
     assert!(
         start.elapsed() < Duration::from_secs(2),
-        "parkeó en vez de contestar lo que ya había pasado"
+        "parked instead of answering what had already happened"
     );
 
-    // Y con la revisión al día vuelve a parkear, sin repetir el aviso.
-    let otra_vez = pc.wait_for_news(&srv.addr, Duration::from_millis(500), rev);
-    assert!(otra_vez.is_none(), "repitió un aviso que ya había dado");
+    // And with the up-to-date revision it parks again, without repeating the notification.
+    let again = pc.wait_for_news(&srv.addr, Duration::from_millis(500), rev);
+    assert!(again.is_none(), "repeated a notification already given");
 }
 
-/// Si el server se reinició, su cuenta arranca de cero y la referencia que
-/// traía el dispositivo queda apuntando al futuro. No se puede saber qué pasó
-/// antes, así que se avisa y que venga a mirar — callarse dejaría al
-/// dispositivo esperando para siempre una revisión que nunca va a llegar.
+/// If the server restarted, its count starts over from zero and the device's
+/// reference points into the future. There's no way to know what happened
+/// before, so it announces and lets it come take a look — staying quiet
+/// would leave the device waiting forever for a revision that's never coming.
 #[test]
-fn una_revision_del_futuro_manda_a_sincronizar() {
+fn a_revision_from_the_future_sends_it_off_to_sync() {
     let srv = Archive::start("reinicio");
     let srv_uid = srv.uid();
 
@@ -637,31 +642,31 @@ fn una_revision_del_futuro_manda_a_sincronizar() {
     pc.pair_with(&srv.addr, &srv_uid);
     pc.sync_with(&srv.addr, &srv_uid);
 
-    let actual = srv.mark();
-    let del_futuro = Mark { epoch: actual.epoch, rev: actual.rev + 9999 };
+    let current = srv.mark();
+    let from_the_future = Mark { epoch: current.epoch, rev: current.rev + 9999 };
     let start = std::time::Instant::now();
-    let rev = pc.wait_for_news(&srv.addr, IO_TIMEOUT, Some(del_futuro));
-    assert_eq!(rev, Some(actual), "tenía que devolver la marca real del server");
+    let rev = pc.wait_for_news(&srv.addr, IO_TIMEOUT, Some(from_the_future));
+    assert_eq!(rev, Some(current), "had to return the server's real mark");
     assert!(
         start.elapsed() < Duration::from_secs(2),
-        "parkeó en vez de mandarlo a sincronizar"
+        "parked instead of sending it off to sync"
     );
 }
 
-/// El camino sin comprimir tiene que seguir andando: es el que usa un
-/// dispositivo que todavía no se actualizó, y romperlo cortaría el sync entre
-/// una punta nueva y una vieja — bastante peor que que sea lento.
+/// The uncompressed path has to keep working: it's the one used by a device
+/// that hasn't updated yet, and breaking it would cut sync between a new end
+/// and an old one — considerably worse than it just being slow.
 ///
-/// Las demás pruebas de esta suite ya recorren el camino comprimido, porque el
-/// motor pide `gzip: true`. Ésta es la otra mitad.
+/// The rest of this suite's tests already exercise the compressed path,
+/// since the engine asks for `gzip: true`. This is the other half.
 #[test]
-fn un_dispositivo_que_no_sabe_comprimir_recibe_el_inventario_de_siempre() {
+fn a_device_that_cannot_gzip_gets_the_usual_inventory() {
     let srv = Archive::start("sin-gzip");
     let srv_uid = srv.uid();
 
     let pc = Device::new("sin-gzip-pc");
     pc.pair_with(&srv.addr, &srv_uid);
-    pc.add_track("un-tema.flac", &audio(2048, 9), "Un tema");
+    pc.add_track("un-tema.flac", &audio(2048, 9), "A track");
     pc.sync_with(&srv.addr, &srv_uid);
 
     let mut sess = pc.connect(&srv.addr);
@@ -670,27 +675,27 @@ fn un_dispositivo_que_no_sabe_comprimir_recibe_el_inventario_de_siempre() {
         Msg::Hello { .. } => {}
         other => panic!("expected Hello, got {other:?}"),
     }
-    // Exactamente lo que manda una versión anterior.
+    // Exactly what an older version sends.
     sess.send(&Msg::ManifestReq { gzip: false }).unwrap();
     match sess.recv().unwrap() {
         Msg::ManifestData { manifest } => {
-            assert_eq!(manifest.tracks.len(), 1, "el inventario tiene que venir entero");
+            assert_eq!(manifest.tracks.len(), 1, "the inventory has to come in full");
         }
-        Msg::ManifestGz { .. } => panic!("le mandó comprimido a quien no lo pidió"),
-        other => panic!("respuesta inesperada: {other:?}"),
+        Msg::ManifestGz { .. } => panic!("sent compressed data to someone who did not ask for it"),
+        other => panic!("unexpected response: {other:?}"),
     }
 }
 
-/// El agujero que destapa guardar la marca en disco: la cuenta de revisiones
-/// del server vive en memoria y arranca de cero en cada reinicio, así que la
-/// revisión 57 de hoy y la 57 de mañana son el mismo número. Un dispositivo
-/// que vuelve con la marca guardada concluiría que está al día justo cuando se
-/// perdió todo lo del medio.
+/// The gap that saving the mark to disk uncovers: the server's revision
+/// count lives in memory and starts over from zero on every restart, so
+/// today's revision 57 and tomorrow's are the same number. A device that
+/// comes back with a saved mark would conclude it's up to date right when
+/// everything in between was lost.
 ///
-/// Por eso la marca lleva también qué corrida del server era: otra corrida es
-/// siempre "no te conozco, vení a comparar", aunque los números coincidan.
+/// That's why the mark also carries which run of the server it was: another
+/// run is always "I don't know you, come compare", even if the numbers match.
 #[test]
-fn una_marca_de_otra_corrida_manda_a_comparar() {
+fn a_mark_from_another_run_sends_it_off_to_compare() {
     let srv = Archive::start("corrida");
     let srv_uid = srv.uid();
 
@@ -698,20 +703,20 @@ fn una_marca_de_otra_corrida_manda_a_comparar() {
     pc.pair_with(&srv.addr, &srv_uid);
     pc.sync_with(&srv.addr, &srv_uid);
 
-    let actual = srv.mark();
-    // Mismísima revisión, otra corrida: es exactamente el caso que sin el
-    // `epoch` se leía como "no pasó nada".
-    let de_antes = Mark { epoch: actual.epoch.wrapping_add(1), rev: actual.rev };
+    let current = srv.mark();
+    // Same exact revision, another run: this is exactly the case that,
+    // without `epoch`, would have read as "nothing happened".
+    let earlier = Mark { epoch: current.epoch.wrapping_add(1), rev: current.rev };
 
     let start = std::time::Instant::now();
-    let contestada = pc.wait_for_news(&srv.addr, IO_TIMEOUT, Some(de_antes));
+    let answered = pc.wait_for_news(&srv.addr, IO_TIMEOUT, Some(earlier));
     assert_eq!(
-        contestada,
-        Some(actual),
-        "con la misma revisión de otra corrida se quedó callado"
+        answered,
+        Some(current),
+        "stayed quiet with the same revision from another run"
     );
     assert!(
         start.elapsed() < Duration::from_secs(2),
-        "parkeó en vez de mandarlo a comparar"
+        "parked instead of sending it off to compare"
     );
 }

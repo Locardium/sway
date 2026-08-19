@@ -2,7 +2,7 @@
   color-scheme: dark;
   font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
 
-  /* Negro puro de cabina + acento celeste frio (sway = agua/movimiento). */
+  /* Pure booth black + cool sky-blue accent (sway = water/movement). */
   --bg: oklch(11% 0 0);
   --panel: oklch(14% 0 0);
   --panel-2: oklch(18% 0 0);
@@ -18,7 +18,7 @@
   --radius: 8px;
   --shadow: 0 12px 32px oklch(0% 0 0 / 0.5);
 
-  /* z-index semantico */
+  /* semantic z-index */
   --z-sticky: 10;
   --z-player: 30;
   --z-menu: 40;
@@ -31,8 +31,8 @@
 
 * {
   box-sizing: border-box;
-  /* Android pinta un recuadro azul sobre cualquier cosa tocable. El feedback
-     de toque lo damos nosotros (:active), no el sistema. */
+  /* Android paints a blue box over anything tappable. We provide the tap
+     feedback ourselves (:active), not the system. */
   -webkit-tap-highlight-color: transparent;
 }
 body {
@@ -61,7 +61,7 @@ header h1 {
   font-size: 17px; margin: 0; font-weight: 700; letter-spacing: 0.5px;
   color: var(--accent);
 }
-.burger { display: none; }  /* solo en pantallas chicas */
+.burger { display: none; }  /* small screens only */
 .search input {
   width: 100%;
   background: var(--panel);
@@ -161,8 +161,8 @@ button.danger-btn {
   padding: 2px 6px; font-size: 13px; outline: none;
 }
 
-/* Desmarcada para este dispositivo pero todavia ocupando lugar. Desaparece del
-   arbol al liberar el espacio; hasta entonces se ve que esta de salida. */
+/* Unchecked for this device but still taking up space. Disappears from the
+   tree once the space is freed; until then it shows that it's on its way out. */
 .tree-row.out-scope { opacity: 0.45; }
 .tree-row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
 .tree-row.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
@@ -210,8 +210,8 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; background:
 
 .table-wrap { flex: 1; overflow-y: auto; overflow-x: hidden; outline: none; padding-bottom: 96px; }
 
-/* width:100% => las filas ocupan todo el ancho (selección/hover hasta el borde)
-   y las columnas se adaptan a la resolución sin scroll horizontal. */
+/* width:100% => rows take up the full width (selection/hover reaches the edge)
+   and columns adapt to the resolution without horizontal scroll. */
 table.tracks { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
 table.tracks th {
   text-align: left; position: sticky; top: 0; z-index: var(--z-sticky);
@@ -243,8 +243,8 @@ body.col-resizing * { cursor: col-resize !important; }
 
 table.tracks tbody tr {
   cursor: default;
-  /* Solo pinta las filas visibles: con 1000+ tracks evita el costo de layout
-     en cada re-render (adelantar, cambiar de track, etc.). */
+  /* Only paints visible rows: with 1000+ tracks this avoids the layout cost
+     on every re-render (seeking, changing track, etc.). */
   content-visibility: auto;
   contain-intrinsic-size: 0 48px;
 }
@@ -252,15 +252,15 @@ table.tracks tbody tr:hover { background: var(--panel); }
 table.tracks tbody tr.selected { background: var(--accent-soft); }
 table.tracks tbody tr.selected td { border-bottom-color: transparent; }
 table.tracks tbody tr.playing .t-title { color: var(--accent); }
-/* Sin archivo en este dispositivo (sync selectiva): sigue en la biblioteca y
-   se puede organizar, pero no suena. */
+/* No file on this device (selective sync): still in the library and can be
+   organized, but won't play. */
 table.tracks tbody tr.absent { opacity: 0.45; }
-/* En la biblioteca y con archivo, pero fuera de la seleccion de este
-   dispositivo: se ve que ya no participa del sync antes de liberar nada. */
+/* In the library and with a file, but outside this device's selection: shows
+   that it no longer takes part in sync before anything gets freed. */
 table.tracks tbody tr.out-scope td { opacity: 0.6; }
 
-/* Linea de insercion del drag: box-shadow inset sobre las celdas (la barra
-   sobre <tr> no se renderiza confiablemente). */
+/* Drag insertion line: inset box-shadow on the cells (a bar on <tr> doesn't
+   render reliably). */
 table.tracks tbody tr.drop-before > td { box-shadow: inset 0 2px 0 0 var(--accent); }
 table.tracks tbody tr.drop-after > td { box-shadow: inset 0 -2px 0 0 var(--accent); }
 .drop-tail { height: 56px; }
@@ -268,7 +268,7 @@ table.tracks tbody tr.drop-after > td { box-shadow: inset 0 -2px 0 0 var(--accen
 
 .empty { color: var(--muted); text-align: center; margin-top: 60px; }
 
-/* ---------- Caratulas ---------- */
+/* ---------- Covers ---------- */
 .cover {
   width: 38px; height: 38px; border-radius: 6px; overflow: hidden;
   background: var(--panel-2);
@@ -290,7 +290,7 @@ table.tracks tbody tr.drop-after > td { box-shadow: inset 0 -2px 0 0 var(--accen
 tr:hover .row-cover .play-ov { opacity: 1; transform: scale(1); }
 .row-cover .play-ov:hover { color: var(--accent); }
 
-/* Equalizer animado en el track sonando */
+/* Animated equalizer on the playing track */
 .eq {
   position: absolute; inset: 0;
   display: flex; align-items: flex-end; justify-content: center; gap: 2px;
@@ -310,7 +310,7 @@ tr:hover .row-cover .play-ov { opacity: 1; transform: scale(1); }
   50% { transform: scaleY(1); }
 }
 
-/* ---------- Ghost de drag ---------- */
+/* ---------- Drag ghost ---------- */
 .dnd-ghost {
   position: fixed; top: 0; left: 0; z-index: var(--z-ghost);
   pointer-events: none;
@@ -328,7 +328,7 @@ body.dragging { cursor: grabbing; }
 body.dragging * { cursor: grabbing !important; }
 
 /* ---------- Right panel (info) ---------- */
-/* Overlay que se desliza con transform (GPU, sin reflow del contenido). */
+/* Overlay that slides with transform (GPU, no content reflow). */
 .right-panel {
   position: absolute; top: 0; right: 0; bottom: 0;
   width: 288px;
@@ -341,8 +341,8 @@ body.dragging * { cursor: grabbing !important; }
   will-change: transform;
 }
 .right-panel.open { transform: none; }
-/* En desktop el panel convive con la tabla (se clickea un track y el panel lo
-   muestra), asi que no lleva scrim: solo se vuelve drawer en pantalla chica. */
+/* On desktop the panel coexists with the table (you click a track and the
+   panel shows it), so it carries no scrim: it only becomes a drawer on small screens. */
 .rp-scrim { display: none; }
 .rp-inner { width: 288px; padding: 14px 16px 110px; overflow-y: auto; height: 100%; }
 .rp-head {
@@ -364,7 +364,7 @@ body.dragging * { cursor: grabbing !important; }
 .rp-path { white-space: nowrap; direction: rtl; text-align: left; }
 .rp-empty { color: var(--muted); font-size: 13px; }
 
-/* ---------- Player flotante translucido ---------- */
+/* ---------- Floating translucent player ---------- */
 footer.player {
   position: fixed;
   left: 12px; right: 12px;
@@ -378,8 +378,8 @@ footer.player {
   box-shadow: var(--shadow);
   padding: 10px 18px;
   display: grid;
-  /* Columnas en fr => escalan de forma continua con el ancho, sin saltos.
-     Los laterales tienen min chico para no colapsar; el centro manda. */
+  /* Columns in fr => scale continuously with the width, no jumps.
+     The sides have a small min so they don't collapse; the center leads. */
   grid-template-columns: minmax(120px, 1fr) minmax(0, 2.4fr) minmax(120px, 1fr);
   align-items: center;
   gap: clamp(8px, 2vw, 18px);
@@ -416,11 +416,10 @@ button.ctl.main {
 }
 button.ctl.main:hover { background: var(--accent); color: var(--accent-ink); transform: scale(1.05); }
 button.ctl.stop { color: var(--muted); }
-/* En touch el :hover se queda pegado despues del tap: el boton sigue pintado
-   como activo aunque ya lo soltaste (se veia sobre todo en el icono de info,
-   que quedaba encendido despues de cerrar el panel). Sin mouse no existe el
-   estado hover, asi que aca se lo neutraliza y solo mandan las clases de
-   estado real (.on). */
+/* On touch, :hover stays stuck after the tap: the button keeps looking active
+   even after you let go (mostly noticeable on the info icon, which stayed lit
+   after closing the panel). Without a mouse there's no hover state, so it's
+   neutralized here and only the real state classes (.on) take over. */
 @media (hover: none) {
   button:hover { border-color: var(--line); }
   button.primary:hover { background: var(--accent); }
@@ -447,11 +446,11 @@ button.ctl.stop { color: var(--muted); }
   background: oklch(100% 0 0 / 0.14); border-radius: 999px;
   cursor: pointer;
   transition: height 120ms var(--ease);
-  /* El arrastre lo maneja la barra: sin esto el navegador se queda el gesto
-     para hacer scroll y el dedo nunca mueve el knob. */
+  /* The bar handles the drag itself: without this the browser keeps the
+     gesture for scrolling and the finger never moves the knob. */
   touch-action: none;
 }
-/* La barra visible mide 4px; el area que responde al dedo, 28px. */
+/* The visible bar is 4px; the area that responds to touch is 28px. */
 .seek-bar::before {
   content: ''; position: absolute; inset: -12px 0;
 }
@@ -471,7 +470,7 @@ button.ctl.stop { color: var(--muted); }
   transition: opacity 120ms var(--ease);
 }
 .seek-bar:hover .seek-knob, .seek-bar.dragging .seek-knob { opacity: 1; }
-/* Sin mouse no hay hover que revele el knob: mostrarlo siempre. */
+/* Without a mouse there's no hover to reveal the knob: show it always. */
 @media (hover: none) {
   .seek-knob { opacity: 1; }
 }
@@ -480,7 +479,7 @@ button.ctl.stop { color: var(--muted); }
 .vol { display: flex; align-items: center; gap: 4px; }
 .vol-range { width: 84px; }
 
-/* ---------- Slider unificado (.range): volumen, settings, etc. ---------- */
+/* ---------- Unified slider (.range): volume, settings, etc. ---------- */
 input.range {
   appearance: none;
   -webkit-appearance: none;
@@ -504,7 +503,7 @@ input.range::-webkit-slider-thumb {
 input.range:hover::-webkit-slider-thumb,
 input.range:active::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--accent-soft); }
 
-/* ---------- Modales ---------- */
+/* ---------- Modals ---------- */
 .modal-backdrop {
   position: fixed; inset: 0; z-index: var(--z-backdrop);
   background: oklch(0% 0 0 / 0.6);
@@ -571,7 +570,7 @@ input.range:active::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--accent-so
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-corner { background: transparent; }
 
-/* ---------- Toast de importacion ---------- */
+/* ---------- Import toast ---------- */
 .import-toast {
   position: fixed; z-index: var(--z-toast, 45);
   right: 18px; bottom: 96px;
@@ -598,10 +597,10 @@ input.range:active::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--accent-so
 }
 
 /* ---------- Responsive ---------- */
-/* El player NO cambia de layout por breakpoints: escala de forma continua
-   (grid en fr + min-width:0 + gap con clamp). Sin saltos al achicar. */
+/* The player does NOT change layout at breakpoints: it scales continuously
+   (grid in fr + min-width:0 + gap with clamp). No jumps when shrinking. */
 
-/* Mobile: sidebar como drawer + hamburguesa. El player sigue fluido. */
+/* Mobile: sidebar as a drawer + hamburger. The player stays fluid. */
 @media (max-width: 680px) {
   .burger { display: inline-flex; }
   header { grid-template-columns: auto 1fr auto; gap: 10px; padding: 9px 12px; }
@@ -620,10 +619,11 @@ input.range:active::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--accent-so
     animation: fade-in 150ms var(--ease);
   }
 
-  /* Acá el panel tapa casi toda la pantalla: se comporta como el sidebar,
-     con scrim y tocando afuera se cierra. El z-index no se toca — el panel
-     queda debajo del player, que va siempre arriba de todo. El scrim comparte
-     capa con el panel y queda abajo por orden en el DOM. */
+  /* Here the panel covers almost the whole screen: it behaves like the
+     sidebar, with a scrim, and tapping outside closes it. The z-index isn't
+     touched — the panel stays below the player, which always sits on top of
+     everything. The scrim shares a layer with the panel and stays below it
+     by DOM order. */
   .right-panel { width: min(320px, 88vw); }
   .rp-scrim {
     display: block; position: absolute; inset: 0; z-index: var(--z-sticky);
@@ -635,7 +635,7 @@ input.range:active::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--accent-so
 /* ---------- Header icon toggled ---------- */
 button.mini.on { color: var(--accent); }
 
-/* ---------- Column headers: drag para reordenar ---------- */
+/* ---------- Column headers: drag to reorder ---------- */
 table.tracks th { position: relative; cursor: grab; }
 .th-label { pointer-events: none; }
 body.col-dragging, body.col-dragging * { cursor: grabbing !important; }
@@ -643,6 +643,7 @@ table.tracks th.col-dragging-src { opacity: 0.4; }
 table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
 
 /* ---------- Status toast (auto-dismiss) ---------- */
+
 .status-toast {
   position: fixed; z-index: var(--z-menu);
   left: 16px; bottom: 96px;
@@ -663,10 +664,10 @@ table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
 /* ---------- Settings ---------- */
 .settings {
   display: flex; flex-direction: column; gap: 18px;
-  /* Dos veces a proposito: `dvh` sigue al alto REAL de la ventana, asi que
-     cuando sale el teclado del telefono el panel se achica y el campo
-     enfocado queda dentro de lo que se ve. `vh` no se entera del teclado —
-     queda de fallback para motores que no soportan `dvh`. */
+  /* Twice on purpose: `dvh` tracks the window's REAL height, so when the
+     phone's keyboard appears the panel shrinks and the focused field stays
+     within view. `vh` doesn't know about the keyboard — it's the fallback
+     for engines that don't support `dvh`. */
   max-height: 74vh;
   max-height: 74dvh;
   overflow-y: auto; margin: 2px -4px 0; padding: 0 4px;
@@ -700,7 +701,7 @@ table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
 .set-select:disabled { opacity: 0.5; }
 .set-slider { width: 140px; }
 .set-note { color: var(--muted); font-size: 12px; margin: 6px 0 0; line-height: 1.5; }
-/* Una nota que hay que leer: algo configurado acá no hace lo que parece. */
+/* A note worth reading: something configured here doesn't do what it looks like. */
 .set-note.warn {
   color: var(--text); border-left: 2px solid var(--accent);
   padding: 6px 0 6px 10px; background: oklch(23% 0 0 / 0.35); border-radius: 0 5px 5px 0;
@@ -713,18 +714,18 @@ table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
 }
 .set-input:focus { border-color: var(--accent); }
 .set-input:disabled { opacity: 0.5; }
-/* El host se lleva el ancho; el puerto son cuatro dígitos. */
+/* The host takes up the width; the port is four digits. */
 .set-row > .set-input:not(.port) { flex: 1; width: auto; }
 .set-input.port { width: 76px; font-variant-numeric: tabular-nums; }
 
-/* Dispositivos vistos en la LAN (Fase 5) */
+/* Devices seen on the LAN (Phase 5) */
 .peer-list { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .peer {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px;
   background: var(--panel-2);
 }
-/* Pareado pero fuera de la red: sigue siendo tuyo, solo que no está ahora. */
+/* Paired but off the network: still yours, just not around right now. */
 .peer.offline { opacity: 0.5; }
 .peer-badge {
   flex: none; font-size: 11px; padding: 3px 8px; border-radius: 999px;
@@ -732,7 +733,7 @@ table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
 }
 .peer-badge.ok { color: var(--accent); border-color: color-mix(in oklch, var(--accent) 55%, transparent); }
 
-/* Simulacro de sync */
+/* Sync dry run */
 .peer { flex-wrap: wrap; }
 .plan {
   flex-basis: 100%; margin-top: 8px; padding-top: 8px;
@@ -754,7 +755,7 @@ table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
   transition: width 120ms linear;
 }
 
-/* Pantalla de Sync (Fase 5.7) */
+/* Sync screen (Phase 5.7) */
 .sync-back {
   align-self: flex-start; display: inline-flex; align-items: center; gap: 4px;
   padding: 4px 9px 4px 6px; font-size: 12px; color: var(--muted);
@@ -762,7 +763,7 @@ table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
 .sync-back:hover { color: var(--text); }
 .settings .set-control button { display: inline-flex; align-items: center; gap: 3px; }
 
-/* Arbol de seleccion: que playlists viven en cada dispositivo */
+/* Selection tree: which playlists live on each device */
 .scope-tree {
   margin: 4px 0 2px; padding: 6px 4px; max-height: 220px; overflow-y: auto;
   border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2);
@@ -773,32 +774,32 @@ table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
 }
 .scope-node:hover { background: var(--panel); }
 .scope-node input { accent-color: var(--accent); }
-/* Marcado por herencia (cuelga de una carpeta marcada): no se puede desmarcar
-   suelto, se desmarca la carpeta. */
+/* Checked by inheritance (hangs off a checked folder): can't be unchecked on
+   its own, the folder gets unchecked instead. */
 .scope-node input:disabled { opacity: 0.55; cursor: default; }
 .scope-node small { margin-left: auto; color: var(--muted); font-size: 11px; }
 
-/* Historial por dispositivo */
+/* Per-device history */
 .hist { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .hist li { display: flex; align-items: baseline; gap: 8px; font-size: 12px; color: var(--muted); }
 .hist li span { color: var(--text); }
 .hist li small { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hist li time { flex: none; font-variant-numeric: tabular-nums; }
 
-/* Codigo de verificacion del pairing */
+/* Pairing verification code */
 .pair-dialog { display: flex; flex-direction: column; gap: 14px; }
 .pair-code {
   font-family: 'Cascadia Mono', monospace;
   font-size: 40px; font-weight: 700; letter-spacing: 10px;
   text-align: center; color: var(--accent);
-  padding: 18px 0 18px 10px; /* compensa el letter-spacing del ultimo digito */
+  padding: 18px 0 18px 10px; /* compensates for the letter-spacing of the last digit */
   background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
   font-variant-numeric: tabular-nums;
 }
 .pair-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .pair-actions .primary { background: var(--accent); border-color: var(--accent); color: oklch(15% 0 0); }
 
-/* Switch prototipo */
+/* Prototype switch */
 .switch {
   width: 38px; height: 22px; border-radius: 999px; padding: 0;
   border: 1px solid var(--line); background: var(--panel-2);

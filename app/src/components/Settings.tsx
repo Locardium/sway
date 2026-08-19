@@ -17,8 +17,8 @@ interface Props {
   onClose: () => void;
   onStatus: (msg: string) => void;
   onImported: () => void | Promise<void>;
-  /// Sync tiene pantalla propia (Fase 5.7): dispositivos, direcciones,
-  /// borrados, selección y espacio no entran en una fila de Settings.
+  /// Sync has its own screen (Phase 5.7): devices, directions, deletions,
+  /// selection and space don't fit in a single Settings row.
   onOpenSync: () => void;
 }
 
@@ -34,24 +34,24 @@ const AUDIO_MIME = [
   'audio/*',
 ];
 
-// El picker de Android da un content:// URI, no un path con nombre de
-// archivo legible. Best-effort: el ultimo segmento suele traer el nombre
-// original codeado (funciona con el document picker estandar de Android;
-// otros proveedores pueden dar algo generico — lofty igual detecta el
-// formato real por contenido, no por esta extension).
+// Android's picker gives a content:// URI, not a path with a readable file
+// name. Best-effort: the last segment usually carries the original name
+// encoded (works with Android's standard document picker; other providers
+// may give something generic — lofty still detects the real format by
+// content, not by this extension).
 function guessFileName(uri: string): string {
   try {
     const decoded = decodeURIComponent(uri);
     const last = decoded.split(/[/:]/).pop()?.trim();
     if (last && last.includes('.')) return last;
   } catch {
-    // ignore, cae al fallback
+    // ignore, falls back
   }
   return `track-${Date.now()}.mp3`;
 }
 
-// Ajustes en su mayoria prototipo (no funcionales todavia): la UI existe para
-// definir el modelo, la logica llega en fases siguientes.
+// Settings that are mostly prototype (not yet functional): the UI exists to
+// define the model, the logic arrives in later phases.
 export default function Settings({
   trackCount,
   volume,

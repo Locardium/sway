@@ -54,8 +54,8 @@ type ModalState =
   | null;
 
 const VOL_STORAGE = 'sway.volume';
-/// Antes de este punto del track, "atras" salta al anterior en vez de
-/// reiniciar el actual.
+/// Before this point in the track, "back" jumps to the previous one instead
+/// of restarting the current one.
 const RESTART_MS = 3000;
 
 function shuffled<T>(arr: T[]): T[] {
@@ -77,10 +77,10 @@ export default function App() {
   const [modal, setModal] = useState<ModalState>(null);
   const [infoOpen, setInfoOpen] = useState(false);
   const [infoId, setInfoId] = useState<number | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(false); // drawer en mobile
+  const [sidebarOpen, setSidebarOpen] = useState(false); // drawer on mobile
   const [importProgress, setImportProgress] = useState<{ done: number; total: number } | null>(null);
 
-  // Hints de drop (drag interno + drag de archivos del OS).
+  // Drop hints (internal drag + OS file drag).
   const [nodeDropHint, setNodeDropHint] = useState<NodeDropHint>(null);
   const [rootHover, setRootHover] = useState(false);
   const [dropInsertIndex, setDropInsertIndex] = useState<number | null>(null);
@@ -90,8 +90,8 @@ export default function App() {
   const [posMs, setPosMs] = useState(0);
   const [shuffle, setShuffle] = useState(() => localStorage.getItem('sway.shuffle') === '1');
   const [repeat, setRepeat] = useState<RepeatMode>(() => {
-    // 'all'/'one' son los nombres viejos (repeat de cola). El modo ahora es
-    // siempre sobre el track actual, ver RepeatMode en PlayerBar.
+    // 'all'/'one' are the old names (queue repeat). The mode is now always
+    // about the current track, see RepeatMode in PlayerBar.
     const saved = localStorage.getItem('sway.repeat');
     if (saved === 'track' || saved === 'once') return saved;
     if (saved === 'all' || saved === 'one') return 'track';
@@ -104,8 +104,8 @@ export default function App() {
   const [status, setStatus] = useState('');
   const queueRef = useRef<number[]>([]);
   const volPending = useRef<number | null>(null);
-  // Tras un seek, ignora el poll de posicion un rato (evita que la barra
-  // salte al valor viejo antes de que el backend refleje la nueva posicion).
+  // After a seek, ignore the position poll for a bit (prevents the bar from
+  // jumping back to the old value before the backend reflects the new position).
   const seekGuard = useRef(0);
 
   const refreshLibrary = useCallback(async () => {
@@ -120,7 +120,7 @@ export default function App() {
     if (selection.type === 'playlist') setPlTracks(await playlistTracks(selection.id));
   }, [selection]);
 
-  // Carga inicial con reintentos (el backend puede tardar en registrar estado).
+  // Initial load with retries (the backend may take a while to register its state).
   useEffect(() => {
     let tries = 0;
     const attempt = async () => {
@@ -143,8 +143,8 @@ export default function App() {
     }
   }, [selection]);
 
-  // Poll de posicion (desktop). Android no lo usa: el plugin nativo empuja su
-  // estado, ver el efecto de abajo.
+  // Position poll (desktop). Android doesn't use it: the native plugin pushes
+  // its state, see the effect below.
   useEffect(() => {
     if (subscribePlayback) return;
     const t = setInterval(async () => {
@@ -157,8 +157,8 @@ export default function App() {
     return () => clearInterval(t);
   }, [currentId, paused]);
 
-  // Android: posicion, fin de track y play/pause llegan empujados por el
-  // plugin en vez de por polling.
+  // Android: position, track end and play/pause arrive pushed by the plugin
+  // instead of by polling.
   useEffect(() => {
     if (!subscribePlayback) return;
     let stop: (() => void) | null = null;
@@ -187,18 +187,17 @@ export default function App() {
     };
   }, []);
 
-  // Botones de la notificacion (Android). Los manda MainActivity.kt, que
-  // escucha los broadcasts de la notificacion del plugin — ver el comentario
-  // largo ahi.
+  // Notification buttons (Android). Sent by MainActivity.kt, which listens
+  // to the plugin's notification broadcasts — see the long comment there.
   useEffect(() => {
     const w = window as typeof window & {
       __swayMediaButton?: (button: string) => void;
       __swayAppVisible?: (visible: boolean) => void;
     };
-    // MainActivity escucha por dos vias distintas (MediaSession y broadcast de
-    // la notificacion) porque cual esta activa depende de la version de
-    // Android y de la capa del fabricante. Si un mismo toque llega por las
-    // dos, esto se queda con el primero.
+    // MainActivity listens over two different paths (MediaSession and the
+    // notification broadcast) because which one is active depends on the
+    // Android version and the manufacturer's layer. If the same tap arrives
+    // through both, this keeps the first one.
     w.__swayAppVisible = (visible) => setAppVisible(visible);
     let lastAt = 0;
     w.__swayMediaButton = (button) => {
@@ -214,12 +213,12 @@ export default function App() {
     };
   }, []);
 
-  // Red y batería: en Android sólo las puede leer el webview, y el sync
-  // automático las necesita para no gastar datos ni la última barra sin que
-  // nadie se lo haya pedido. En desktop no hace nada.
+  // Network and battery: on Android only the webview can read them, and
+  // auto-sync needs them so it doesn't burn data or the last battery bar
+  // without anyone asking for it. Does nothing on desktop.
   useEffect(() => watchConditions(), []);
 
-  // Progreso de importacion (copia a la carpeta gestionada).
+  // Import progress (copying to the managed folder).
   useEffect(() => {
     if (!('__TAURI_INTERNALS__' in window)) return;
     const un = listen<[number, number]>('import-progress', (e) => {
@@ -231,14 +230,13 @@ export default function App() {
     };
   }, []);
 
-  // La biblioteca cambió por fuera de esta pantalla: archivos nuevos que
-  // encontró el watcher, o cambios que trajo el sync desde otro dispositivo.
+  // The library changed from outside this screen: new files the watcher
+  // found, or changes brought in by sync from another device.
   //
-  // Hay que recargar TAMBIÉN la playlist abierta. Sin eso, el otro dispositivo
-  // mueve o saca una canción, la DB local ya está bien, y la vista sigue
-  // mostrando el orden viejo hasta que uno vuelve a hacer click en la
-  // playlist.
-  // Cuántos tracks había la última vez, para no anunciar lo que no cambió.
+  // The open playlist has to be reloaded TOO. Without that, the other device
+  // moves or removes a song, the local DB is already fine, and the view keeps
+  // showing the old order until you click the playlist again.
+  // How many tracks there were last time, so as not to announce what didn't change.
   const libCount = useRef(0);
   useEffect(() => {
     libCount.current = library.length;
@@ -251,9 +249,9 @@ export default function App() {
       const tracks = await refreshLibrary();
       refreshPlaylists();
       refreshPlaylistTracks();
-      // El cartel es para lo que aparece solo (el watcher encontró archivos
-      // nuevos). Un sync ya reporta su propio resumen, así que anunciar
-      // "Library updated" encima lo tapa y no agrega nada.
+      // The banner is for what shows up on its own (the watcher found new
+      // files). A sync already reports its own summary, so announcing
+      // "Library updated" on top of it just covers it up without adding anything.
       if (tracks.length !== before) setStatus('Library updated');
     });
     return () => {
@@ -261,14 +259,14 @@ export default function App() {
     };
   }, [refreshLibrary, refreshPlaylists, refreshPlaylistTracks]);
 
-  // El status se auto-oculta (toast breve, no texto persistente).
+  // The status auto-hides (a brief toast, not persistent text).
   useEffect(() => {
     if (!status) return;
     const t = setTimeout(() => setStatus(''), 2600);
     return () => clearTimeout(t);
   }, [status]);
 
-  // Barra espaciadora = play/pausa (salvo escribiendo o con un modal abierto).
+  // Spacebar = play/pause (unless typing or with a modal open).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.code !== 'Space' || currentId == null || modal) return;
@@ -282,15 +280,15 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentId, paused, modal]);
 
-  // Gesto del drawer (solo donde el sidebar ES un drawer, mismo breakpoint que
-  // el CSS): arrastrar hacia la derecha desde cualquier punto de la pantalla
-  // lo abre, arrastrar hacia la izquierda con el abierto lo cierra. Nunca hace
-  // preventDefault, asi que no pisa el scroll de la tabla.
+  // Drawer gesture (only where the sidebar IS a drawer, same breakpoint as
+  // the CSS): dragging right from anywhere on the screen opens it, dragging
+  // left while open closes it. Never calls preventDefault, so it doesn't
+  // steal the table's scroll.
   useEffect(() => {
-    const TRIGGER_PX = 70; // recorrido horizontal minimo
-    const SLOP_PX = 45; // recorrido vertical que cancela (es un scroll)
-    // Controles que se manejan arrastrando en horizontal: ahi el gesto es
-    // del control, no del drawer.
+    const TRIGGER_PX = 70; // minimum horizontal travel
+    const SLOP_PX = 45; // vertical travel that cancels (it's a scroll)
+    // Controls that are handled by dragging horizontally: there the gesture
+    // belongs to the control, not the drawer.
     const IGNORE = '.seek-bar, input[type="range"], [role="dialog"]';
     let startX = 0;
     let startY = 0;
@@ -311,9 +309,9 @@ export default function App() {
       const t = e.touches[0];
       const dx = t.clientX - startX;
       const dy = Math.abs(t.clientY - startY);
-      // Con muy poco recorrido la direccion es puro ruido: recien pasada la
-      // zona muerta tiene sentido decidir si es un gesto horizontal o un
-      // scroll (si no, cualquier temblor inicial cancela el gesto).
+      // With very little travel the direction is pure noise: only once past
+      // the dead zone does it make sense to decide whether it's a horizontal
+      // gesture or a scroll (otherwise any initial jitter cancels the gesture).
       if (Math.hypot(dx, dy) < 12) return;
       if (dy > SLOP_PX || dy > Math.abs(dx)) {
         armed = null;
@@ -343,26 +341,26 @@ export default function App() {
   }, [sidebarOpen]);
 
   const searching = search.trim().length > 0;
-  // Con búsqueda activa se busca SIEMPRE en toda la biblioteca, sin importar
-  // la playlist seleccionada.
+  // With an active search, it ALWAYS searches the whole library, regardless
+  // of the selected playlist.
   const baseTracks = searching ? library : selection.type === 'library' ? library : plTracks;
-  // Se está mirando adentro de una playlist que este dispositivo no sincroniza.
-  // Con búsqueda activa no cuenta: ahí se busca en toda la biblioteca.
+  // Looking inside a playlist this device doesn't sync. Doesn't count with an
+  // active search: that searches the whole library.
   const inUnselectedPlaylist =
     !searching &&
     selection.type === 'playlist' &&
     nodes.find((n) => n.id === selection.id)?.inScope === false;
 
   const visibleTracks = useMemo(() => {
-    // Fuera de scope y sin archivo acá: ya se liberó el espacio, no tiene nada
-    // que hacer en la vista principal. Mientras el archivo siga ocupando lugar
-    // se sigue viendo, apagado, para que se note que está de salida.
+    // Out of scope and with no file here: the space has already been freed,
+    // it has no business in the main view. While the file still takes up
+    // space it keeps showing, dimmed, so it's clear it's on its way out.
     //
-    // Adentro de una playlist desmarcada se ve todo lo que todavía tenga
-    // archivo acá, apagado, incluido lo que además está en una marcada: si un
-    // tema sigue ocupando lugar, esconderlo de una lista donde figura es mentir.
-    // Lo que decide si la playlist misma sigue existiendo es otra cuenta
-    // (`strandedCount`), y ahí el tema prestado no cuenta.
+    // Inside an unchecked playlist, everything that still has a file here
+    // shows, dimmed, including what's also in a checked one: if a track still
+    // takes up space, hiding it from a list where it appears would be lying.
+    // What decides whether the playlist itself still exists is a separate
+    // count (`strandedCount`), and there the borrowed track doesn't count.
     const shown = baseTracks.filter((t) =>
       inUnselectedPlaylist ? t.present : t.inScope || t.present,
     );
@@ -386,7 +384,7 @@ export default function App() {
     [findTrack, infoId, current],
   );
 
-  // Mantiene el player montado durante su animacion de salida (al parar).
+  // Keeps the player mounted during its exit animation (on stop).
   const lastTrackRef = useRef<Track | null>(null);
   if (current) lastTrackRef.current = current;
   const [playerClosing, setPlayerClosing] = useState(false);
@@ -408,10 +406,11 @@ export default function App() {
 
   const onPlay = useCallback(
     async (id: number) => {
-      // Un track fuera de scope se ve y se organiza, pero no suena, esté el
-      // archivo o no: quedó afuera de lo que este dispositivo sincroniza y
-      // dejarlo sonar hasta que alguien libere espacio haría que el mismo tema
-      // ande hoy y no mañana. Decirlo es mejor que un error sin contexto.
+      // A track out of scope shows and can be organized, but won't play,
+      // whether the file is there or not: it's outside what this device
+      // syncs, and letting it play until someone frees space would make the
+      // same track work today and not tomorrow. Saying so is better than an
+      // error with no context.
       const t = visibleTracks.find((x) => x.id === id);
       if (t && !t.inScope) {
         setStatus('Out of sync scope — select its playlist in Sync to use it here');
@@ -440,14 +439,15 @@ export default function App() {
       if (currentId == null || q.length === 0) return;
       const next = q[q.indexOf(currentId) + delta];
       if (next == null) {
-        // Borde de la cola. Nunca se suelta el track actual: si se limpiara
-        // `currentId`, la app se quedaria sin nada seleccionado mientras el
-        // player nativo sigue con el audio cargado — y desde ese estado
-        // `playOffset` sale por el early return de arriba, o sea que ya no se
-        // puede avanzar ni retroceder sin volver a elegir un track a mano.
-        if (delta < 0) onSeek(0); // ya era el primero: vuelve a empezar
+        // Edge of the queue. The current track is never released: if
+        // `currentId` were cleared, the app would end up with nothing
+        // selected while the native player still has the audio loaded — and
+        // from that state `playOffset` exits through the early return above,
+        // meaning you could no longer go forward or back without picking a
+        // track by hand again.
+        if (delta < 0) onSeek(0); // was already the first one: starts over
         else {
-          await pausePlayback(); // fin de la cola: para, pero se queda ahi
+          await pausePlayback(); // end of the queue: stops, but stays there
           setPaused(true);
         }
         return;
@@ -464,15 +464,14 @@ export default function App() {
   const posMsRef = useRef(posMs);
   posMsRef.current = posMs;
 
-  // Fin del track: el modo repeat manda sobre el track actual, no sobre la
-  // cola. 'once' se apaga solo despues de repetir, asi la proxima vuelta
-  // sigue de largo.
+  // Track end: repeat mode governs the current track, not the queue. 'once'
+  // turns itself off after repeating, so the next lap moves on normally.
   //
-  // El candado `advancing` esta porque el fin de track puede llegar mas de una
-  // vez antes de que la posicion se resetee (en desktop se deduce de la
-  // posicion, que sigue pasada de largo unos renders mas). Sin el, 'once'
-  // apaga el repeat, el efecto vuelve a entrar con la posicion vieja y
-  // saltea un track.
+  // The `advancing` lock exists because track end can arrive more than once
+  // before the position resets (on desktop it's deduced from the position,
+  // which stays past the end for a few more renders). Without it, 'once'
+  // turns off repeat, the effect re-enters with the old position and skips a
+  // track.
   const advancing = useRef(false);
   const onTrackEnded = useCallback(async () => {
     if (currentId == null || advancing.current) return;
@@ -496,8 +495,9 @@ export default function App() {
   const onTrackEndedRef = useRef(onTrackEnded);
   onTrackEndedRef.current = onTrackEnded;
 
-  // Auto-advance en desktop: no hay evento de fin de track, se deduce de la
-  // posicion. En Android lo dispara el plugin (ver el efecto de suscripcion).
+  // Auto-advance on desktop: there's no track-end event, it's deduced from
+  // the position. On Android it's triggered by the plugin (see the
+  // subscription effect).
   useEffect(() => {
     if (subscribePlayback) return;
     if (current && !paused && current.durationMs > 0 && posMs >= current.durationMs - 600) {
@@ -509,7 +509,7 @@ export default function App() {
     setShuffle((s) => {
       const next = !s;
       localStorage.setItem('sway.shuffle', next ? '1' : '0');
-      // Rearma la cola manteniendo el track actual primero.
+      // Rebuilds the queue keeping the current track first.
       if (currentId != null) {
         queueRef.current = next
           ? buildQueue(visibleTracks.map((t) => t.id), currentId, true)
@@ -523,8 +523,8 @@ export default function App() {
     setRepeat((r) => {
       const next: RepeatMode = r === 'off' ? 'track' : r === 'track' ? 'once' : 'off';
       localStorage.setItem('sway.repeat', next);
-      // En mobile no hay tooltip: el toast es la unica forma de saber en que
-      // estado quedo el boton.
+      // On mobile there's no tooltip: the toast is the only way to know what
+      // state the button ended up in.
       setStatus(REPEAT_LABEL[next]);
       return next;
     });
@@ -547,9 +547,9 @@ export default function App() {
     setPosMs(0);
   }
 
-  // "Atras" estandar de cualquier reproductor: vuelve al principio del track,
-  // y solo pasa al anterior si ya estabas en el principio. Lo comparten el
-  // boton del player y el de la notificacion.
+  // Standard "back" from any player: returns to the start of the track, and
+  // only moves to the previous one if you were already at the start. Shared
+  // by the player's button and the notification's.
   function onPrev() {
     if (posMsRef.current > RESTART_MS) onSeek(0);
     else playOffsetRef.current(-1);
@@ -561,7 +561,7 @@ export default function App() {
     await seekTo(secs);
   }
 
-  // Volumen: UI responde al instante, el backend se actualiza con throttle.
+  // Volume: the UI responds instantly, the backend updates with throttling.
   function onVolume(v: number) {
     setVol(v);
     const first = volPending.current == null;
@@ -578,7 +578,7 @@ export default function App() {
     }
   }
 
-  // --- Drop de archivos del OS --------------------------------------------
+  // --- OS file drop ---------------------------------------------------------
 
   const osDropRef = useRef<(paths: string[], x: number, y: number) => void>(() => {});
   osDropRef.current = async (paths, x, y) => {
@@ -597,7 +597,7 @@ export default function App() {
         setStatus(`Imported ${ids.length}, added ${n} to the playlist.`);
       } else if (nodeId != null && nodeKind === 'folder') {
         const isSingleDir = paths.length === 1;
-        const base = paths[0].replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? 'Importados';
+        const base = paths[0].replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? 'Imported';
         if (isSingleDir) {
           const pid = await createPlaylist(base, 'playlist', nodeId);
           await addTracksToPlaylist(pid, ids);
@@ -617,13 +617,13 @@ export default function App() {
     } catch (e) {
       setStatus('Import error: ' + e);
     } finally {
-      // Mantiene el 100% visible un momento antes de ocultar el toast.
+      // Keeps the 100% visible for a moment before hiding the toast.
       setTimeout(() => setImportProgress(null), 1000);
     }
   };
 
   useEffect(() => {
-    // Solo dentro de Tauri (en un browser normal no hay drop de archivos del OS).
+    // Only inside Tauri (a regular browser has no OS file drop).
     if (!('__TAURI_INTERNALS__' in window)) return;
     const unlisten = getCurrentWebview().onDragDropEvent((event) => {
       const p = event.payload;
@@ -647,7 +647,7 @@ export default function App() {
     };
   }, []);
 
-  // --- Drag interno (tracks y nodos) ---------------------------------------
+  // --- Internal drag (tracks and nodes) --------------------------------------
 
   function clearDropHints() {
     setNodeDropHint(null);
@@ -670,7 +670,7 @@ export default function App() {
       }
       return;
     }
-    // payload nodo
+    // node payload
     if (target?.type === 'node' && target.id !== payload.id) {
       setNodeDropHint({ nodeId: target.id, zone: target.zone });
       setRootHover(false);
@@ -729,7 +729,7 @@ export default function App() {
     });
   }
 
-  // --- Organizacion --------------------------------------------------------
+  // --- Organization -----------------------------------------------------------
 
   async function doCreate(name: string, kind: NodeKind, parentId: number | null) {
     const id = await createPlaylist(name, kind, parentId);
@@ -832,9 +832,9 @@ export default function App() {
     return items;
   }
 
-  // Wrappers referencialmente estables para la tabla: su identidad no cambia
-  // entre renders, asi React.memo evita re-renderizar las ~1149 filas cuando
-  // solo cambia el estado del player (posicion, pausa, volumen).
+  // Referentially stable wrappers for the table: their identity doesn't
+  // change between renders, so React.memo avoids re-rendering the ~1149 rows
+  // when only the player state changes (position, pause, volume).
   const tableApi = useRef({ onPlay, onTrackMouseDown, rowMenuItems });
   tableApi.current = { onPlay, onTrackMouseDown, rowMenuItems };
   const stableOnPlay = useCallback((id: number) => tableApi.current.onPlay(id), []);
@@ -848,16 +848,16 @@ export default function App() {
   );
   const stableWasDrag = useCallback(() => didDrag, []);
 
-  /// Qué se ve en el árbol de la vista principal. Una playlist desmarcada sigue
-  /// ahí mientras ocupe lugar —apagada, para que se vea que está de salida— y
-  /// desaparece del todo cuando se liberó su espacio.
+  /// What shows in the main view's tree. An unchecked playlist stays there
+  /// while it's taking up space —dimmed, so it's clear it's on its way out—
+  /// and disappears entirely once its space is freed.
   ///
-  /// Una carpeta se queda si algo de lo que cuelga se queda, aunque ella misma
-  /// esté fuera de scope: marcar sólo una playlist de adentro es normal, y sin
-  /// esta regla esa playlist quedaría visible pero inalcanzable.
+  /// A folder stays if anything hanging off it stays, even if the folder
+  /// itself is out of scope: checking just one playlist inside is normal, and
+  /// without this rule that playlist would be visible but unreachable.
   ///
-  /// El editor de scope NO usa esto: ahí se ven todas, o no habría manera de
-  /// volver a marcar lo que se escondió.
+  /// The scope editor does NOT use this: there, everything shows, or there'd
+  /// be no way to re-check what got hidden.
   const visibleNodes = useMemo(() => {
     const kids = new Map<number | null, PlaylistNode[]>();
     for (const n of nodes) {
@@ -866,8 +866,8 @@ export default function App() {
     }
     const keep = new Set<number>();
     const walk = (n: PlaylistNode): boolean => {
-      // Los hijos primero, y sin cortar por el propio resultado: la carpeta se
-      // queda si algo adentro se queda.
+      // Children first, without short-circuiting on the folder's own result:
+      // the folder stays if anything inside stays.
       let anyKid = false;
       for (const k of kids.get(n.id) ?? []) if (walk(k)) anyKid = true;
       const stays = n.inScope || n.strandedCount > 0 || anyKid;
@@ -878,9 +878,9 @@ export default function App() {
     return nodes.filter((n) => keep.has(n.id));
   }, [nodes]);
 
-  // La playlist abierta puede haberse escondido (se liberó su espacio) mientras
-  // se la estaba mirando: quedarse en una vista que ya no está en el árbol deja
-  // la app sin forma de volver.
+  // The open playlist may have gotten hidden (its space was freed) while you
+  // were looking at it: staying on a view that's no longer in the tree leaves
+  // the app with no way back.
   useEffect(() => {
     if (selection.type !== 'playlist') return;
     if (nodes.length > 0 && !visibleNodes.some((n) => n.id === selection.id)) {
@@ -896,8 +896,8 @@ export default function App() {
       const parent = visibleNodes.find((x) => x.id === n.parentId);
       return parent ? path(parent) + ' / ' + n.name : n.name;
     };
-    // Sólo las que están en scope: mandar tracks a una playlist que este
-    // dispositivo no sincroniza es pedir que se vayan apenas se guarden.
+    // Only the ones in scope: sending tracks to a playlist this device
+    // doesn't sync is asking for them to leave the moment they're saved.
     return visibleNodes
       .filter((n) => n.kind === 'playlist' && n.inScope)
       .map((n) => ({ id: n.id, label: path(n) }));

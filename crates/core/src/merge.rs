@@ -1,36 +1,37 @@
-//! Aplicación de cambios de metadata, playlists y carpetas (Fase 5.5).
+//! Applying metadata, playlist, and folder changes (Phase 5.5).
 //!
-//! 5.4 movía archivos; esto mueve la organización: nombres, jerarquía de
-//! carpetas, orden, y qué track está en qué playlist.
+//! 5.4 moved files; this moves the organization: names, folder hierarchy,
+//! order, and which track is in which playlist.
 //!
-//! Reglas, todas con el mismo sesgo — ante la duda, conservar:
+//! Rules, all with the same bias — when in doubt, keep:
 //!
-//! - **Metadata: gana el más nuevo** (`updated_at`). Sin empates: si son
-//!   iguales no se toca nada, así que sincronizar dos veces seguidas no
-//!   cambia nada la segunda vez.
-//! - **Playlists: gana la más nueva**, pero sólo para nombre, padre y orden.
-//!   Una playlist sólo desaparece con un tombstone explícito.
-//! - **Membresías: unión.** Un track entra a una playlist si algún
-//!   dispositivo lo puso ahí; sale sólo con un tombstone explícito. Agregar
-//!   le gana a quitar concurrente, que es el sesgo correcto cuando lo que
-//!   está en juego es perder música de un set.
+//! - **Metadata: the newest wins** (`updated_at`). No ties: if they're
+//!   equal nothing is touched, so syncing twice in a row doesn't change
+//!   anything the second time.
+//! - **Playlists: the newest wins**, but only for name, parent, and order.
+//!   A playlist only disappears with an explicit tombstone.
+//! - **Memberships: union.** A track enters a playlist if any device put
+//!   it there; it leaves only with an explicit tombstone. Adding beats a
+//!   concurrent removal, which is the right bias when what's at stake is
+//!   losing music from a set.
 //!
-//! - **Borrados: se aplican siempre**, y el archivo va a la papelera de la
-//!   biblioteca, no al vacío. El tombstone se guarda igual: es lo que impide
-//!   devolverle al otro lo que el otro ya sacó.
+//! - **Deletes: always applied**, and the file goes to the library trash,
+//!   not into the void. The tombstone is saved regardless: it's what
+//!   prevents giving back to the other side what it already removed.
 //!
-//!   Hasta la Fase 6.4 había una política por dispositivo para ignorarlos o
-//!   encolarlos. Se sacó porque no podía cumplir lo que prometía: filtraba por
-//!   quién te pasaba el tombstone, no por quién había borrado, así que con tres
-//!   dispositivos el borrado que rechazabas al celular entraba por la laptop.
-//!   Lo que protege de verdad es la papelera, que no filtra nada.
+//!   Until Phase 6.4 there was a per-device policy to ignore or queue
+//!   them. It was removed because it couldn't deliver what it promised: it
+//!   filtered by who passed you the tombstone, not by who had deleted, so
+//!   with three devices a delete you rejected on the phone still got in
+//!   through the laptop. What actually protects you is the trash, which
+//!   filters nothing.
 
 use crate::manifest::{Manifest, Membership, PlaylistEntry, ScopeEntry, DeviceSync, TrackEntry, Tombstone};
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 
-/// Conjunto de cambios listo para aplicar del otro lado.
+/// Set of changes ready to apply on the other side.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Changes {
@@ -38,8 +39,8 @@ pub struct Changes {
     pub playlists: Vec<PlaylistEntry>,
     pub memberships: Vec<Membership>,
     pub tombstones: Vec<Tombstone>,
-    /// Scope selectivo (Fase 5.7). `default` para poder hablar con una versión
-    /// anterior sin romper.
+    /// Selective scope (Phase 5.7). `default` so it can still talk to an
+    /// older version without breaking.
     #[serde(default)]
     pub scopes: Vec<ScopeEntry>,
     #[serde(default)]
@@ -52,9 +53,9 @@ pub struct Applied {
     pub tracks: usize,
     pub playlists: usize,
     pub memberships: usize,
-    /// Cosas borradas por tombstones entrantes (Fase 5.6).
+    /// Things deleted by incoming tombstones (Phase 5.6).
     pub deleted: usize,
-    /// Filas de scope selectivo aplicadas (Fase 5.7).
+    /// Selective scope rows applied (Phase 5.7).
     #[serde(default)]
     pub scope: usize,
 }
@@ -65,17 +66,17 @@ impl Applied {
     }
 }
 
-/// Qué de `local` le falta o le quedó viejo a `remote`. Es lo que hay que
-/// mandarle para que quede al día.
-/// Índices del manifest del otro lado. Se arman una vez y se consultan miles
-/// de veces: con `find`/`any` sobre las listas, comparar dos bibliotecas de
-/// veinte mil tracks son cientos de millones de comparaciones de strings — y
-/// esto corre dos veces por sync, una por dirección.
+/// What `local` has that `remote` is missing or has gone stale on. This is
+/// what needs to be sent so it's caught up.
+/// Indexes of the other side's manifest. Built once and queried thousands
+/// of times: with `find`/`any` over the lists, comparing two libraries of
+/// twenty thousand tracks would mean hundreds of millions of string
+/// comparisons — and this runs twice per sync, once per direction.
 struct Index<'a> {
     tracks: std::collections::HashMap<&'a str, &'a TrackEntry>,
     playlists: std::collections::HashMap<&'a str, &'a PlaylistEntry>,
     memberships: std::collections::HashMap<String, &'a Membership>,
-    /// (entidad, uid) -> cuándo se borró.
+    /// (entity, uid) -> when it was deleted.
     tombstones: std::collections::HashMap<(&'a str, &'a str), i64>,
     scopes: std::collections::HashMap<(&'a str, &'a str), &'a ScopeEntry>,
     device_sync: std::collections::HashMap<&'a str, &'a DeviceSync>,
@@ -117,12 +118,12 @@ pub fn changes_for_peer(local: &Manifest, remote: &Manifest) -> Changes {
     for t in &local.tracks {
         let theirs = they.tracks.get(t.uid.as_str()).copied();
         let send = match theirs {
-            // Sólo si lo nuestro es estrictamente más nuevo: con `>=` se
-            // reenviaría todo en cada sync sin cambiar nada.
+            // Only if ours is strictly newer: with `>=` everything would be
+            // resent on every sync without anything actually changing.
             Some(r) => t.updated_at > r.updated_at,
-            // Si no lo tiene, la fila viaja con el archivo (5.4). Mandar
-            // metadata de un track cuyo archivo no está crearía una entrada
-            // fantasma en la biblioteca del otro.
+            // If they don't have it, the row travels with the file (5.4).
+            // Sending metadata for a track whose file isn't there would
+            // create a ghost entry in the other side's library.
             None => false,
         };
         if send {
@@ -141,10 +142,10 @@ pub fn changes_for_peer(local: &Manifest, remote: &Manifest) -> Changes {
         }
     }
 
-    // Las membresias viajan por dos motivos distintos: porque al otro le
-    // falta el par (union), o porque el ORDEN cambio. Sin lo segundo, un
-    // reordenamiento no se propagaba nunca: el par ya existia de los dos
-    // lados y nadie lo volvia a mandar.
+    // Memberships travel for two different reasons: because the other side
+    // is missing the pair (union), or because the ORDER changed. Without
+    // the second reason, a reorder never propagated: the pair already
+    // existed on both sides and nobody ever resent it.
     let mine_pl: std::collections::HashMap<&str, i64> = local
         .playlists
         .iter()
@@ -152,9 +153,9 @@ pub fn changes_for_peer(local: &Manifest, remote: &Manifest) -> Changes {
         .collect();
     for m in &local.memberships {
         let key = format!("{}:{}", m.playlist_uid, m.track_uid);
-        // Un tombstone del otro lado sólo manda si es POSTERIOR al agregado.
-        // Si no, volver a meter una canción en una playlist se deshacía solo:
-        // el borrado viejo le ganaba al agregado nuevo, para siempre.
+        // A tombstone from the other side only wins if it's LATER than the
+        // add. Otherwise, putting a song back into a playlist would undo
+        // itself: the old delete would beat the new add, forever.
         if let Some(deleted_at) = they.tombstones.get(&("playlist_track", key.as_str())) {
             if *deleted_at >= m.added_at {
                 continue;
@@ -162,8 +163,8 @@ pub fn changes_for_peer(local: &Manifest, remote: &Manifest) -> Changes {
         }
         match they.memberships.get(&key) {
             None => out.memberships.push(m.clone()),
-            // El orden es de quien toco la playlist mas recientemente. Las
-            // membresias no tienen reloj propio; la playlist si.
+            // Order belongs to whoever touched the playlist most recently.
+            // Memberships have no clock of their own; the playlist does.
             Some(r) if r.rank != m.rank => {
                 let mine = mine_pl.get(m.playlist_uid.as_str()).copied().unwrap_or(0);
                 let theirs = they
@@ -181,9 +182,9 @@ pub fn changes_for_peer(local: &Manifest, remote: &Manifest) -> Changes {
 
     out.tombstones = local.tombstones.clone();
 
-    // Scope: se manda lo que del otro lado falta o quedó viejo. Va en los dos
-    // sentidos como cualquier otro dato replicado — cada dispositivo puede
-    // editar el scope de todos, incluido el propio.
+    // Scope: send whatever the other side is missing or has gone stale on.
+    // It travels in both directions like any other replicated data — every
+    // device can edit everyone's scope, including its own.
     for e in &local.scopes {
         let theirs = they
             .scopes
@@ -205,7 +206,7 @@ fn has_tombstone(conn: &Connection, entity: &str, uid: &str) -> bool {
     tombstone_at(conn, entity, uid).is_some()
 }
 
-/// `deleted_at` del tombstone, si lo hay.
+/// The tombstone's `deleted_at`, if there is one.
 fn tombstone_at(conn: &Connection, entity: &str, uid: &str) -> Option<i64> {
     conn.query_row(
         "SELECT deleted_at FROM tombstones WHERE entity = ?1 AND uid = ?2",
@@ -217,17 +218,19 @@ fn tombstone_at(conn: &Connection, entity: &str, uid: &str) -> Option<i64> {
     .flatten()
 }
 
-/// Aplica los cambios recibidos, borrados incluidos.
+/// Applies the received changes, deletes included.
 ///
-/// Un borrado se aplica siempre. Hubo una política por dispositivo que permitía
-/// ignorarlos o encolarlos para confirmar, y se sacó en la Fase 6.4 porque no
-/// podía cumplir lo que prometía: filtraba por **quién te pasó** el tombstone,
-/// no por quién borró. Con tres dispositivos, un borrado que este rechazaba al
-/// celular entraba igual por la laptop, que lo había aceptado. Con un server
-/// siempre prendido dejaba de ser un caso raro y pasaba a ser la regla.
+/// A delete is always applied. There used to be a per-device policy that
+/// allowed ignoring or queuing them for confirmation, removed in Phase 6.4
+/// because it couldn't deliver what it promised: it filtered by **who
+/// passed you** the tombstone, not by who deleted. With three devices, a
+/// delete this one rejected on the phone still got in through the laptop,
+/// which had accepted it. With a server always on, this stopped being a
+/// rare case and became the rule.
 ///
-/// Lo que protege de un borrado por error es la papelera, que no filtra nada y
-/// funciona siempre: el archivo va a `.sway-trash` y se queda 30 días.
+/// What protects against an accidental delete is the trash, which filters
+/// nothing and always works: the file goes to `.sway-trash` and stays
+/// there for 30 days.
 pub fn apply(
     conn: &Connection,
     changes: &Changes,
@@ -235,7 +238,7 @@ pub fn apply(
 ) -> rusqlite::Result<Applied> {
     let mut applied = Applied::default();
 
-    // --- Metadata de tracks -------------------------------------------------
+    // --- Track metadata ------------------------------------------------
     for t in &changes.tracks {
         let local: Option<(i64, i64)> = conn
             .query_row(
@@ -244,9 +247,9 @@ pub fn apply(
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        // Un track que no está acá no se crea desde metadata suelta: su fila
-        // llega junto con el archivo (5.4). Si no, quedaría una entrada que
-        // no se puede reproducir.
+        // A track that isn't here doesn't get created from loose metadata:
+        // its row arrives together with the file (5.4). Otherwise there'd
+        // be an entry left over that can't be played.
         let Some((id, local_updated)) = local else { continue };
         if t.updated_at <= local_updated {
             continue;
@@ -269,11 +272,12 @@ pub fn apply(
         applied.tracks += 1;
     }
 
-    // --- Playlists y carpetas ----------------------------------------------
+    // --- Playlists and folders ------------------------------------------
     //
-    // Dos pasadas: primero existen todas (sin padre), después se enganchan.
-    // Vienen en cualquier orden y una carpeta puede llegar después de sus
-    // hijos; resolver el padre en una sola pasada dejaría nodos colgados.
+    // Two passes: first everything is created (with no parent), then it's
+    // hooked up. They can arrive in any order and a folder can arrive
+    // after its children; resolving the parent in a single pass would
+    // leave dangling nodes.
     for p in &changes.playlists {
         if has_tombstone(conn, "playlist", &p.uid) {
             continue;
@@ -305,7 +309,7 @@ pub fn apply(
             }
         }
     }
-    // Segunda pasada: ahora sí los padres existen.
+    // Second pass: now the parents actually exist.
     for p in &changes.playlists {
         if has_tombstone(conn, "playlist", &p.uid) {
             continue;
@@ -322,16 +326,16 @@ pub fn apply(
         )?;
     }
 
-    // --- Membresías ---------------------------------------------------------
+    // --- Memberships -----------------------------------------------------
     for m in &changes.memberships {
         let key = format!("{}:{}", m.playlist_uid, m.track_uid);
-        // Igual que arriba: el tombstone local sólo gana si es posterior al
-        // agregado que llega.
+        // Same as above: the local tombstone only wins if it's later than
+        // the incoming add.
         if let Some(deleted_at) = tombstone_at(conn, "playlist_track", &key) {
             if deleted_at >= m.added_at {
                 continue;
             }
-            // El agregado es más nuevo: el borrado quedó viejo y estorba.
+            // The add is newer: the old delete is stale and in the way.
             conn.execute(
                 "DELETE FROM tombstones WHERE entity = 'playlist_track' AND uid = ?1",
                 [&key],
@@ -345,11 +349,11 @@ pub fn apply(
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        // Si el track todavía no llegó a este dispositivo, la membresía se
-        // ignora: el próximo sync la trae, cuando el track exista.
+        // If the track hasn't reached this device yet, the membership is
+        // ignored: the next sync brings it, once the track exists.
         let Some((pid, tid)) = ids else { continue };
-        // `DO UPDATE` y no `OR IGNORE`: un par que ya existe puede venir con
-        // un rank distinto, que es como viaja un reordenamiento.
+        // `DO UPDATE` and not `OR IGNORE`: a pair that already exists can
+        // arrive with a different rank, which is how a reorder travels.
         let n = conn.execute(
             "INSERT INTO playlist_tracks (playlist_id, track_id, rank, added_at)
              VALUES (?1, ?2, ?3, ?4)
@@ -360,10 +364,10 @@ pub fn apply(
         applied.memberships += n;
     }
 
-    // --- Scope selectivo (Fase 5.7) ----------------------------------------
+    // --- Selective scope (Phase 5.7) --------------------------------------
     //
-    // Dato replicado como cualquier otro, con LWW por fila: el scope del
-    // celular se edita desde la PC y al revés.
+    // Replicated data like anything else, LWW per row: the phone's scope
+    // gets edited from the PC and vice versa.
     for e in &changes.scopes {
         if crate::scope::apply_entry(conn, e)? {
             applied.scope += 1;
@@ -375,11 +379,11 @@ pub fn apply(
         }
     }
 
-    // --- Tombstones (Fase 5.6) ---------------------------------------------
+    // --- Tombstones (Phase 5.6) -------------------------------------------
     //
-    // Se guardan SIEMPRE, aunque la política no borre: es lo que impide que
-    // este dispositivo le devuelva al otro lo que el otro ya borró. Aplicarlos
-    // o no es una decisión aparte.
+    // Always saved, even when the policy doesn't delete: this is what
+    // prevents this device from giving back to the other side what it
+    // already deleted. Whether to apply them or not is a separate decision.
     for t in &changes.tombstones {
         conn.execute(
             "INSERT OR IGNORE INTO tombstones (entity, uid, deleted_at, device_uid)
@@ -392,11 +396,12 @@ pub fn apply(
     Ok(applied)
 }
 
-/// Aplica un borrado. Devuelve 1 si borró algo, 0 si no había nada que borrar.
+/// Applies a delete. Returns 1 if it deleted something, 0 if there was
+/// nothing to delete.
 ///
-/// El archivo de audio **no se destruye**: va a la papelera de la biblioteca,
-/// donde sobrevive 30 días. Un borrado local lo hiciste vos mirando la
-/// pantalla; uno que llega por la red conviene que sea recuperable.
+/// The audio file **is not destroyed**: it goes to the library trash,
+/// where it survives 30 days. A local delete you did while watching the
+/// screen; one arriving over the network had better be recoverable.
 fn apply_tombstone(
     conn: &Connection,
     music_dir: &std::path::Path,
@@ -413,21 +418,21 @@ fn apply_tombstone(
                 .optional()?;
             let Some((id, path)) = row else { return Ok(0) };
             let path = std::path::Path::new(&path);
-            // Sólo se toca lo que vive en la carpeta gestionada. Un archivo
-            // legacy de afuera no es nuestro para moverlo.
+            // Only what lives in the managed folder gets touched. A legacy
+            // file from outside isn't ours to move.
             if path.starts_with(music_dir) && path.exists() {
                 match crate::trash::move_to_trash(music_dir, path) {
                     Ok(dest) => log::info!("[sync] moved to trash: {}", dest.display()),
                     Err(e) => {
-                        // Si el archivo no se pudo mover, la fila se queda:
-                        // una fila sin archivo es peor que un borrado que no
-                        // se aplicó y se reintenta en el próximo sync.
+                        // If the file couldn't be moved, the row stays: a
+                        // row with no file is worse than a delete that
+                        // didn't apply and gets retried on the next sync.
                         log::warn!("[sync] could not move {} to trash: {e}", path.display());
                         return Ok(0);
                     }
                 }
             }
-            // El CASCADE lo saca de todas las playlists.
+            // The CASCADE removes it from every playlist.
             conn.execute("DELETE FROM tracks WHERE id = ?1", [id])?;
             Ok(1)
         }
@@ -437,8 +442,8 @@ fn apply_tombstone(
         }
         "playlist_track" => {
             let Some((pl, tr)) = t.uid.split_once(':') else { return Ok(0) };
-            // Sólo si el borrado es posterior al agregado local. Si acá se
-            // volvió a agregar después, ese agregado es la última palabra.
+            // Only if the delete is later than the local add. If it was
+            // added again after that, that add is the last word.
             let n = conn.execute(
                 "DELETE FROM playlist_tracks
                  WHERE playlist_id = (SELECT id FROM playlists WHERE uid = ?1)
@@ -504,37 +509,37 @@ mod tests {
     #[test]
     fn newer_metadata_wins_and_older_is_ignored() {
         let conn = mem();
-        add_track(&conn, "t1", "viejo", 100);
+        add_track(&conn, "t1", "old", 100);
         let changes = Changes {
-            tracks: vec![entry("t1", "nuevo", 500)],
+            tracks: vec![entry("t1", "new", 500)],
             ..Default::default()
         };
-        assert_eq!(apply(&conn, &changes, std::path::Path::new("/nada")).unwrap().tracks, 1);
+        assert_eq!(apply(&conn, &changes, std::path::Path::new("/nowhere")).unwrap().tracks, 1);
         let title: String = conn
             .query_row("SELECT title FROM tracks WHERE uid = 't1'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(title, "nuevo");
+        assert_eq!(title, "new");
 
-        // Un cambio más viejo no pisa nada.
+        // An older change overwrites nothing.
         let old = Changes {
-            tracks: vec![entry("t1", "anterior", 200)],
+            tracks: vec![entry("t1", "previous", 200)],
             ..Default::default()
         };
-        assert_eq!(apply(&conn, &old, std::path::Path::new("/nada")).unwrap().tracks, 0);
+        assert_eq!(apply(&conn, &old, std::path::Path::new("/nowhere")).unwrap().tracks, 0);
         let title: String = conn
             .query_row("SELECT title FROM tracks WHERE uid = 't1'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(title, "nuevo");
+        assert_eq!(title, "new");
     }
 
-    /// Aplicar dos veces lo mismo no puede cambiar nada la segunda vez: si no,
-    /// cada sync se contaría como trabajo pendiente para siempre.
+    /// Applying the same thing twice can't change anything the second time:
+    /// otherwise every sync would count as pending work forever.
     #[test]
     fn applying_twice_is_a_no_op() {
         let conn = mem();
-        add_track(&conn, "t1", "viejo", 100);
+        add_track(&conn, "t1", "old", 100);
         let changes = Changes {
-            tracks: vec![entry("t1", "nuevo", 500)],
+            tracks: vec![entry("t1", "new", 500)],
             playlists: vec![pl("p1", "Sets", None, 10)],
             memberships: vec![Membership {
                 playlist_uid: "p1".into(),
@@ -544,26 +549,26 @@ mod tests {
             }],
             ..Default::default()
         };
-        let first = apply(&conn, &changes, std::path::Path::new("/nada")).unwrap();
+        let first = apply(&conn, &changes, std::path::Path::new("/nowhere")).unwrap();
         assert!(first.total() > 0);
-        let second = apply(&conn, &changes, std::path::Path::new("/nada")).unwrap();
-        assert_eq!(second.total(), 0, "la segunda pasada no debe cambiar nada");
+        let second = apply(&conn, &changes, std::path::Path::new("/nowhere")).unwrap();
+        assert_eq!(second.total(), 0, "the second pass must not change anything");
     }
 
-    /// Las carpetas pueden llegar después de sus hijos: la jerarquía tiene que
-    /// quedar bien igual.
+    /// Folders can arrive after their children: the hierarchy still has to
+    /// come out right.
     #[test]
     fn hierarchy_resolves_regardless_of_arrival_order() {
         let conn = mem();
         let changes = Changes {
-            // El hijo primero, el padre después.
+            // The child first, the parent after.
             playlists: vec![
                 pl("p1", "Warmup", Some("f1"), 10),
                 pl("f1", "Electronica", None, 10),
             ],
             ..Default::default()
         };
-        apply(&conn, &changes, std::path::Path::new("/nada")).unwrap();
+        apply(&conn, &changes, std::path::Path::new("/nowhere")).unwrap();
 
         let (child_parent, folder_id): (Option<i64>, i64) = (
             conn.query_row("SELECT parent_id FROM playlists WHERE uid = 'p1'", [], |r| r.get(0))
@@ -574,7 +579,8 @@ mod tests {
         assert_eq!(child_parent, Some(folder_id));
     }
 
-    /// Una playlist borrada acá no vuelve porque el otro todavía la tenga.
+    /// A playlist deleted here doesn't come back just because the other
+    /// side still has it.
     #[test]
     fn tombstoned_playlists_are_not_recreated() {
         let conn = mem();
@@ -587,15 +593,16 @@ mod tests {
             playlists: vec![pl("p1", "Sets", None, 10)],
             ..Default::default()
         };
-        assert_eq!(apply(&conn, &changes, std::path::Path::new("/nada")).unwrap().playlists, 0);
+        assert_eq!(apply(&conn, &changes, std::path::Path::new("/nowhere")).unwrap().playlists, 0);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM playlists", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0);
     }
 
-    /// Sacar un track de una playlist sólo se propaga con tombstone; sin él,
-    /// la unión lo vuelve a poner (agregar le gana a quitar concurrente).
+    /// Removing a track from a playlist only propagates with a tombstone;
+    /// without one, the union puts it back (adding beats a concurrent
+    /// removal).
     #[test]
     fn removed_membership_stays_removed_only_with_a_tombstone() {
         let conn = mem();
@@ -606,7 +613,7 @@ mod tests {
                 playlists: vec![pl("p1", "Sets", None, 10)],
                 ..Default::default()
             },
-            std::path::Path::new("/nada"))
+            std::path::Path::new("/nowhere"))
         .unwrap();
         let member = Changes {
             memberships: vec![Membership {
@@ -617,20 +624,20 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert_eq!(apply(&conn, &member, std::path::Path::new("/nada")).unwrap().memberships, 1);
+        assert_eq!(apply(&conn, &member, std::path::Path::new("/nowhere")).unwrap().memberships, 1);
 
-        // Se saca acá, con constancia.
+        // Removed here, with a record of it.
         conn.execute("DELETE FROM playlist_tracks", []).unwrap();
         conn.execute(
             "INSERT INTO tombstones (entity, uid, deleted_at) VALUES ('playlist_track','p1:t1',999)",
             [],
         )
         .unwrap();
-        assert_eq!(apply(&conn, &member, std::path::Path::new("/nada")).unwrap().memberships, 0, "no debe volver");
+        assert_eq!(apply(&conn, &member, std::path::Path::new("/nowhere")).unwrap().memberships, 0, "must not come back");
     }
 
-    /// Una membresía de un track que todavía no llegó se ignora sin romper
-    /// nada; el próximo sync la trae cuando el archivo esté.
+    /// A membership for a track that hasn't arrived yet is skipped without
+    /// breaking anything; the next sync brings it once the file is there.
     #[test]
     fn membership_of_an_unknown_track_is_skipped() {
         let conn = mem();
@@ -638,27 +645,27 @@ mod tests {
             playlists: vec![pl("p1", "Sets", None, 10)],
             memberships: vec![Membership {
                 playlist_uid: "p1".into(),
-                track_uid: "todavia-no".into(),
+                track_uid: "not-yet".into(),
                 rank: "V".into(),
                 added_at: 0,
             }],
             ..Default::default()
         };
-        let applied = apply(&conn, &changes, std::path::Path::new("/nada")).unwrap();
+        let applied = apply(&conn, &changes, std::path::Path::new("/nowhere")).unwrap();
         assert_eq!(applied.playlists, 1);
         assert_eq!(applied.memberships, 0);
     }
 
-    /// La metadata de un track cuyo archivo no está no crea una entrada
-    /// fantasma: la fila llega junto con el archivo.
+    /// Metadata for a track whose file isn't there doesn't create a ghost
+    /// entry: the row arrives together with the file.
     #[test]
     fn metadata_for_an_unknown_track_does_not_create_a_row() {
         let conn = mem();
         let changes = Changes {
-            tracks: vec![entry("nunca-visto", "x", 10)],
+            tracks: vec![entry("never-seen", "x", 10)],
             ..Default::default()
         };
-        assert_eq!(apply(&conn, &changes, std::path::Path::new("/nada")).unwrap().tracks, 0);
+        assert_eq!(apply(&conn, &changes, std::path::Path::new("/nowhere")).unwrap().tracks, 0);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
             .unwrap();
@@ -691,13 +698,13 @@ mod tests {
         }
     }
 
-    /// Un borrado que llega por la red saca el track de la biblioteca, pero el
-    /// archivo va a la papelera: recuperable, no destruido.
+    /// A delete that arrives over the network removes the track from the
+    /// library, but the file goes to the trash: recoverable, not destroyed.
     #[test]
     fn a_propagated_delete_moves_the_file_to_the_trash() {
         let music = tmp_music("del");
         let conn = mem();
-        let f = music.join("borrado.flac");
+        let f = music.join("deleted.flac");
         std::fs::write(&f, b"audio").unwrap();
         add_track_at(&conn, "t1", &f);
 
@@ -711,62 +718,62 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 0, "sale de la biblioteca");
-        assert!(!f.exists(), "y de la carpeta gestionada");
-        let recuperable = std::fs::read_dir(crate::trash::trash_dir(&music))
+        assert_eq!(n, 0, "leaves the library");
+        assert!(!f.exists(), "and the managed folder");
+        let recoverable = std::fs::read_dir(crate::trash::trash_dir(&music))
             .unwrap()
             .flatten()
             .any(|e| std::fs::read(e.path()).unwrap() == b"audio");
-        assert!(recuperable, "pero sigue existiendo en la papelera");
+        assert!(recoverable, "but still exists in the trash");
         std::fs::remove_dir_all(&music).ok();
     }
 
-    /// El scope viaja como cualquier otro dato replicado: lo edito acá para el
-    /// celular y el celular se entera.
+    /// Scope travels like any other replicated data: I edit it here for
+    /// the phone and the phone finds out.
     #[test]
     fn scope_rows_travel_and_the_newest_wins() {
         let mut local = empty_manifest();
         local.scopes.push(ScopeEntry {
-            device_uid: "celu".into(),
+            device_uid: "phone".into(),
             playlist_uid: "sets".into(),
             selected: true,
             updated_at: 500,
         });
         local.device_sync.push(DeviceSync {
-            device_uid: "celu".into(),
+            device_uid: "phone".into(),
             mode: "selected".into(),
             direction: "both".into(),
             updated_at: 500,
         });
         let mut remote = empty_manifest();
         remote.scopes.push(ScopeEntry {
-            device_uid: "celu".into(),
+            device_uid: "phone".into(),
             playlist_uid: "sets".into(),
             selected: false,
             updated_at: 100,
         });
 
         let out = changes_for_peer(&local, &remote);
-        assert_eq!(out.scopes.len(), 1, "lo mío es más nuevo: viaja");
+        assert_eq!(out.scopes.len(), 1, "mine is newer: it travels");
         assert_eq!(out.device_sync.len(), 1);
 
-        // Y del otro lado no vuelve nada: lo suyo quedó viejo.
+        // And nothing comes back the other way: theirs went stale.
         assert!(changes_for_peer(&remote, &local).scopes.is_empty());
 
         let conn = mem();
-        let applied = apply(&conn, &out, std::path::Path::new("/nada")).unwrap();
+        let applied = apply(&conn, &out, std::path::Path::new("/nowhere")).unwrap();
         assert_eq!(applied.scope, 2);
-        let s = crate::scope::get(&conn, "celu").unwrap();
+        let s = crate::scope::get(&conn, "phone").unwrap();
         assert_eq!(s.mode, crate::scope::Mode::Selected);
         assert!(s.selected.contains("sets"));
     }
 
-    /// Borrar una playlist no puede llevarse la música puesta.
+    /// Deleting a playlist can't take its music with it.
     #[test]
     fn deleting_a_playlist_does_not_delete_its_tracks() {
         let music = tmp_music("pl");
         let conn = mem();
-        let f = music.join("sobrevive.flac");
+        let f = music.join("survives.flac");
         std::fs::write(&f, b"audio").unwrap();
         add_track_at(&conn, "t1", &f);
         apply(
@@ -800,19 +807,19 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
             .unwrap();
         assert_eq!(playlists, 0);
-        assert_eq!(tracks, 1, "el track sigue en la biblioteca");
-        assert!(f.exists(), "y su archivo también");
+        assert_eq!(tracks, 1, "the track stays in the library");
+        assert!(f.exists(), "and so does its file");
         std::fs::remove_dir_all(&music).ok();
     }
 
-    /// Un archivo de afuera de la carpeta gestionada (legacy) no es nuestro
-    /// para moverlo: se saca de la biblioteca y el archivo queda donde está.
+    /// A file outside the managed folder (legacy) isn't ours to move: it's
+    /// removed from the library and the file stays where it is.
     #[test]
     fn a_file_outside_the_managed_folder_is_left_alone() {
         let music = tmp_music("legacy-managed");
         let elsewhere = tmp_music("legacy-outside");
         let conn = mem();
-        let f = elsewhere.join("ajeno.flac");
+        let f = elsewhere.join("foreign.flac");
         std::fs::write(&f, b"audio").unwrap();
         add_track_at(&conn, "t1", &f);
 
@@ -825,7 +832,7 @@ mod tests {
             &music)
         .unwrap();
 
-        assert!(f.exists(), "el archivo ajeno no se toca");
+        assert!(f.exists(), "the foreign file isn't touched");
         std::fs::remove_dir_all(&music).ok();
         std::fs::remove_dir_all(&elsewhere).ok();
     }
@@ -846,25 +853,26 @@ mod tests {
         }
     }
 
-    /// Reordenar no agrega ni saca nada: el par ya existe de los dos lados y
-    /// sólo cambia su rank. Sin esto, mover una canción dentro de una playlist
-    /// no se propagaba nunca — el orden de un set es medio el punto.
+    /// Reordering neither adds nor removes anything: the pair already
+    /// exists on both sides and only its rank changes. Without this,
+    /// moving a song within a playlist never propagated — and the order of
+    /// a set is kind of the point.
     #[test]
     fn reordering_travels_when_the_playlist_is_newer() {
-        let reordenada = manifest_with(500, "b");
-        let vieja = manifest_with(100, "a");
+        let reordered = manifest_with(500, "b");
+        let stale = manifest_with(100, "a");
 
-        let c = changes_for_peer(&reordenada, &vieja);
-        assert_eq!(c.memberships.len(), 1, "el rank nuevo tiene que viajar");
+        let c = changes_for_peer(&reordered, &stale);
+        assert_eq!(c.memberships.len(), 1, "the new rank has to travel");
         assert_eq!(c.memberships[0].rank, "b");
 
-        // Y en la otra dirección no: el que tocó último manda.
-        let c = changes_for_peer(&vieja, &reordenada);
+        // And not in the other direction: whoever touched it last wins.
+        let c = changes_for_peer(&stale, &reordered);
         assert!(c.memberships.is_empty());
     }
 
-    /// Mismo orden en los dos lados: nada que mandar, por más que la playlist
-    /// tenga fechas distintas.
+    /// Same order on both sides: nothing to send, no matter how different
+    /// the playlist's dates are.
     #[test]
     fn an_unchanged_order_is_not_resent() {
         let a = manifest_with(500, "a");
@@ -872,7 +880,8 @@ mod tests {
         assert!(changes_for_peer(&a, &b).memberships.is_empty());
     }
 
-    /// Y al aplicar, un par que ya existe tiene que quedar con el rank nuevo.
+    /// And when applying, a pair that already exists has to end up with the
+    /// new rank.
     #[test]
     fn applying_a_reorder_updates_the_existing_rank() {
         let conn = mem();
@@ -887,7 +896,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let music = std::path::Path::new("/nada");
+        let music = std::path::Path::new("/nowhere");
         apply(&conn, &base, music).unwrap();
 
         let reorder = Changes {
@@ -910,7 +919,7 @@ mod tests {
             .unwrap();
         assert_eq!(rank, "z");
 
-        // Y aplicarlo otra vez no cuenta como trabajo.
+        // And applying it again doesn't count as work.
         assert_eq!(
             apply(&conn, &reorder, music)
                 .unwrap()
@@ -939,13 +948,13 @@ mod tests {
         }
     }
 
-    /// Volver a agregar una canción a una playlist de la que se la había
-    /// sacado. El tombstone de aquella vez no puede ganarle al agregado
-    /// nuevo: si lo hiciera, agregarla se desharía solo en el próximo sync —
-    /// que es exactamente lo que pasaba.
+    /// Re-adding a song to a playlist it had been removed from. The
+    /// tombstone from back then can't beat the new add: if it did, adding
+    /// it back would undo itself on the next sync — which is exactly what
+    /// used to happen.
     #[test]
     fn re_adding_a_track_beats_an_older_removal() {
-        let music = std::path::Path::new("/nada");
+        let music = std::path::Path::new("/nowhere");
         let conn = mem();
         add_track(&conn, "t1", "x", 1);
         apply(
@@ -957,24 +966,24 @@ mod tests {
             music)
         .unwrap();
 
-        // Se sacó hace rato...
+        // Removed a while ago...
         conn.execute(
             "INSERT INTO tombstones (entity, uid, deleted_at) VALUES ('playlist_track','p1:t1',100)",
             [],
         )
         .unwrap();
 
-        // ...y ahora llega un agregado POSTERIOR.
+        // ...and now a LATER add arrives.
         let re_add = Changes {
             memberships: vec![member("V", 500)],
             ..Default::default()
         };
         assert_eq!(apply(&conn, &re_add, music).unwrap().memberships, 1);
 
-        // Y el tombstone viejo se limpia, para no volver a estorbar.
+        // And the old tombstone gets cleared, so it doesn't get in the way again.
         assert!(!has_tombstone(&conn, "playlist_track", "p1:t1"));
 
-        // Un tombstone POSTERIOR sí gana.
+        // A LATER tombstone does win.
         let removal = Changes {
             tombstones: vec![Tombstone {
                 entity: "playlist_track".into(),
@@ -986,10 +995,10 @@ mod tests {
         assert_eq!(apply(&conn, &removal, music).unwrap().deleted, 1);
     }
 
-    /// Y un borrado que llega viejo no puede sacar algo agregado después.
+    /// And a delete that arrives stale can't remove something added later.
     #[test]
     fn an_older_removal_does_not_undo_a_newer_add() {
-        let music = std::path::Path::new("/nada");
+        let music = std::path::Path::new("/nowhere");
         let conn = mem();
         add_track(&conn, "t1", "x", 1);
         apply(
@@ -1014,11 +1023,11 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM playlist_tracks", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 1, "la canción se queda");
+        assert_eq!(n, 1, "the song stays");
     }
 
-    /// El mismo criterio del lado que decide qué mandar: no se omite un
-    /// agregado nuevo por un tombstone viejo del otro.
+    /// The same criterion on the side deciding what to send: a new add
+    /// isn't skipped because of an older tombstone from the other side.
     #[test]
     fn a_newer_add_is_still_sent_despite_an_older_remote_tombstone() {
         let mut local = empty_manifest();
@@ -1035,7 +1044,7 @@ mod tests {
 
         assert_eq!(changes_for_peer(&local, &remote).memberships.len(), 1);
 
-        // Pero si el tombstone del otro es posterior, no se manda.
+        // But if the other side's tombstone is later, it isn't sent.
         remote.tombstones[0].deleted_at = 900;
         assert!(changes_for_peer(&local, &remote).memberships.is_empty());
     }
@@ -1044,7 +1053,7 @@ mod tests {
     fn changes_for_peer_only_includes_what_is_newer_or_missing() {
         let local = Manifest {
             device_uid: "a".into(),
-            tracks: vec![entry("t1", "nuevo", 500), entry("t2", "igual", 100)],
+            tracks: vec![entry("t1", "new", 500), entry("t2", "same", 100)],
             playlists: vec![pl("p1", "Sets", None, 50)],
             memberships: vec![Membership {
                 playlist_uid: "p1".into(),
@@ -1057,14 +1066,14 @@ mod tests {
         };
         let remote = Manifest {
             device_uid: "b".into(),
-            tracks: vec![entry("t1", "viejo", 100), entry("t2", "igual", 100)],
+            tracks: vec![entry("t1", "old", 100), entry("t2", "same", 100)],
             playlists: vec![],
             memberships: vec![],
             tombstones: vec![],
             ..Default::default()
         };
         let c = changes_for_peer(&local, &remote);
-        assert_eq!(c.tracks.len(), 1, "sólo t1, que es más nuevo");
+        assert_eq!(c.tracks.len(), 1, "only t1, which is newer");
         assert_eq!(c.tracks[0].uid, "t1");
         assert_eq!(c.playlists.len(), 1);
         assert_eq!(c.memberships.len(), 1);

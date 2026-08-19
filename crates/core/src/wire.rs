@@ -1,14 +1,14 @@
-//! Canal cifrado entre dos dispositivos Sway (Fase 5.2).
+//! Encrypted channel between two Sway devices (Phase 5.2).
 //!
-//! Handshake **Noise XX** (`Noise_XX_25519_ChaChaPoly_BLAKE2s`) sobre TCP.
-//! XX intercambia las claves estaticas de los dos lados, asi que despues del
-//! handshake cada uno sabe con que clave publica esta hablando — pero todavia
-//! no si esa clave es de quien dice ser. Eso lo resuelve el codigo de
-//! verificacion (ver `sas_code`), no la criptografia.
+//! **Noise XX** handshake (`Noise_XX_25519_ChaChaPoly_BLAKE2s`) over TCP.
+//! XX exchanges the static keys of both sides, so after the handshake each
+//! one knows which public key it's talking to — but not yet whether that key
+//! belongs to who it claims to be. That's resolved by the verification code
+//! (see `sas_code`), not by the cryptography.
 //!
-//! Se eligio Noise sobre TLS porque no hay que montar PKI: cada dispositivo
-//! tiene un par de claves y nada mas. Ni certificados que generar, ni cadenas
-//! que validar, ni un almacen de confianza que mantener en Android.
+//! Noise was chosen over TLS because there's no PKI to set up: each device
+//! just has a keypair and nothing else. No certificates to generate, no
+//! chains to validate, no trust store to maintain on Android.
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -18,28 +18,29 @@ use std::net::TcpStream;
 
 const PARAMS: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
 
-/// Tope de Noise para un mensaje (64 KiB), menos los 16 bytes del tag.
+/// Noise's cap for a single message (64 KiB), minus the 16-byte tag.
 const MAX_NOISE_PAYLOAD: usize = 65535 - 16;
-/// Cota de cordura sobre un mensaje logico entrante: evita que un peer
-/// hostil (o un bug) haga reservar memoria sin limite.
+/// Sanity bound on an incoming logical message: keeps a hostile peer (or a
+/// bug) from making us allocate unbounded memory.
 const MAX_MESSAGE: usize = 64 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
-// Mensajes
+// Messages
 // ---------------------------------------------------------------------------
 
-/// Hasta donde sabe un dispositivo de la biblioteca del otro.
+/// How up to date one device is on the other's library.
 ///
-/// `epoch` identifica la corrida del que atiende, y no es decoracion: la
-/// cuenta de revisiones vive en memoria y arranca de cero en cada arranque.
-/// Sin distinguir la corrida, una marca vieja (revision 57) puede coincidir
-/// con una revision 57 de OTRA corrida, y el que pregunta concluye que esta al
-/// dia justo cuando se perdio todo lo que paso en el medio. Con el `epoch`,
-/// una corrida distinta es siempre "no te conozco, veni a comparar".
+/// `epoch` identifies the run of the side being asked, and it's not
+/// decoration: the revision count lives in memory and starts from zero on
+/// every startup. Without distinguishing the run, an old mark (revision 57)
+/// could match a revision 57 from ANOTHER run, and the one asking would
+/// conclude it's up to date exactly when it lost everything that happened in
+/// between. With `epoch`, a different run always means "I don't know you,
+/// come compare".
 ///
-/// Importa mas desde que la marca se guarda en disco: antes vivia en memoria y
-/// se descartaba al cerrar la app, asi que el choque era raro; guardada, la
-/// marca sobrevive dias y coincidir pasa a ser cuestion de tiempo.
+/// This matters more now that the mark is saved to disk: it used to live in
+/// memory and get discarded when the app closed, so the collision was rare;
+/// saved, the mark survives for days and colliding becomes a matter of time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Mark {
@@ -50,28 +51,28 @@ pub struct Mark {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Msg {
-    /// Primer mensaje cuando el que llama todavia no esta pareado.
+    /// First message when the caller isn't paired yet.
     PairRequest {
         uid: String,
         name: String,
         platform: String,
-        /// Solo para vincularse con un dispositivo sin pantalla (el server de
-        /// archivo, Fase 6.2): ahi no hay nadie para comparar los seis digitos,
-        /// asi que la prueba de que tenes derecho a vincular es un token de su
-        /// configuracion. Entre dos dispositivos con pantalla va en `None` y
-        /// manda el codigo, como siempre.
+        /// Only for pairing with a screenless device (the file server, Phase
+        /// 6.2): there's no one there to compare the six digits, so the proof
+        /// that you have the right to pair is a token from its config.
+        /// Between two devices with a screen this is `None` and the code is
+        /// sent, as usual.
         ///
-        /// `default` a proposito: un peer con la version anterior no lo manda,
-        /// y su PairRequest tiene que seguir entrando.
+        /// `default` on purpose: a peer on the previous version doesn't send
+        /// it, and its PairRequest still has to be accepted.
         #[serde(default)]
         token: Option<String>,
     },
-    /// Decision del lado que recibe.
+    /// Decision from the receiving side.
     PairResponse { accepted: bool },
-    /// Decision del lado que llama. El pairing se concreta solo si los DOS
-    /// aceptaron: alcanza con que uno vea un codigo distinto para cortar.
+    /// Decision from the calling side. Pairing only goes through if BOTH
+    /// accepted: it's enough for one to see a different code to abort.
     PairAck { accepted: bool },
-    /// Presentacion entre dispositivos ya pareados.
+    /// Introduction between devices already paired.
     Hello {
         uid: String,
         name: String,
@@ -80,31 +81,33 @@ pub enum Msg {
         playlists: i64,
         clock_ms: i64,
     },
-    /// Corte ordenado con motivo, para poder mostrarlo en la UI del otro lado.
+    /// Orderly disconnect with a reason, so it can be shown in the UI on the
+    /// other side.
     Reject { reason: String },
-    /// "Te saqué de mis dispositivos". El pairing se guarda de los dos lados,
-    /// asi que desvincular tiene que avisar o el otro sigue creyendo que
-    /// estan vinculados para siempre.
+    /// "I removed you from my devices". Pairing is saved on both sides, so
+    /// unpairing has to notify the other or it keeps believing they're paired
+    /// forever.
     Unpair { uid: String },
-    /// "No te tengo en mi lista." Lo manda quien recibe un `Hello` de un peer
-    /// que no conoce; el que llama lo usa para darse cuenta de que lo
-    /// desvincularon del otro lado.
+    /// "I don't have you in my list." Sent by whoever receives a `Hello` from
+    /// a peer it doesn't know; the caller uses it to realize it was unpaired
+    /// from the other side.
     NotPaired,
-    /// Pedido y respuesta del inventario de la biblioteca (Fase 5.3).
-    /// `gzip` dice si quien pregunta sabe leer el inventario comprimido.
+    /// Request and response for the library inventory (Phase 5.3).
+    /// `gzip` says whether the requester knows how to read a compressed
+    /// inventory.
     ///
-    /// La capacidad viaja en el pedido y no en el saludo porque es asunto de
-    /// estos dos mensajes y de nadie mas: el que pregunta dice que sabe leer,
-    /// el que contesta le da eso. Sin estado de sesion que mantener al dia en
-    /// los cuatro lugares que procesan un `Hello`.
+    /// The capability travels in the request and not in the greeting because
+    /// it's a matter between these two messages and no one else: the
+    /// requester says it can read it, the responder gives it that. No session
+    /// state to keep up to date in the four places that process a `Hello`.
     ///
-    /// `default` a proposito, y en las dos direcciones. Un peer viejo manda
-    /// `{"type":"manifestReq"}` sin el campo y se lee como `false`, asi que
-    /// recibe el inventario de siempre. Y al reves, un peer viejo que recibe
-    /// el campo de mas lo ignora, porque para el esta variante no tiene campos
-    /// y serde saltea lo que no conoce (hay un test que lo fija). Sin esto,
-    /// actualizar la PC y no el celular rompia el sync entero — bastante peor
-    /// que que sea lento.
+    /// `default` on purpose, in both directions. An old peer sends
+    /// `{"type":"manifestReq"}` without the field and it reads as `false`, so
+    /// it gets the usual inventory. And conversely, an old peer that receives
+    /// the extra field ignores it, because for it this variant has no fields
+    /// and serde skips what it doesn't know (there's a test that pins this
+    /// down). Without this, updating the PC and not the phone would break
+    /// the whole sync — quite a bit worse than it being slow.
     ManifestReq {
         #[serde(default)]
         gzip: bool,
@@ -112,27 +115,27 @@ pub enum Msg {
     ManifestData {
         manifest: Box<crate::manifest::Manifest>,
     },
-    /// El mismo inventario, comprimido (ver `manifest::squeeze`).
+    /// The same inventory, compressed (see `manifest::squeeze`).
     ///
-    /// Va como variante aparte y no como un campo de `ManifestData` para que
-    /// un peer viejo, que no la conoce, falle al leerla en vez de creer que
-    /// recibio un inventario vacio. Solo se manda a quien dijo en su `Hello`
-    /// que sabe leerla.
+    /// It's a separate variant and not a field of `ManifestData` so that an
+    /// old peer, which doesn't know it, fails to read it instead of thinking
+    /// it received an empty inventory. Only sent to whoever said in its
+    /// `Hello` that it can read it.
     ManifestGz { data: Vec<u8> },
-    // --- Transferencia de archivos (Fase 5.4) -----------------------------
+    // --- File transfer (Phase 5.4) -----------------------------------------
     //
-    // Los bytes NO viajan adentro de estos mensajes: van como payloads crudos
-    // por el mismo canal (`Session::send_bytes`). Meterlos en el JSON
-    // costaria 1.33x en base64 o 3-4x como array de numeros, sobre gigabytes.
-    // El protocolo es: BlobStart -> N payloads crudos -> BlobEnd.
-    /// Pedido de un archivo por su hash. `offset` != 0 es una reanudacion.
+    // The bytes do NOT travel inside these messages: they go as raw payloads
+    // over the same channel (`Session::send_bytes`). Putting them in the JSON
+    // would cost 1.33x in base64 or 3-4x as a number array, over gigabytes.
+    // The protocol is: BlobStart -> N raw payloads -> BlobEnd.
+    /// Request for a file by its hash. `offset` != 0 is a resume.
     BlobReq { hash: String, offset: u64 },
-    /// Empieza el envio: `size` es lo que queda por mandar desde el offset.
+    /// Starts the transfer: `size` is what's left to send from the offset.
     BlobStart { size: u64 },
-    /// Fin del envio; `hash` es el del archivo COMPLETO, para verificar.
+    /// End of the transfer; `hash` is that of the COMPLETE file, to verify.
     BlobEnd { hash: String },
-    /// Empuje en la otra direccion: "tomá este archivo". Le siguen los
-    /// payloads crudos y un BlobEnd, igual que arriba.
+    /// Push in the other direction: "take this file". Followed by the raw
+    /// payloads and a BlobEnd, same as above.
     BlobPush {
         track_uid: String,
         hash: String,
@@ -146,65 +149,66 @@ pub enum Msg {
         bpm: Option<i64>,
         updated_at: i64,
     },
-    /// El otro lado no puede servir lo pedido (no lo tiene, no lo puede leer).
+    /// The other side can't serve what was requested (doesn't have it, can't
+    /// read it).
     BlobError { reason: String },
-    /// Metadata, playlists, carpetas y membresias que le faltan al otro lado
-    /// (Fase 5.5). Va despues de los archivos: una membresia de un track que
-    /// todavia no llego se ignora, asi que primero conviene que exista.
+    /// Metadata, playlists, folders and memberships the other side is
+    /// missing (Phase 5.5). Sent after the files: a membership for a track
+    /// that hasn't arrived yet is ignored, so it's better if it already
+    /// exists first.
     MetaPush {
         changes: Box<crate::merge::Changes>,
     },
-    /// Cuantos registros se aplicaron de verdad del otro lado.
+    /// How many records were actually applied on the other side.
     MetaAck {
         applied: crate::merge::Applied,
     },
-    // --- Aviso de novedades (Fase 6.9) -----------------------------------
+    // --- Change notification (Phase 6.9) ------------------------------------
     //
-    // El sync lo maneja siempre el que llama: el que atiende responde pedidos
-    // y no decide nada. Contra el server de archivo eso deja un agujero — un
-    // cambio hecho en el celular llega al server enseguida, pero la PC no
-    // tiene forma de enterarse, porque nadie le habla. Estos tres mensajes
-    // son la forma de que se entere sin preguntar cada tanto: el que llama
-    // deja una conexion abierta y el que atiende contesta cuando pasa algo.
-    /// "Avisame cuando cambie tu biblioteca." Despues de mandarlo, el que
-    /// llama no manda nada mas: escucha.
+    // Sync is always driven by the caller: the responder answers requests and
+    // decides nothing. Against the file server that leaves a gap — a change
+    // made on the phone reaches the server right away, but the PC has no way
+    // to find out, because nobody tells it. These three messages are how it
+    // finds out without polling every so often: the caller leaves a
+    // connection open and the responder replies when something happens.
+    /// "Tell me when your library changes." After sending it, the caller
+    /// sends nothing else: it listens.
     ///
-    /// `since` es la ultima revision que el que llama conoce. Es lo que hace
-    /// que reconectar sea barato: en un celular la conexion no sobrevive medio
-    /// minuto —cambia de wifi a datos, el NAT de la operadora corta lo que
-    /// esta callado—, asi que se reconecta todo el tiempo. Sin este numero,
-    /// cada reconexion tiene que arrastrar una puesta al dia completa por las
-    /// dudas; con el, el que atiende sabe si de verdad te perdiste algo y
-    /// contesta `Changed` en el acto, o parkea. `None` = "no se de nada":
-    /// parkea desde ahora.
+    /// `since` is the last revision the caller knows about. It's what makes
+    /// reconnecting cheap: on a phone the connection doesn't survive half a
+    /// minute —it switches from wifi to mobile data, the carrier's NAT cuts
+    /// off anything that's quiet—, so it reconnects constantly. Without this
+    /// number, every reconnection would have to drag along a full refresh
+    /// just in case; with it, the responder knows whether something was
+    /// actually missed and replies `Changed` on the spot, or parks. `None` =
+    /// "I don't know anything": park from now on.
     Watch { since: Option<Mark> },
-    /// Hubo novedades. Cierra la espera; lo que sigue es un sync normal, por
-    /// su propia conexion. La marca es desde donde seguir esperando despues.
+    /// There were changes. Ends the wait; what follows is a normal sync, on
+    /// its own connection. The mark is where to keep waiting from afterward.
     Changed { mark: Mark },
-    /// Latido mientras no pasa nada. Una conexion que se queda callada horas
-    /// la corta cualquier cosa en el medio (un proxy, el NAT del router) y
-    /// del lado que espera no se nota hasta que hace falta.
+    /// Heartbeat while nothing is happening. A connection that stays quiet
+    /// for hours gets cut by anything in between (a proxy, the router's NAT)
+    /// and the waiting side doesn't notice until it needs to.
     ///
-    /// Lleva la marca para que el que espera la mantenga al dia sin preguntar:
-    /// si se corta despues de horas parkeado, reconecta preguntando por lo
-    /// ultimo y no por lo de ayer.
+    /// Carries the mark so the waiting side keeps it up to date without
+    /// asking: if it gets cut after hours parked, it reconnects asking for
+    /// the latest and not for yesterday's.
     Ping { mark: Mark },
-    /// Cierre ordenado de la sesion.
+    /// Orderly close of the session.
     Bye,
 }
 
 // ---------------------------------------------------------------------------
-// Codigo de verificacion
+// Verification code
 // ---------------------------------------------------------------------------
 
-/// Seis digitos derivados del hash del handshake.
+/// Six digits derived from the handshake hash.
 ///
-/// Ese hash depende de las claves efimeras y estaticas de los dos lados, asi
-/// que un intermediario que se meta en el medio termina con DOS sesiones
-/// distintas y dos hashes distintos: no puede hacer que los dos codigos
-/// coincidan. Que el usuario compare los numeros en las dos pantallas es lo
-/// que convierte "hay un canal cifrado con alguien" en "hay un canal cifrado
-/// con este dispositivo".
+/// That hash depends on the ephemeral and static keys of both sides, so a
+/// man-in-the-middle ends up with TWO different sessions and two different
+/// hashes: it can't make the two codes match. Having the user compare the
+/// numbers on the two screens is what turns "there's an encrypted channel
+/// with someone" into "there's an encrypted channel with this device".
 pub fn sas_code(handshake_hash: &[u8]) -> String {
     let mut n: u32 = 0;
     for b in handshake_hash.iter().take(4) {
@@ -214,30 +218,30 @@ pub fn sas_code(handshake_hash: &[u8]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Claves estaticas
+// Static keys
 // ---------------------------------------------------------------------------
 
-/// Genera un par de claves nuevo (una sola vez por dispositivo).
+/// Generates a new keypair (once per device).
 pub fn generate_keypair() -> Result<(Vec<u8>, Vec<u8>)> {
     let kp = Builder::new(PARAMS.parse()?).generate_keypair()?;
     Ok((kp.private, kp.public))
 }
 
 // ---------------------------------------------------------------------------
-// Sesion
+// Session
 // ---------------------------------------------------------------------------
 
 pub struct Session {
     stream: TcpStream,
     noise: TransportState,
-    /// Clave publica estatica del otro lado, aprendida en el handshake.
+    /// The other side's static public key, learned during the handshake.
     pub peer_pubkey: Vec<u8>,
-    /// Codigo a mostrar en pantalla. Los dos lados calculan el mismo.
+    /// Code to show on screen. Both sides compute the same one.
     pub code: String,
 }
 
 impl Session {
-    /// Lado que llama.
+    /// Calling side.
     pub fn connect(stream: TcpStream, private_key: &[u8]) -> Result<Self> {
         tune(&stream);
         let mut hs = Builder::new(PARAMS.parse()?)
@@ -245,7 +249,7 @@ impl Session {
             .build_initiator()?;
         let mut buf = vec![0u8; 65535];
 
-        // XX es de tres mensajes: -> e | <- e ee s es | -> s se
+        // XX is three messages: -> e | <- e ee s es | -> s se
         let n = hs.write_message(&[], &mut buf)?;
         write_frame(&stream, &buf[..n])?;
         let msg = read_frame(&stream)?;
@@ -256,7 +260,7 @@ impl Session {
         Self::finish(stream, hs)
     }
 
-    /// Lado que acepta.
+    /// Accepting side.
     pub fn accept(stream: TcpStream, private_key: &[u8]) -> Result<Self> {
         tune(&stream);
         let mut hs = Builder::new(PARAMS.parse()?)
@@ -275,8 +279,8 @@ impl Session {
     }
 
     fn finish(stream: TcpStream, hs: HandshakeState) -> Result<Self> {
-        // El hash del handshake hay que leerlo ANTES de pasar a transporte:
-        // `into_transport_mode` consume el estado.
+        // The handshake hash has to be read BEFORE moving to transport mode:
+        // `into_transport_mode` consumes the state.
         let code = sas_code(hs.get_handshake_hash());
         let peer_pubkey = hs
             .get_remote_static()
@@ -299,10 +303,10 @@ impl Session {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
-    /// Un mensaje logico va como un frame de cabecera con el largo total, y
-    /// despues los frames de datos. Noise no puede cifrar mas de 64 KiB de
-    /// una, y los manifests (5.3) y los bloques de audio (5.4) pasan ese
-    /// tamaño de sobra, asi que el troceo se resuelve aca abajo una vez.
+    /// A logical message goes as a header frame with the total length, then
+    /// the data frames. Noise can't encrypt more than 64 KiB at once, and
+    /// manifests (5.3) and audio chunks (5.4) go well past that size, so the
+    /// chunking is handled here, in one place.
     pub fn send_bytes(&mut self, data: &[u8]) -> Result<()> {
         let mut buf = vec![0u8; 65535];
         let header = (data.len() as u32).to_be_bytes();
@@ -312,9 +316,9 @@ impl Session {
             let n = self.noise.write_message(chunk, &mut buf)?;
             write_frame(&self.stream, &buf[..n])?;
         }
-        // Sin `flush`: sobre un `TcpStream` crudo es un no-op, y tenerlo acá
-        // hacía creer que había un buffer nuestro pendiente de vaciar. No lo
-        // hay — cada frame ya salió con su `write_all`.
+        // No `flush`: on a raw `TcpStream` it's a no-op, and having it here
+        // suggested there was a buffer of ours pending to be flushed. There
+        // isn't — every frame already went out with its own `write_all`.
         Ok(())
     }
 
@@ -344,18 +348,19 @@ impl Session {
 }
 
 // ---------------------------------------------------------------------------
-// Framing en el socket: [u32 largo][bytes]
+// Socket framing: [u32 length][bytes]
 // ---------------------------------------------------------------------------
 
-/// Cabecera y cuerpo en **una** escritura.
+/// Header and body in **one** write.
 ///
-/// En dos, los 4 bytes de la cabecera salen como su propio paquete y quedan
-/// expuestos a la espera de Nagle. Un track son cientos de frames, así que
-/// conviene no pagarlo. Copiar 64 KiB a un buffer cuesta microsegundos.
+/// In two, the header's 4 bytes go out as their own packet and end up
+/// exposed to Nagle's delay. A track is hundreds of frames, so it's worth not
+/// paying for that. Copying 64 KiB into a buffer costs microseconds.
 ///
-/// Ojo con la tentación de darle el crédito de más: esto NO fue lo que arregló
-/// las transferencias de 12 s (eso era `opt-level = 0` sobre ChaCha20-Poly1305,
-/// ver el `Cargo.toml`). Con el canal ya rápido la diferencia acá es chica.
+/// Watch out for the temptation to give this too much credit: this is NOT
+/// what fixed the 12s transfers (that was `opt-level = 0` over
+/// ChaCha20-Poly1305, see `Cargo.toml`). With the channel already fast, the
+/// difference here is small.
 fn write_frame(mut stream: &TcpStream, data: &[u8]) -> Result<()> {
     let mut out = Vec::with_capacity(4 + data.len());
     out.extend_from_slice(&(data.len() as u32).to_be_bytes());
@@ -364,18 +369,18 @@ fn write_frame(mut stream: &TcpStream, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Ajustes del socket, iguales para las dos puntas.
+/// Socket settings, the same on both ends.
 ///
-/// Se aplican antes del handshake a propósito: XX son tres mensajes chicos con
-/// ida y vuelta, o sea justo el patrón que Nagle penaliza. Lo mismo los
-/// mensajes de control (`BlobReq`, `MetaAck`, `Bye`): cortos y estrictamente
-/// secuenciales, cada uno esperando la respuesta del otro antes de seguir.
+/// Applied before the handshake on purpose: XX is three small back-and-forth
+/// messages, exactly the pattern Nagle penalizes. Same for control messages
+/// (`BlobReq`, `MetaAck`, `Bye`): short and strictly sequential, each one
+/// waiting for the other's reply before continuing.
 ///
-/// Es una mejora de latencia en los mensajes chicos, no de throughput en los
-/// archivos: lo de los archivos era el cifrado sin optimizar.
+/// This is a latency improvement for small messages, not throughput for
+/// files: the file bottleneck was the unoptimized encryption.
 fn tune(stream: &TcpStream) {
-    // Que falle no es motivo para tirar la conexión: sin esto anda, sólo que
-    // lento.
+    // Failing here isn't a reason to drop the connection: without this it
+    // still works, just slower.
     if let Err(e) = stream.set_nodelay(true) {
         log::debug!("[wire] could not disable Nagle: {e}");
     }
@@ -398,15 +403,15 @@ fn read_frame(mut stream: &TcpStream) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Los cuatro primeros bytes, leidos como texto, cuando son el principio de
-/// algo de HTTP.
+/// The first four bytes, read as text, when they're the start of something
+/// HTTP.
 ///
-/// Apuntarle al puerto equivocado es EL error de este protocolo, y pasa por
-/// los dos lados: la app contra un proxy web (que contesta `HTTP/1.1 400`), o
-/// un navegador contra el server (que manda `GET `). Los dos casos terminaban
-/// en "invalid frame (1213486160 bytes)", que es el largo del mensaje leido de
-/// cuatro letras ASCII — un numero que no le dice nada a nadie y menos que
-/// menos que el puerto es de un servidor web.
+/// Pointing at the wrong port is THE error of this protocol, and it happens
+/// on both sides: the app against a web proxy (which answers `HTTP/1.1 400`),
+/// or a browser against the server (which sends `GET `). Both cases used to
+/// end up as "invalid frame (1213486160 bytes)", which is the length of the
+/// four-letter ASCII message read as a number — a number that means nothing
+/// to anyone, let alone that the port belongs to a web server.
 fn looks_like_http(head: &[u8; 4]) -> Option<&'static str> {
     match head {
         b"HTTP" => Some("HTTP"),
@@ -426,39 +431,39 @@ mod tests {
     use std::io::Write as _;
     use std::net::{TcpListener, TcpStream};
 
-    /// Apuntarle al puerto de un proxy web es EL error de este protocolo. El
-    /// mensaje tiene que decir eso y no un numero de cuatro bytes leidos como
-    /// largo.
+    /// Pointing at a web proxy's port is THE error of this protocol. The
+    /// message has to say that, not a four-byte number read as a length.
     #[test]
-    fn contra_un_servidor_web_el_error_lo_dice() {
+    fn against_a_web_server_the_error_says_so() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let web = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            // Como un proxy de verdad: primero lee lo que le mandan —nuestro
-            // handshake, que para él es basura— y recién ahí contesta. Cerrar
-            // antes de leer daría un error de socket y no el que se prueba.
+            // Like a real proxy: first it reads what's sent to it —our
+            // handshake, which is garbage to it— and only then replies.
+            // Closing before reading would give a socket error and not the
+            // one being tested.
             let mut scratch = [0u8; 512];
             let _ = stream.read(&mut scratch);
             let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n");
-            // Que el cliente alcance a leer la respuesta antes del cierre.
+            // Let the client get a chance to read the response before close.
             std::thread::sleep(std::time::Duration::from_millis(200));
         });
 
         let stream = TcpStream::connect(addr).unwrap();
         let (private, _) = generate_keypair().unwrap();
-        // `unwrap_err` pediria que `Session` sea Debug sólo para imprimirlo.
+        // `unwrap_err` would require `Session` to be Debug just to print it.
         let msg = match Session::connect(stream, &private) {
             Err(e) => e.to_string(),
-            Ok(_) => panic!("no puede haber sesión contra un servidor web"),
+            Ok(_) => panic!("there can't be a session against a web server"),
         };
         web.join().unwrap();
 
-        assert!(msg.contains("web server"), "mensaje inutil: {msg}");
-        assert!(msg.contains("HTTP"), "mensaje inutil: {msg}");
+        assert!(msg.contains("web server"), "useless message: {msg}");
+        assert!(msg.contains("HTTP"), "useless message: {msg}");
     }
 
-    /// Levanta las dos puntas de una sesion sobre loopback.
+    /// Sets up both ends of a session over loopback.
     fn pair() -> (Session, Session) {
         let (a_priv, _) = generate_keypair().unwrap();
         let (b_priv, _) = generate_keypair().unwrap();
@@ -472,9 +477,9 @@ mod tests {
         (client, server.join().unwrap())
     }
 
-    /// Cuánto da el canal sobre loopback, donde no hay red que culpar. Mide
-    /// techo real de cifrado + framing. `#[ignore]` porque es una medición, no
-    /// una aserción: correr con
+    /// What the channel gives over loopback, where there's no network to
+    /// blame. Measures the real ceiling of encryption + framing. `#[ignore]`
+    /// because it's a measurement, not an assertion: run with
     /// `cargo test --release -- --ignored --nocapture channel_throughput`.
     #[test]
     #[ignore]
@@ -496,7 +501,7 @@ mod tests {
 
         assert_eq!(got, data.len());
         println!(
-            "{MB} MB | envio {:?} ({:.1} MB/s) | recepcion {:?} ({:.1} MB/s)",
+            "{MB} MB | send {:?} ({:.1} MB/s) | receive {:?} ({:.1} MB/s)",
             send,
             MB as f64 / send.as_secs_f64(),
             recv,
@@ -510,15 +515,15 @@ mod tests {
         assert_eq!(a.code, b.code);
         assert_eq!(a.code.len(), 6);
         assert!(a.code.chars().all(|c| c.is_ascii_digit()));
-        // Cada lado aprendio la clave estatica del otro, que es lo que despues
-        // se fija en `devices`.
+        // Each side learned the other's static key, which is what later gets
+        // pinned in `devices`.
         assert_ne!(a.peer_pubkey, b.peer_pubkey);
         assert_eq!(a.peer_pubkey.len(), 32);
     }
 
-    /// Dos sesiones distintas tienen que dar codigos distintos: si el codigo
-    /// no dependiera de las claves efimeras, un intermediario podria replicar
-    /// el mismo numero en las dos pantallas.
+    /// Two different sessions have to produce different codes: if the code
+    /// didn't depend on the ephemeral keys, a man-in-the-middle could
+    /// replicate the same number on both screens.
     #[test]
     fn code_differs_between_sessions() {
         let (a1, _) = pair();
@@ -526,27 +531,27 @@ mod tests {
         assert_ne!(a1.code, a2.code);
     }
 
-    /// La compatibilidad hacia atras del inventario comprimido descansa en
-    /// esto: que a un peer viejo, para el que `manifestReq` no tiene campos,
-    /// el `gzip` de mas no le rompa nada. Si serde lo rechazara, actualizar un
-    /// dispositivo y no el otro cortaria el sync entero.
+    /// Backward compatibility for the compressed inventory rests on this:
+    /// that for an old peer, for which `manifestReq` has no fields, the extra
+    /// `gzip` doesn't break anything. If serde rejected it, updating one
+    /// device and not the other would break the whole sync.
     #[test]
-    fn un_campo_de_mas_no_rompe_un_mensaje_sin_campos() {
-        let con_sobra = br#"{"type":"bye","gzip":true,"loQueSea":42}"#;
+    fn an_extra_field_does_not_break_a_message_with_no_fields() {
+        let with_extra = br#"{"type":"bye","gzip":true,"whatever":42}"#;
         assert!(
-            matches!(serde_json::from_slice::<Msg>(con_sobra), Ok(Msg::Bye)),
-            "un peer viejo tiene que poder ignorar lo que no conoce"
+            matches!(serde_json::from_slice::<Msg>(with_extra), Ok(Msg::Bye)),
+            "an old peer has to be able to ignore what it doesn't know"
         );
     }
 
-    /// Y al reves: el pedido de un peer viejo, sin el campo, se lee como "no
-    /// se leer comprimido" — que es la respuesta segura.
+    /// And the other way around: an old peer's request, without the field,
+    /// reads as "I can't read compressed" — which is the safe answer.
     #[test]
-    fn un_pedido_sin_el_campo_pide_el_inventario_de_siempre() {
-        let viejo = br#"{"type":"manifestReq"}"#;
-        match serde_json::from_slice::<Msg>(viejo) {
+    fn a_request_without_the_field_asks_for_the_usual_inventory() {
+        let old = br#"{"type":"manifestReq"}"#;
+        match serde_json::from_slice::<Msg>(old) {
             Ok(Msg::ManifestReq { gzip }) => assert!(!gzip),
-            other => panic!("no se pudo leer el pedido viejo: {other:?}"),
+            other => panic!("could not read the old request: {other:?}"),
         }
     }
 
@@ -565,17 +570,17 @@ mod tests {
                 assert_eq!(uid, "u-1");
                 assert_eq!(name, "PC");
             }
-            other => panic!("mensaje inesperado: {other:?}"),
+            other => panic!("unexpected message: {other:?}"),
         }
         b.send(&Msg::PairResponse { accepted: true }).unwrap();
         match a.recv().unwrap() {
             Msg::PairResponse { accepted } => assert!(accepted),
-            other => panic!("mensaje inesperado: {other:?}"),
+            other => panic!("unexpected message: {other:?}"),
         }
     }
 
-    /// Un manifest (5.3) o un bloque de audio (5.4) pasan los 64 KiB que
-    /// Noise cifra de una: el troceo tiene que ser transparente.
+    /// A manifest (5.3) or an audio chunk (5.4) go past the 64 KiB Noise
+    /// encrypts at once: the chunking has to be transparent.
     #[test]
     fn payloads_larger_than_one_noise_message_survive() {
         let (mut a, mut b) = pair();
