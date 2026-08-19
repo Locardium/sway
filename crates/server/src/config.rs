@@ -145,7 +145,7 @@ mod tests {
         ));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
-        dir.join("sway-server.toml")
+        dir.join("config.toml")
     }
 
     #[test]

@@ -16,14 +16,19 @@
 
 use anyhow::{Context, Result};
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use sway_core::{db, engine::Host, pairing};
 use sway_server::config::Config;
 use sway_server::host::ServerHost;
 use sway_server::serve;
 
-const DEFAULT_CONFIG: &str = "sway-server.toml";
+const DEFAULT_CONFIG: &str = "config.toml";
+/// El nombre anterior. Un server que ya está andando lo tiene así, y
+/// arrancar con el nombre nuevo le escribiría una configuración nueva —con
+/// OTRO token— y se apagaría sin llegar a escuchar, que bajo systemd es una
+/// caída silenciosa. Se sigue aceptando, avisando.
+const LEGACY_CONFIG: &str = "sway-server.toml";
 
 fn main() {
     let code = match run() {
@@ -139,10 +144,25 @@ fn spawn_trash_purge(music_dir: PathBuf, retention_days: u64) {
 fn config_path() -> PathBuf {
     // Una sola opción, y por eso sin biblioteca de argumentos:
     //   sway-server [ruta-del-config]
-    std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| DEFAULT_CONFIG.into())
+    resolve_config(std::env::args().nth(1), Path::new("."))
+}
+
+/// Qué archivo de configuración usar. La ruta escrita a mano gana siempre;
+/// sin ella manda el nombre nuevo, y el viejo sólo entra si es el único que
+/// existe.
+fn resolve_config(arg: Option<String>, dir: &Path) -> PathBuf {
+    if let Some(arg) = arg {
+        return PathBuf::from(arg);
+    }
+    let current = dir.join(DEFAULT_CONFIG);
+    if !current.exists() {
+        let legacy = dir.join(LEGACY_CONFIG);
+        if legacy.exists() {
+            log::warn!("[server] using {LEGACY_CONFIG}: rename it to {DEFAULT_CONFIG}");
+            return legacy;
+        }
+    }
+    current
 }
 
 /// Los primeros bytes de la clave, para poder compararla de un vistazo con la
@@ -154,4 +174,61 @@ fn fingerprint(pubkey: &[u8]) -> String {
         .map(|b| format!("{b:02x}"))
         .collect::<Vec<_>>()
         .join(":")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sway-cfgpath-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn sin_nada_escrito_se_usa_el_nombre_nuevo() {
+        let dir = tmp("nuevo");
+        assert_eq!(resolve_config(None, &dir), dir.join(DEFAULT_CONFIG));
+    }
+
+    /// Un server que ya venía andando tiene el nombre viejo. Si el renombre lo
+    /// ignorara, la primera corrida escribiría una configuración nueva con OTRO
+    /// token y se apagaría sin escuchar — y bajo systemd eso es un server caído
+    /// sin que nadie se entere.
+    #[test]
+    fn el_nombre_viejo_sigue_sirviendo_si_es_el_unico() {
+        let dir = tmp("viejo");
+        std::fs::write(dir.join(LEGACY_CONFIG), "").unwrap();
+        assert_eq!(resolve_config(None, &dir), dir.join(LEGACY_CONFIG));
+    }
+
+    /// Con los dos archivos, manda el nuevo: es el que el usuario acaba de
+    /// escribir, y el viejo puede ser el que quedó de antes.
+    #[test]
+    fn con_los_dos_gana_el_nuevo() {
+        let dir = tmp("ambos");
+        std::fs::write(dir.join(LEGACY_CONFIG), "").unwrap();
+        std::fs::write(dir.join(DEFAULT_CONFIG), "").unwrap();
+        assert_eq!(resolve_config(None, &dir), dir.join(DEFAULT_CONFIG));
+    }
+
+    /// La ruta escrita a mano gana siempre, exista o no: es lo que permite
+    /// tener la configuración fuera del directorio de trabajo (ver el systemd
+    /// del README).
+    #[test]
+    fn la_ruta_a_mano_le_gana_a_todo() {
+        let dir = tmp("amano");
+        std::fs::write(dir.join(DEFAULT_CONFIG), "").unwrap();
+        let elegida = dir.join("otra-cosa.toml");
+        assert_eq!(
+            resolve_config(Some(elegida.display().to_string()), &dir),
+            elegida
+        );
+    }
 }

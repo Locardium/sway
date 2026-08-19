@@ -58,6 +58,13 @@ sv-test/*
 # === Salidas generadas del PoC (contienen la libreria del usuario) ===
 tools/itunes-xml-poc/*.xml
 
+# === Config del server (tiene el pair_token adentro) ===
+/config.toml
+/crates/server/config.toml
+# Y el nombre viejo, por si queda alguno dando vueltas.
+/sway-server.toml
+/crates/server/sway-server.toml
+
 # === Secretos / entorno ===
 .env
 .env.*

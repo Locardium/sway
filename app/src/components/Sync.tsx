@@ -1040,7 +1040,7 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
             </button>
           </div>
           <p className="set-note">
-            The token is in the server's <code>sway-server.toml</code>. Once paired, the server
+            The token is in the server's <code>config.toml</code>. Once paired, the server
             shows up in the list above like any other device.
           </p>
         </section>
