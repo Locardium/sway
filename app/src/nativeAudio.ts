@@ -38,8 +38,21 @@ interface TrackCue {
 const trackCue = (id: number) => invoke<TrackCue>('track_cue', { id });
 
 let initialized: Promise<unknown> | null = null;
+/// Initializes the plugin once, and only *remembers* it once it worked.
+///
+/// A failure is deliberately not cached. The first call happens while the app
+/// is still starting, which is exactly when the plugin is most likely to not
+/// be answering yet — and a rejected promise left in `initialized` would be
+/// handed to every later caller, so one early miss would take out volume,
+/// gain, crossfade and the queue for the rest of the session with nothing to
+/// show for it.
 function ensureInitialized() {
-  if (!initialized) initialized = initialize();
+  if (!initialized) {
+    initialized = initialize().catch((e) => {
+      initialized = null;
+      throw e;
+    });
+  }
   return initialized;
 }
 
@@ -294,6 +307,10 @@ export function setAppVisible(visible: boolean) {
 function quiet() {
   endedSent = false;
   endedEarly = false;
+  // The next position is a new one, not the continuation of the throttled
+  // stream, so it goes out immediately instead of waiting out the rest of a
+  // window that belonged to where we just were.
+  lastPositionEmit = 0;
 }
 
 /// Translates the plugin's stream of states into events that make sense for

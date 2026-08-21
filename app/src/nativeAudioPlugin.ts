@@ -46,8 +46,9 @@ export interface NativeAudioSource {
   title?: string;
   artist?: string;
   artworkUrl?: string;
-  /// ReplayGain/R128 for this track. Only attenuates: see `applyVolumeLocked`
-  /// in the plugin for why a positive value can't boost.
+  /// Per-track level in dB, cut or boost. The cut half rides `ExoPlayer.volume`
+  /// and the boost half a `LoudnessEnhancer`, because that volume saturates at
+  /// 1.0 — see `applyVolumeLocked` in the plugin.
   gainDb?: number;
 }
 

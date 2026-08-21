@@ -41,8 +41,18 @@ and an app that never calls the new ones gets the old single-item behaviour.
 
 `set_source` and `set_next_source` also take an optional `gainDb`, applied on
 top of the master volume for that item only. That is the primitive
-ReplayGain/R128 normalisation needs: the app reads the tag and passes the
-number, the plugin does the arithmetic per item.
+ReplayGain/R128 normalisation needs: the app works out the number per track and
+the plugin applies it per item.
+
+The gain is split across two mechanisms, because one cannot carry it. Negative
+gain rides `ExoPlayer.volume`, together with the master volume and the
+crossfade ramp. Positive gain cannot: that volume saturates at 1.0, so a boost
+goes through a `LoudnessEnhancer` attached to the deck's audio session. The
+effect is re-attached whenever the session id changes — a format change rebuilds
+it — and is dropped while the deck is ducked by a fade or the master volume,
+where boosting only to attenuate again would add its distortion for nothing.
+Some ROMs refuse to allocate the effect; that path is caught and playback
+continues at the level `volume` alone can reach.
 
 ### Two decks
 

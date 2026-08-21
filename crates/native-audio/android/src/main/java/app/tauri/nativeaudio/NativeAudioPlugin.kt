@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
+import android.media.audiofx.LoudnessEnhancer
 import android.net.Uri
 import android.app.ActivityManager
 import android.os.Build
@@ -64,6 +65,20 @@ private const val FADE_TICK_MS = 30L
 /// Longest crossfade accepted. Matches the app's slider; past this the overlap
 /// stops being a transition and starts being two tracks playing at once.
 private const val MAX_CROSSFADE_SEC = 12.0
+
+/// How far a track may be turned up, in dB. Mirrors `db::MAX_GAIN_DB` on the
+/// Rust side, which clamps to the same figure before the value ever gets here.
+///
+/// Boost cannot go through `ExoPlayer.volume` — that saturates at 1.0 — so it
+/// goes through a `LoudnessEnhancer` on the deck's audio session instead. See
+/// `applyVolumeLocked`.
+private const val MAX_GAIN_DB = 12.0
+
+/// How far a track may be turned down. Deliberately further from zero than the
+/// boost ceiling, matching `db::MAX_CUT_DB`: attenuation cannot clip, and a
+/// loud modern master needs more room coming down than a quiet one needs
+/// going up.
+private const val MAX_CUT_DB = 24.0
 
 data class NativeAudioState(
     val status: String,
@@ -172,6 +187,26 @@ private class Deck(val player: ExoPlayer) {
     /// — i.e. the track would restart.
     var gainDb: Double = 0.0
     var listener: Player.Listener? = null
+
+    /// Turns a track UP. `ExoPlayer.volume` saturates at 1.0, so it can only
+    /// ever attenuate — a positive gain needs an effect on the audio session.
+    ///
+    /// Tied to the session id it was built for: ExoPlayer hands out a new one
+    /// when the audio track is rebuilt (a format change does it), and an
+    /// enhancer left on the old session boosts nothing.
+    var boost: LoudnessEnhancer? = null
+    var boostSessionId: Int = C.AUDIO_SESSION_ID_UNSET
+    /// What was last pushed to the effect, in millibels. The crossfade ramp
+    /// re-applies the volume ~33 times a second and almost none of those
+    /// change the boost; this keeps the native calls down to the ones that do.
+    var boostAppliedMb: Int = 0
+
+    fun releaseBoost() {
+        runCatching { boost?.release() }
+        boost = null
+        boostSessionId = C.AUDIO_SESSION_ID_UNSET
+        boostAppliedMb = 0
+    }
 }
 
 object NativeAudioRuntime {
@@ -259,6 +294,14 @@ object NativeAudioRuntime {
     /// listening to any more.
     private fun listenerFor(deck: Deck) = object : Player.Listener {
         private fun isActive() = decks[activeIdx] === deck
+
+        /// The audio session is rebuilt whenever the output format changes, and
+        /// the boost effect is attached to a session id — so it has to be
+        /// re-attached here or a +12 dB track goes quiet again the moment the
+        /// sample rate changes under it.
+        override fun onAudioSessionIdChanged(audioSessionId: Int) {
+            synchronized(lock) { applyVolumeLocked(deck) }
+        }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
             synchronized(lock) {
@@ -717,6 +760,7 @@ object NativeAudioRuntime {
             decks.forEachIndexed { i, deck ->
                 deck ?: return@forEachIndexed
                 deck.listener?.let { deck.player.removeListener(it) }
+                deck.releaseBoost()
                 deck.player.release()
                 decks[i] = null
             }
@@ -954,13 +998,66 @@ object NativeAudioRuntime {
 
     // --- Volume and output ---------------------------------------------------
 
+    /// Splits the track's gain across the only two places it can go.
+    ///
+    /// `ExoPlayer.volume` saturates at 1.0, so it carries everything that
+    /// makes the track quieter — the cut half of the gain, the master volume
+    /// and the crossfade ramp. Anything above 0 dB cannot be expressed there
+    /// at all and is handed to a `LoudnessEnhancer` on the deck's audio
+    /// session, which is what makes a +12 dB trim audible instead of silently
+    /// doing nothing.
+    ///
+    /// The boost is dropped while the deck is ducked by the master volume or a
+    /// fade: amplifying and then attenuating the same signal only adds the
+    /// enhancer's distortion to a level the volume was going to reach anyway.
     private fun applyVolumeLocked(deck: Deck?) {
         val exoPlayer = deck?.player ?: return
-        // ExoPlayer clamps above 1.0, so a positive ReplayGain can only ever
-        // attenuate less, never boost. That is the safe direction: the
-        // alternative is clipping, and normalisation is supposed to be
-        // inaudible when it works.
-        exoPlayer.volume = (masterVolume * dbToLinear(deck.gainDb) * deck.fade).coerceIn(0f, 1f)
+        val gain = deck.gainDb.coerceIn(-MAX_CUT_DB, MAX_GAIN_DB)
+        val cutDb = gain.coerceAtMost(0.0)
+        val boostDb = gain.coerceAtLeast(0.0)
+        val duck = masterVolume * deck.fade
+        exoPlayer.volume = (duck * dbToLinear(cutDb)).coerceIn(0f, 1f)
+        applyBoostLocked(deck, if (duck >= 1f) boostDb else 0.0)
+    }
+
+    /// Points the deck's enhancer at whatever audio session it has now and
+    /// sets the boost, building or releasing it as needed.
+    ///
+    /// Every step is guarded: `LoudnessEnhancer` is backed by a device effect
+    /// that some ROMs refuse to allocate, and a phone that cannot boost should
+    /// keep playing at the level it can reach rather than fall over.
+    private fun applyBoostLocked(deck: Deck, boostDb: Double) {
+        val sessionId = deck.player.audioSessionId
+        if (sessionId == C.AUDIO_SESSION_ID_UNSET) {
+            // No session yet — nothing to attach to. Whatever the gain is, it
+            // is re-applied once one exists (see onAudioSessionIdChanged).
+            deck.releaseBoost()
+            return
+        }
+        // Millibels, and only ever positive: this effect cannot attenuate.
+        val targetMb = (boostDb * 100.0).toInt().coerceAtLeast(0)
+        if (targetMb == 0) {
+            val enhancer = deck.boost ?: return
+            if (deck.boostAppliedMb == 0) return
+            runCatching { enhancer.enabled = false }
+            deck.boostAppliedMb = 0
+            return
+        }
+        if (deck.boost == null || deck.boostSessionId != sessionId) {
+            deck.releaseBoost()
+            val created = runCatching { LoudnessEnhancer(sessionId) }
+                .onFailure { Log.w(TAG, "LoudnessEnhancer unavailable", it) }
+                .getOrNull() ?: return
+            deck.boost = created
+            deck.boostSessionId = sessionId
+        }
+        val enhancer = deck.boost ?: return
+        if (deck.boostAppliedMb == targetMb) return
+        runCatching {
+            enhancer.setTargetGain(targetMb)
+            enhancer.enabled = true
+            deck.boostAppliedMb = targetMb
+        }.onFailure { Log.w(TAG, "LoudnessEnhancer setTargetGain failed", it) }
     }
 
     private fun applyOutputDeviceLocked(deck: Deck?) {
@@ -985,9 +1082,9 @@ object NativeAudioRuntime {
     private fun safeGain(gainDb: Double?): Double {
         val v = gainDb ?: return 0.0
         if (!v.isFinite()) return 0.0
-        // Below -60 dB is silence anyway; above 0 it cannot boost (see
-        // `applyVolumeLocked`), so anything positive is the same as none.
-        return v.coerceIn(-60.0, 0.0)
+        // Same range the Rust side clamps to before sending it, so a value
+        // that arrives already clamped passes through untouched.
+        return v.coerceIn(-MAX_CUT_DB, MAX_GAIN_DB)
     }
 
     private fun deviceTypeName(type: Int): String = when (type) {

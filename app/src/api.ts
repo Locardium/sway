@@ -174,27 +174,29 @@ export const getPlaybackPrefs = () => invoke<PlaybackPrefs>('get_playback_prefs'
 
 /// Hands the player the settings it holds rather than looks up.
 ///
-/// Desktop does this in Rust — `lib.rs` pushes them into the `Player` when the
-/// app starts and again on every save. On Android the player is the plugin,
-/// which the Rust side can't reach, so the same two pushes happen from here:
-/// once at startup (App.tsx) and once per save, below.
+/// Desktop does this in Rust — `lib.rs` pushes them into the `Player` — so
+/// here it is a no-op. On Android the player is the native plugin, which the
+/// Rust side cannot reach, so the two settings it owns are pushed from JS.
 ///
-/// `gapless` isn't in the list because the plugin doesn't have a switch for
-/// it: staging a track IS the gapless path there, so the decision is made by
-/// what the app does or doesn't stage.
+/// Called from an effect keyed on the preferences (App.tsx), not from
+/// `setPlaybackPrefs`: saving and applying are different things, and tying the
+/// push to the save means a plugin that wasn't ready at startup never receives
+/// the stored values at all.
+///
+/// `gapless` isn't in the list because the plugin has no switch for it:
+/// staging a track IS the gapless path there, so what decides it is whether
+/// the app stages one.
 export const applyPlaybackPrefs = async (prefs: PlaybackPrefs) => {
   if (!android) return;
   await nativeAudio.setCrossfade(prefs.crossfadeSecs);
   await nativeAudio.setOutputDeviceByName(prefs.outputDevice);
 };
 
-/// Saves the preferences. They are stored by the Rust side on both platforms
-/// — the DB is the same one — but only desktop's `Player` reads them back out
-/// of there.
-export const setPlaybackPrefs = async (prefs: PlaybackPrefs) => {
-  await invoke<void>('set_playback_prefs', { prefs });
-  await applyPlaybackPrefs(prefs);
-};
+/// Saves the preferences. They are stored by the Rust side on both platforms —
+/// the DB is the same one — but only desktop's `Player` reads them back out of
+/// there; see `applyPlaybackPrefs` for the other half on Android.
+export const setPlaybackPrefs = (prefs: PlaybackPrefs) =>
+  invoke<void>('set_playback_prefs', { prefs });
 
 export const listOutputDevices = android
   ? nativeAudio.listOutputDeviceNames

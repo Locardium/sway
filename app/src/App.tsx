@@ -144,11 +144,7 @@ export default function App() {
       try {
         await Promise.all([refreshLibrary(), refreshPlaylists()]);
         await setVolumeBackend(volume);
-        const saved = await getPlaybackPrefs();
-        setPrefs(saved);
-        // Desktop's player is handed these by Rust at startup; Android's is
-        // the native plugin, which only JS can reach. See applyPlaybackPrefs.
-        await applyPlaybackPrefs(saved);
+        setPrefs(await getPlaybackPrefs());
       } catch {
         if (tries++ < 5) setTimeout(attempt, 300);
       }
@@ -156,6 +152,21 @@ export default function App() {
     attempt();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Hands the settings the player holds itself to whoever is playing the
+  // audio. On desktop Rust does it and this is a no-op; on Android the player
+  // is the native plugin, which Rust cannot reach.
+  //
+  // Keyed on the preferences rather than done where they are saved, so the two
+  // cannot drift: this runs for the values loaded at startup and for every
+  // later edit through the same path, and a plugin that wasn't answering yet
+  // the first time gets the current values on the next render rather than
+  // being left a version behind.
+  useEffect(() => {
+    applyPlaybackPrefs(prefs).catch((e) => {
+      setStatus('Could not apply playback settings: ' + e);
+    });
+  }, [prefs]);
 
   useEffect(() => {
     setSelected(new Set());
