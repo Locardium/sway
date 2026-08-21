@@ -50,6 +50,12 @@ export interface NativeAudioSource {
   /// and the boost half a `LoudnessEnhancer`, because that volume saturates at
   /// 1.0 — see `applyVolumeLocked` in the plugin.
   gainDb?: number;
+  /// Playable region in ms, from the analyzer. The silence a file carries at
+  /// its edges is what the gap between two tracks is made of, so playing only
+  /// between these two is what makes the handover gapless. `0` for either
+  /// means the file's own edge.
+  leadMs?: number;
+  audioEndMs?: number;
 }
 
 export interface NativeAudioOutputDevice {

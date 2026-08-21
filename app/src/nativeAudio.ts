@@ -33,6 +33,10 @@ export type { NativeAudioOutputDevice };
 interface TrackCue {
   path: string;
   gainDb: number;
+  /// Where the audio really starts and ends. Zero for either edge means the
+  /// track has not been measured yet and plays untrimmed.
+  leadMs: number;
+  audioEndMs: number;
 }
 
 const trackCue = (id: number) => invoke<TrackCue>('track_cue', { id });
@@ -114,7 +118,13 @@ export async function playTrack(id: number) {
   quiet();
   expect(id);
   stagedNextId = null;
-  await setSource({ src: toFileUri(cue.path), id, gainDb: cue.gainDb });
+  await setSource({
+    src: toFileUri(cue.path),
+    id,
+    gainDb: cue.gainDb,
+    leadMs: cue.leadMs,
+    audioEndMs: cue.audioEndMs,
+  });
   await play();
 }
 
@@ -142,7 +152,13 @@ export async function setNextTrack(id: number | null) {
   stagedNextId = id;
   stagingInFlight++;
   try {
-    await setNextSource({ src: toFileUri(cue.path), id, gainDb: cue.gainDb });
+    await setNextSource({
+      src: toFileUri(cue.path),
+      id,
+      gainDb: cue.gainDb,
+      leadMs: cue.leadMs,
+      audioEndMs: cue.audioEndMs,
+    });
   } finally {
     stagingInFlight--;
   }

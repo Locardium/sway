@@ -213,13 +213,10 @@ export const setTrackGain = async (id: number, gainDb: number) => {
   if (android) await nativeAudio.refreshGain(id);
 };
 
-/// Whether the loudness analyzer exists on this platform. It decodes every
-/// file with rodio/symphonia, which is desktop-only, so on Android there is
-/// nothing measuring and `normalize` would be a switch over an empty column.
-/// The manual per-track gain works on both.
-export const supportsLoudnessAnalysis = !android;
-
 /// Tracks still waiting on the analyzer. 0 = the library is fully measured.
+///
+/// Runs on both platforms: the analyzer decodes with symphonia directly rather
+/// than through rodio, which is what used to tie it to desktop.
 export const loudnessPending = () => invoke<number>('loudness_pending');
 
 /// Throws away every measurement and re-analyzes the library. Returns how

@@ -11,7 +11,6 @@ import {
   loudnessPending,
   rescanAnalysis,
   setAutoSyncXml,
-  supportsLoudnessAnalysis,
   type PlaybackPrefs,
 } from '../api';
 import { isAndroid } from '../platform';
@@ -95,7 +94,6 @@ export default function Settings({
   // are measured as they arrive, so the count is the honest answer to "is it
   // still working" regardless of what the measurement is being used for.
   useEffect(() => {
-    if (!supportsLoudnessAnalysis) return;
     let alive = true;
     const read = () =>
       loudnessPending()
@@ -222,27 +220,20 @@ export default function Settings({
               </button>
             </div>
           )}
-          {/* The analyzer decodes every file, which is rodio/symphonia and so
-              desktop-only. On Android the row is the count and nothing else,
-              rather than a Rescan button with nothing behind it. */}
           <div className="set-row">
             <div className="set-label">
               <span>Tracks in library</span>
-              {supportsLoudnessAnalysis && (
-                <small>
-                  {pending == null || pending === 0
-                    ? 'Rescan re-measures loudness and silent edges for every track'
-                    : `Analyzing — ${pending} track${pending === 1 ? '' : 's'} to go`}
-                </small>
-              )}
+              <small>
+                {pending == null || pending === 0
+                  ? 'Rescan re-measures loudness and silent edges for every track'
+                  : `Analyzing — ${pending} track${pending === 1 ? '' : 's'} to go`}
+              </small>
             </div>
             <div className="set-control">
               <span className="set-value">{trackCount}</span>
-              {supportsLoudnessAnalysis && (
-                <button onClick={doRescan} disabled={rescanning}>
-                  {rescanning ? 'Starting…' : 'Rescan'}
-                </button>
-              )}
+              <button onClick={doRescan} disabled={rescanning}>
+                {rescanning ? 'Starting…' : 'Rescan'}
+              </button>
             </div>
           </div>
         </section>
@@ -308,21 +299,17 @@ export default function Settings({
             </div>
             <Switch checked={prefs.autoplay} onChange={(v) => patch({ autoplay: v })} />
           </div>
-          {/* Needs a measured LUFS per track, and the analyzer that produces
-              it is desktop-only. The per-track gain knob works on both. */}
-          {supportsLoudnessAnalysis && (
-            <div className="set-row">
-              <div className="set-label">
-                <span>Normalize volume</span>
-                <small>
-                  Brings every track to the same perceived loudness,
-                  turning down what was mastered loud and turning up what wasn&rsquo;t. Your
-                  gain knob still applies on top.
-                </small>
-              </div>
-              <Switch checked={prefs.normalize} onChange={(v) => patch({ normalize: v })} />
+          <div className="set-row">
+            <div className="set-label">
+              <span>Normalize volume</span>
+              <small>
+                Brings every track to the same perceived loudness,
+                turning down what was mastered loud and turning up what wasn&rsquo;t. Your
+                gain knob still applies on top.
+              </small>
             </div>
-          )}
+            <Switch checked={prefs.normalize} onChange={(v) => patch({ normalize: v })} />
+          </div>
 
           <div className="set-row">
             <div className="set-label">

@@ -27,11 +27,10 @@ mod player;
 #[path = "player_stub.rs"]
 mod player;
 
-// Measuring loudness means decoding, and the decoder is rodio/symphonia —
-// desktop only. On Android normalization has nothing to apply itself to
-// anyway (the native plugin exposes no volume control), so there is nothing
-// to measure for.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+// Measuring loudness and the silent edges of a file. Decoding is symphonia
+// directly, not through rodio: rodio is the audio *output* and is desktop
+// only, but the phone needs the same numbers — without them there is nothing
+// for normalization to aim at and no silence for gapless to trim.
 mod loudness;
 
 use player::{Cue, Player};
@@ -198,8 +197,8 @@ pub struct AppState {
     conditions: Mutex<power::Conditions>,
     /// Open connections waiting for the server to announce changes.
     watchers: watch::Watchers,
-    /// Background EBU R128 sweep behind "normalize volume" (desktop only).
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    /// Background EBU R128 sweep behind "normalize volume" and the silent
+    /// edges gapless trims to.
     loudness: loudness::Analyzer,
 }
 
@@ -326,11 +325,7 @@ fn import_folder(app: AppHandle, state: State<AppState>, folder: String) -> Resu
 /// already running — that sweep re-reads what's pending on every batch and
 /// will reach the new rows on its own.
 pub fn kick_loudness(app: &AppHandle) {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    {
-        app.state::<AppState>().loudness.sweep(app.clone());
-    }
-    let _ = app;
+    app.state::<AppState>().loudness.sweep(app.clone());
 }
 
 /// Reports when something running with the DB lock held took long enough
@@ -472,6 +467,16 @@ struct TrackCue {
     /// this into a linear multiplier inside `cue_for`; the plugin wants the
     /// dB, so the conversion doesn't happen here.
     gain_db: f64,
+    /// Where the audio actually starts and ends, in ms, as measured by the
+    /// analyzer. This is what makes a transition gapless: the silence a file
+    /// carries at its edges is the gap, and playing from `lead_ms` to
+    /// `audio_end_ms` is how it stops being one.
+    ///
+    /// `audio_end_ms` is 0 when the track hasn't been measured yet, meaning
+    /// "play to the end" — an unmeasured track plays untrimmed rather than
+    /// having its edges guessed.
+    lead_ms: i64,
+    audio_end_ms: i64,
 }
 
 /// Path and level for a track, for the platforms whose player lives outside
@@ -486,10 +491,16 @@ fn track_cue(state: State<AppState>, id: i64) -> Result<TrackCue, String> {
     let conn = state.db.lock().unwrap();
     let path = db::track_path(&conn, id).map_err(|e| e.to_string())?;
     let a = db::track_playback(&conn, id).unwrap_or_default();
-    let normalize = db::get_playback_prefs(&conn).unwrap_or_default().normalize;
+    let prefs = db::get_playback_prefs(&conn).unwrap_or_default();
+    // Crossfade overlaps the tracks, so there is no gap for trimming to close
+    // and cutting the tails would only shorten the overlap. Same rule the
+    // desktop player follows.
+    let trim = prefs.gapless && prefs.crossfade_secs <= 0.0;
     Ok(TrackCue {
         path,
-        gain_db: db::playback_gain_db(a.gain_db, a.loudness_lufs, normalize),
+        gain_db: db::playback_gain_db(a.gain_db, a.loudness_lufs, prefs.normalize),
+        lead_ms: if trim { a.lead_silence_ms.unwrap_or(0).max(0) } else { 0 },
+        audio_end_ms: if trim { a.audio_end_ms.unwrap_or(0).max(0) } else { 0 },
     })
 }
 
@@ -1622,7 +1633,6 @@ pub fn run() {
                 autosync: autosync::AutoSync::default(),
                 conditions: Mutex::new(power::Conditions::default()),
                 watchers: watch::Watchers::default(),
-                #[cfg(not(any(target_os = "android", target_os = "ios")))]
                 loudness: loudness::Analyzer::default(),
             });
 

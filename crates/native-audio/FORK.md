@@ -54,6 +54,24 @@ where boosting only to attenuate again would add its distortion for nothing.
 Some ROMs refuse to allocate the effect; that path is caught and playback
 continues at the level `volume` alone can reach.
 
+Both also take `leadMs`/`audioEndMs`, the measured playable region of the file,
+applied as a `MediaItem.ClippingConfiguration`. ExoPlayer already runs one
+playlist item into the next without a pause, so what is left between two tracks
+is the silence the files themselves carry — encoder padding, a fade tail — and
+clipping is what removes it. `startsAtKeyFrame` is off: landing on the keyframe
+before the measured start would put the silence back. `0` on either edge means
+the file's own, which is what an unmeasured track gets.
+
+### Audio focus
+
+Focus is requested once for the runtime, not per player: both decks are built
+with `handleAudioFocus = false`. A player that manages its own focus requests it
+on `play()`, and during a crossfade both decks are playing — the incoming
+request revokes the outgoing deck's focus, whose handler then pauses it mid-fade.
+The runtime holds focus across the swap instead, and does what the per-player
+handlers used to: pause on loss, pause-and-resume on a transient loss, duck when
+asked to duck, and refuse to start when focus is denied.
+
 ### Two decks
 
 `NativeAudioRuntime` now owns up to two `ExoPlayer`s.

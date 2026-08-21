@@ -14,10 +14,16 @@
 //! priority, in small batches, and never blocks anything the user is doing.
 
 use crate::db;
-use rodio::{Decoder, Source};
 use std::fs::File;
-use std::io::BufReader;
 use std::path::Path;
+use symphonia::core::audio::{AudioBufferRef, Signal};
+use symphonia::core::codecs::DecoderOptions;
+use symphonia::core::conv::IntoSample;
+use symphonia::core::errors::Error as SymphoniaError;
+use symphonia::core::formats::FormatOptions;
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::MetadataOptions;
+use symphonia::core::probe::Hint;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
@@ -62,45 +68,77 @@ pub struct Analysis {
 /// least one block). A jingle that short doesn't need normalizing anyway.
 pub fn measure(path: &Path) -> Option<Analysis> {
     let file = File::open(path).ok()?;
-    let decoder = Decoder::new(BufReader::new(file)).ok()?;
-    let channels = decoder.channels() as usize;
-    let rate = decoder.sample_rate();
-    if channels == 0 || rate == 0 {
-        return None;
+    let stream = MediaSourceStream::new(Box::new(file), Default::default());
+    // The extension is a hint, not the answer: symphonia probes the bytes, so
+    // a mislabelled file still decodes as whatever it actually is.
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
     }
+    let probed = symphonia::default::get_probe()
+        .format(&hint, stream, &FormatOptions::default(), &MetadataOptions::default())
+        .ok()?;
+    let mut format = probed.format;
+    // The default track is the audio one for every format we import; a file
+    // whose default is a cover image stream isn't something to measure.
+    let track = format.default_track()?;
+    let track_id = track.id;
+    let mut decoder = symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .ok()?;
 
-    let mut meter = ebur128::EbuR128::new(channels as u32, rate, ebur128::Mode::I).ok()?;
-
-    // Fed in frames, not one sample at a time: `add_frames_f32` wants
-    // interleaved data and the per-call overhead is what dominates otherwise.
-    // 8192 frames is ~185 ms at 44.1 kHz — small enough that a 20-minute DJ
-    // set never materializes in memory.
-    let chunk_frames = 8192usize;
-    let mut buf: Vec<f32> = Vec::with_capacity(chunk_frames * channels);
+    // Not read from the track parameters: some containers leave them unset and
+    // only the first decoded packet is authoritative. Set on that packet.
+    let mut channels = 0usize;
+    let mut rate = 0u32;
+    let mut meter: Option<ebur128::EbuR128> = None;
 
     // Frame indices of the first and last sample above the floor. Tracked
     // while streaming so the file is never held in memory.
     let mut frames: i64 = 0;
     let mut first_loud: Option<i64> = None;
     let mut last_loud: i64 = 0;
+    // Interleaved f32, reused across packets — this is the buffer the meter
+    // and the edge scan both read.
+    let mut buf: Vec<f32> = Vec::new();
 
-    for sample in decoder.convert_samples::<f32>() {
-        buf.push(sample);
-        if buf.len() >= chunk_frames * channels {
-            scan_edges(&buf, channels, &mut frames, &mut first_loud, &mut last_loud);
-            meter.add_frames_f32(&buf).ok()?;
-            buf.clear();
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            // Both are how symphonia says "that was the last one".
+            Err(SymphoniaError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(SymphoniaError::ResetRequired) => break,
+            Err(_) => return None,
+        };
+        if packet.track_id() != track_id {
+            continue;
         }
-    }
-    if !buf.is_empty() {
-        // A trailing partial frame (a truncated file) would make the frame
-        // count disagree with the channel count and be rejected; drop it.
-        let usable = buf.len() - (buf.len() % channels);
-        if usable > 0 {
-            scan_edges(&buf[..usable], channels, &mut frames, &mut first_loud, &mut last_loud);
-            meter.add_frames_f32(&buf[..usable]).ok()?;
+        let decoded = match decoder.decode(&packet) {
+            Ok(d) => d,
+            // A corrupt packet in the middle of an otherwise fine rip is worth
+            // skipping; the measurement barely moves for one dropped frame.
+            Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(_) => return None,
+        };
+        if meter.is_none() {
+            let spec = decoded.spec();
+            channels = spec.channels.count();
+            rate = spec.rate;
+            if channels == 0 || rate == 0 {
+                return None;
+            }
+            meter = Some(ebur128::EbuR128::new(channels as u32, rate, ebur128::Mode::I).ok()?);
         }
+        interleave(&decoded, &mut buf);
+        if buf.is_empty() {
+            continue;
+        }
+        scan_edges(&buf, channels, &mut frames, &mut first_loud, &mut last_loud);
+        meter.as_mut()?.add_frames_f32(&buf).ok()?;
     }
+
+    // Nothing decoded at all: not a file worth reporting a measurement for.
+    let meter = meter?;
 
     let lufs = match meter.loudness_global() {
         // R128 reports -inf for silence. That isn't a level to correct
@@ -124,6 +162,41 @@ pub fn measure(path: &Path) -> Option<Analysis> {
         }
     };
     Some(Analysis { lufs, lead_ms, audio_end_ms })
+}
+
+/// Flattens one decoded packet into interleaved f32 in `out`.
+///
+/// Symphonia hands back planar buffers in whatever sample format the codec
+/// uses; both the meter and the edge scan want one interleaved f32 slice, and
+/// `IntoSample` is what every one of those formats has in common. `out` is
+/// reused across packets, so this clears it rather than allocating.
+fn interleave(decoded: &AudioBufferRef<'_>, out: &mut Vec<f32>) {
+    macro_rules! fill {
+        ($buf:expr) => {{
+            let b = $buf;
+            let channels = b.spec().channels.count();
+            let frames = b.frames();
+            out.clear();
+            out.reserve(frames * channels);
+            for f in 0..frames {
+                for c in 0..channels {
+                    out.push(b.chan(c)[f].into_sample());
+                }
+            }
+        }};
+    }
+    match decoded {
+        AudioBufferRef::U8(b) => fill!(b),
+        AudioBufferRef::U16(b) => fill!(b),
+        AudioBufferRef::U24(b) => fill!(b),
+        AudioBufferRef::U32(b) => fill!(b),
+        AudioBufferRef::S8(b) => fill!(b),
+        AudioBufferRef::S16(b) => fill!(b),
+        AudioBufferRef::S24(b) => fill!(b),
+        AudioBufferRef::S32(b) => fill!(b),
+        AudioBufferRef::F32(b) => fill!(b),
+        AudioBufferRef::F64(b) => fill!(b),
+    }
 }
 
 /// Advances the frame counter over one interleaved chunk and notes the first

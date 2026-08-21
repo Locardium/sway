@@ -129,6 +129,13 @@ class SetSourceArgs {
     var artist: String? = null
     var artworkUrl: String? = null
     var gainDb: Double? = null
+    /// Where the audio actually starts and ends, in ms. The silence a file
+    /// carries at its edges is what a "gap" between tracks is made of, so
+    /// playing only between these two is what makes the handover gapless.
+    /// `0` for either means "as the file has it" — an unmeasured track is
+    /// played whole rather than cut at a guess.
+    var leadMs: Long? = null
+    var audioEndMs: Long? = null
 }
 
 @InvokeArg
@@ -175,6 +182,9 @@ private data class SourceSpec(
     val artist: String?,
     val artworkUrl: String?,
     val gainDb: Double,
+    /// Playable region in ms; `0` for either edge means the file's own.
+    val leadMs: Long = 0L,
+    val audioEndMs: Long = 0L,
 )
 
 /// Travels inside the `MediaItem` so the id and the gain survive a gapless
@@ -618,13 +628,15 @@ object NativeAudioRuntime {
         artist: String?,
         artworkUrl: String?,
         gainDb: Double?,
+        leadMs: Long?,
+        audioEndMs: Long?,
     ) {
         synchronized(lock) {
             ensure(context)
             val deck = decks[activeIdx] ?: return
             val exoPlayer = deck.player
 
-            val spec = SourceSpec(src, storyId, title, artist, artworkUrl, safeGain(gainDb))
+            val spec = SourceSpec(src, storyId, title, artist, artworkUrl, safeGain(gainDb), leadMs ?: 0L, audioEndMs ?: 0L)
 
             // An explicit source cancels anything queued behind it, including a
             // crossfade halfway through.
@@ -669,13 +681,15 @@ object NativeAudioRuntime {
         artist: String?,
         artworkUrl: String?,
         gainDb: Double?,
+        leadMs: Long?,
+        audioEndMs: Long?,
     ) {
         synchronized(lock) {
             ensure(context)
             if (src.isNullOrBlank()) {
                 clearNextLocked()
             } else {
-                val spec = SourceSpec(src, storyId, title, artist, artworkUrl, safeGain(gainDb))
+                val spec = SourceSpec(src, storyId, title, artist, artworkUrl, safeGain(gainDb), leadMs ?: 0L, audioEndMs ?: 0L)
                 if (fading) pendingNext = spec else stageNextLocked(spec)
             }
         }
@@ -1320,11 +1334,31 @@ object NativeAudioRuntime {
             runCatching { Uri.parse(spec.artworkUrl) }
                 .onSuccess { metadataBuilder.setArtworkUri(it) }
         }
-        return MediaItem.Builder()
+        val builder = MediaItem.Builder()
             .setUri(spec.src)
             .setTag(ItemInfo(spec.id?.takeIf { it > 0 }, spec.gainDb))
             .setMediaMetadata(metadataBuilder.build())
-            .build()
+        // Trimming the silent edges is the whole of gapless here: ExoPlayer
+        // already hands one playlist item to the next without a pause, so what
+        // is left to remove is the silence inside the files themselves.
+        // Clipping is what ExoPlayer offers for that, and it applies to the
+        // playlist transition too.
+        val lead = spec.leadMs.coerceAtLeast(0L)
+        val end = spec.audioEndMs.coerceAtLeast(0L)
+        if (lead > 0L || end > lead) {
+            val clip = MediaItem.ClippingConfiguration.Builder()
+                .setStartPositionMs(lead)
+                // Nothing measured for the tail: play it to the end rather
+                // than cut it somewhere arbitrary.
+                .apply { if (end > lead) setEndPositionMs(end) }
+                // The start is where the audio was measured to begin, not the
+                // nearest keyframe before it — landing early would put the
+                // silence back.
+                .setStartsAtKeyFrame(false)
+                .build()
+            builder.setClippingConfiguration(clip)
+        }
+        return builder.build()
     }
 
     private fun snapshotLocked(): NativeAudioState {
@@ -1453,6 +1487,8 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
                 args.artist,
                 args.artworkUrl,
                 args.gainDb,
+                args.leadMs,
+                args.audioEndMs,
             )
         }.onSuccess {
             invoke.resolve(toJsObject(NativeAudioRuntime.getState(activity.applicationContext)))
@@ -1474,6 +1510,8 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
                 args.artist,
                 args.artworkUrl,
                 args.gainDb,
+                args.leadMs,
+                args.audioEndMs,
             )
         }.onSuccess {
             invoke.resolve(toJsObject(NativeAudioRuntime.getState(activity.applicationContext)))
