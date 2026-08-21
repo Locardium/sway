@@ -102,6 +102,7 @@ const desktopSetVolume = (volume: number) => invoke<void>('set_volume', { volume
 // notification buttons — see nativeAudio.ts). Desktop has no equivalent: it
 // stays null there and the app falls back to the usual position polling.
 export type { PlaybackEvent } from './nativeAudio';
+export type { NativeAudioOutputDevice as OutputDevice } from './nativeAudio';
 export const subscribePlayback = android ? nativeAudio.subscribePlayback : null;
 export const setAppVisible = nativeAudio.setAppVisible;
 
@@ -112,6 +113,46 @@ export const stopPlayback = android ? nativeAudio.stopPlayback : desktopStopPlay
 export const seekTo = android ? nativeAudio.seekTo : desktopSeekTo;
 export const playbackPosition = android ? nativeAudio.playbackPosition : desktopPlaybackPosition;
 export const setVolume = android ? nativeAudio.setVolume : desktopSetVolume;
+
+// --- Queue, crossfade and output device -------------------------------------
+//
+// These four exist on Android and not on desktop, which is the opposite of the
+// usual direction. The vendored plugin (see `crates/native-audio/FORK.md`)
+// hands ExoPlayer a playlist and a second player, so gapless, crossfade and
+// `setPreferredAudioDevice` come almost for free; the desktop `Player`
+// (rodio, `app/src-tauri/src/player.rs`) plays one decoded file into one sink
+// and follows whatever the system says the default output is. Doing the same
+// there means a second sink and a scheduler, which is its own piece of work.
+//
+// So they're no-ops on desktop rather than absent: `playbackSupports` is what
+// the UI asks before offering the control, and everything else can call them
+// unconditionally.
+
+export const playbackSupports = {
+  /// The next track can be handed over in advance, which is what makes the
+  /// transition gapless and what a crossfade needs to overlap.
+  queue: android,
+  crossfade: android,
+  outputDevice: android,
+};
+
+/// Stages what plays after the current track, or clears it with `null`.
+/// Without it the app can only react to the track ending, and reacting is by
+/// definition a gap.
+export const setNextTrack = android ? nativeAudio.setNextTrack : async (_id: number | null) => {};
+
+/// Overlap between tracks in seconds; `0` = off, and off is what makes the
+/// handover gapless.
+export const setCrossfade = android ? nativeAudio.setCrossfade : async (_seconds: number) => {};
+
+export const listOutputDevices = android
+  ? nativeAudio.listOutputDevices
+  : async () => [] as nativeAudio.NativeAudioOutputDevice[];
+
+/// `null` = system default. Also what happens if the chosen device goes away.
+export const setOutputDevice = android
+  ? nativeAudio.setOutputDevice
+  : async (_id: number | null) => {};
 
 // Embedded cover art as a data-URL (null if the file has none).
 export const coverThumb = (id: number) => invoke<string | null>('cover_thumb', { id });

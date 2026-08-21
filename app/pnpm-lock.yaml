@@ -26,9 +26,6 @@ importers:
       react-dom:
         specifier: ^18.3.1
         version: 18.3.1(react@18.3.1)
-      tauri-plugin-native-audio-api:
-        specifier: ^1.0.5
-        version: 1.0.5(@tauri-apps/api@2.11.1)
     devDependencies:
       '@tauri-apps/cli':
         specifier: ^2
@@ -699,11 +696,6 @@ packages:
     resolution: {integrity: sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==}
     engines: {node: '>=0.10.0'}
 
-  tauri-plugin-native-audio-api@1.0.5:
-    resolution: {integrity: sha512-G1v9xEhdN0mLbVAIXflhCzqxiqB9gy9Gs1dV/lc2mlZTO0J11PVOhaxPLZgOSvIvXrq0iLT7cvP53dgG6mBGoQ==}
-    peerDependencies:
-      '@tauri-apps/api': '>=2.10.0'
-
   tinyglobby@0.2.17:
     resolution: {integrity: sha512-wXR/dYpcqKmfWpEdZjiKJOwCNFndD0DMnrW/cYjVGttEkBfVgcLFHoNrlj47mjOVic9yyNu65alsgF4NQyTa2g==}
     engines: {node: '>=12.0.0'}
@@ -1299,10 +1291,6 @@ snapshots:
   semver@6.3.1: {}
 
   source-map-js@1.2.1: {}
-
-  tauri-plugin-native-audio-api@1.0.5(@tauri-apps/api@2.11.1):
-    dependencies:
-      '@tauri-apps/api': 2.11.1
 
   tinyglobby@0.2.17:
     dependencies:

@@ -1,0 +1,30 @@
+# Fork of `tauri-plugin-native-audio` 1.0.5 (MIT OR Apache-2.0, by
+# uvarov-frontend). See FORK.md for what changed and why it had to be forked.
+#
+# The name and `links` key stay identical to upstream on purpose: `tauri-plugin`
+# derives the permission namespace from the package name minus the
+# `tauri-plugin-` prefix, so renaming the crate would rename every permission to
+# `sway-plugin-native-audio:*` and break `native-audio:default` in
+# `app/src-tauri/capabilities/mobile.json`. The path dependency in
+# `app/src-tauri/Cargo.toml` is what takes this over the crates.io version.
+[package]
+name = "tauri-plugin-native-audio"
+version = "1.0.5"
+edition = "2021"
+rust-version = "1.77.2"
+build = "build.rs"
+links = "tauri-plugin-native-audio"
+publish = false
+description = "Native mobile audio playback plugin for Tauri (Sway fork)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/uvarov-frontend/tauri-plugin-native-audio"
+
+[lib]
+name = "tauri_plugin_native_audio"
+path = "src/lib.rs"
+
+[dependencies]
+tauri = { version = "2.10.2", features = [] }
+
+[build-dependencies]
+tauri-plugin = { version = "2.5.3", features = ["build"] }

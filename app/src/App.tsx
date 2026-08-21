@@ -28,6 +28,10 @@ import {
   setAppVisible,
   seekTo,
   setVolume as setVolumeBackend,
+  setNextTrack,
+  setCrossfade as setCrossfadeBackend,
+  setOutputDevice as setOutputDeviceBackend,
+  playbackSupports,
   revealTrack,
   syncXmlAfterChange,
   watchConditions,
@@ -54,6 +58,9 @@ type ModalState =
   | null;
 
 const VOL_STORAGE = 'sway.volume';
+const GAPLESS_STORAGE = 'sway.gapless';
+const CROSSFADE_STORAGE = 'sway.crossfade';
+const OUTPUT_STORAGE = 'sway.outputDevice';
 /// Before this point in the track, "back" jumps to the previous one instead
 /// of restarting the current one.
 const RESTART_MS = 3000;
@@ -96,6 +103,18 @@ export default function App() {
     if (saved === 'track' || saved === 'once') return saved;
     if (saved === 'all' || saved === 'one') return 'track';
     return 'off';
+  });
+  // Playback settings that the backend has to know about. Kept here and not
+  // inside Settings because Settings is unmounted when the modal closes, and
+  // these have to be pushed on startup too.
+  const [gapless, setGapless] = useState(() => localStorage.getItem(GAPLESS_STORAGE) !== '0');
+  const [crossfade, setCrossfade] = useState(() => {
+    const v = Number(localStorage.getItem(CROSSFADE_STORAGE));
+    return isNaN(v) || v < 0 ? 0 : v;
+  });
+  const [outputDevice, setOutputDevice] = useState<number | null>(() => {
+    const v = localStorage.getItem(OUTPUT_STORAGE);
+    return v == null || v === '' ? null : Number(v);
   });
   const [volume, setVol] = useState(() => {
     const v = Number(localStorage.getItem(VOL_STORAGE));
@@ -143,6 +162,30 @@ export default function App() {
     }
   }, [selection]);
 
+  // Crossfade and output device live in the player, not here. Pushed on every
+  // change and on startup; no-ops where the backend doesn't have them (see
+  // `playbackSupports` in api.ts).
+  useEffect(() => {
+    setCrossfadeBackend(crossfade).catch(() => {});
+  }, [crossfade]);
+  useEffect(() => {
+    setOutputDeviceBackend(outputDevice).catch(() => {});
+  }, [outputDevice]);
+
+  function onGapless(v: boolean) {
+    setGapless(v);
+    localStorage.setItem(GAPLESS_STORAGE, v ? '1' : '0');
+  }
+  function onCrossfade(v: number) {
+    setCrossfade(v);
+    localStorage.setItem(CROSSFADE_STORAGE, String(v));
+  }
+  function onOutputDevice(id: number | null) {
+    setOutputDevice(id);
+    if (id == null) localStorage.removeItem(OUTPUT_STORAGE);
+    else localStorage.setItem(OUTPUT_STORAGE, String(id));
+  }
+
   // Position poll (desktop). Android doesn't use it: the native plugin pushes
   // its state, see the effect below.
   useEffect(() => {
@@ -170,6 +213,9 @@ export default function App() {
           break;
         case 'playing':
           setPaused(!e.value);
+          break;
+        case 'advanced':
+          onAdvancedRef.current(e.id);
           break;
         case 'ended':
           onTrackEndedRef.current();
@@ -494,6 +540,55 @@ export default function App() {
   }, [currentId, repeat, playOffset]);
   const onTrackEndedRef = useRef(onTrackEnded);
   onTrackEndedRef.current = onTrackEnded;
+
+  /// Which track should be handed to the player before the current one runs
+  /// out. Repeat governs the current track, not the queue — same rule as
+  /// `onTrackEnded` — so under 'track'/'once' what comes next is this one
+  /// again.
+  const upcomingId = useCallback(
+    (cur: number): number | null => {
+      if (repeat === 'track' || repeat === 'once') return cur;
+      const q = queueRef.current;
+      const i = q.indexOf(cur);
+      return i < 0 ? null : q[i + 1] ?? null;
+    },
+    [repeat],
+  );
+
+  /// The player moved on by itself: a staged track took over, gaplessly or
+  /// through a crossfade. Nothing ended, so `onTrackEnded` never runs and this
+  /// is where the queue position catches up.
+  const onAdvanced = useCallback(
+    (id: number) => {
+      if (repeat === 'once') {
+        setRepeat('off');
+        localStorage.setItem('sway.repeat', 'off');
+      }
+      setCurrentId(id);
+      setPaused(false);
+      setPosMs(0);
+    },
+    [repeat],
+  );
+  const onAdvancedRef = useRef(onAdvanced);
+  onAdvancedRef.current = onAdvanced;
+
+  // Hand the next track over in advance. This is the whole point of the
+  // queue: waiting for the current one to end and only then loading the next
+  // is what a gap IS, and a crossfade needs the overlap prepared even earlier.
+  // Cleared when nothing is playing, so a stale track can't sneak in after a
+  // stop.
+  useEffect(() => {
+    if (!playbackSupports.queue) return;
+    if (currentId == null) {
+      setNextTrack(null).catch(() => {});
+      return;
+    }
+    // With both off there is nothing to gain from staging, and staging anyway
+    // would hand the player a track the app might never want to play.
+    const wanted = gapless || crossfade > 0 ? upcomingId(currentId) : null;
+    setNextTrack(wanted).catch(() => {});
+  }, [currentId, gapless, crossfade, upcomingId, visibleTracks]);
 
   // Auto-advance on desktop: there's no track-end event, it's deduced from
   // the position. On Android it's triggered by the plugin (see the
@@ -1030,7 +1125,6 @@ export default function App() {
           onVolume={onVolume}
           onToggleShuffle={onToggleShuffle}
           onCycleRepeat={onCycleRepeat}
-          showVolume={!isAndroid()}
         />
       )}
 
@@ -1118,6 +1212,12 @@ export default function App() {
         <Settings
           trackCount={library.length}
           volume={volume}
+          gapless={gapless}
+          crossfade={crossfade}
+          outputDevice={outputDevice}
+          onGapless={onGapless}
+          onCrossfade={onCrossfade}
+          onOutputDevice={onOutputDevice}
           onClose={() => setModal(null)}
           onStatus={setStatus}
           onImported={async () => {

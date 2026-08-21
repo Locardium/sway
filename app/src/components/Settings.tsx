@@ -7,13 +7,26 @@ import {
   exportLibraryXmlNow,
   getAutoSyncXml,
   importFromUri,
+  listOutputDevices,
+  playbackSupports,
   setAutoSyncXml,
+  type OutputDevice,
 } from '../api';
 import { isAndroid } from '../platform';
 
 interface Props {
   trackCount: number;
   volume: number;
+  /// Playback settings that the player has to be told about. They live in
+  /// App.tsx, not here: this screen is unmounted when it closes, and they have
+  /// to survive that and be pushed again on startup.
+  gapless: boolean;
+  crossfade: number;
+  /// `null` = whatever the system picks.
+  outputDevice: number | null;
+  onGapless: (v: boolean) => void;
+  onCrossfade: (v: number) => void;
+  onOutputDevice: (id: number | null) => void;
   onClose: () => void;
   onStatus: (msg: string) => void;
   onImported: () => void | Promise<void>;
@@ -50,21 +63,32 @@ function guessFileName(uri: string): string {
   return `track-${Date.now()}.mp3`;
 }
 
-// Settings that are mostly prototype (not yet functional): the UI exists to
-// define the model, the logic arrives in later phases.
+// Crossfade, gapless, output device and sync reach the backend. The rest —
+// autoplay, normalize, and the whole appearance section — is still prototype:
+// the UI exists to define the model, the logic arrives in later phases.
+//
+// "Normalize volume" is the odd one out. The player CAN apply a per-track gain
+// now (`gainDb` in the native-audio fork), but nothing in the library reads
+// ReplayGain/R128 tags yet, so there is no number to give it. The switch stays
+// inert until there is.
 export default function Settings({
   trackCount,
   volume,
+  gapless,
+  crossfade,
+  outputDevice,
+  onGapless,
+  onCrossfade,
+  onOutputDevice,
   onClose,
   onStatus,
   onImported,
   onOpenSync,
 }: Props) {
-  const [gapless, setGapless] = useState(true);
   const [autoplay, setAutoplay] = useState(true);
-  const [crossfade, setCrossfade] = useState(0);
   const [compact, setCompact] = useState(false);
   const [normalize, setNormalize] = useState(false);
+  const [devices, setDevices] = useState<OutputDevice[]>([]);
   const [theme, setTheme] = useState('dark');
   const [accent, setAccent] = useState('sky');
   const [autoSyncXml, setAutoSyncXmlState] = useState(true);
@@ -80,6 +104,16 @@ export default function Settings({
       .then(setAutoSyncXmlState)
       .catch(() => {});
   }, [showExport]);
+
+  // Read when the screen opens rather than kept live: headphones plugged in
+  // while this modal is on screen is not worth a listener, and reopening it
+  // re-reads.
+  useEffect(() => {
+    if (!playbackSupports.outputDevice) return;
+    listOutputDevices()
+      .then(setDevices)
+      .catch(() => setDevices([]));
+  }, []);
 
   async function toggleAutoSync(v: boolean) {
     setAutoSyncXmlState(v);
@@ -195,21 +229,42 @@ export default function Settings({
           <div className="set-row">
             <div className="set-label">
               <span>Crossfade</span>
-              <small>{crossfade === 0 ? 'Off' : `${crossfade}s`}</small>
+              <small>
+                {!playbackSupports.crossfade
+                  ? 'Not available on this platform'
+                  : crossfade === 0
+                    ? 'Off'
+                    : `${crossfade}s`}
+              </small>
             </div>
             <input
               type="range"
               min={0}
               max={12}
               value={crossfade}
-              onChange={(e) => setCrossfade(Number(e.target.value))}
+              disabled={!playbackSupports.crossfade}
+              onChange={(e) => onCrossfade(Number(e.target.value))}
               className="range set-slider"
               style={{ ['--fill' as string]: `${(crossfade / 12) * 100}%` }}
             />
           </div>
           <div className="set-row">
-            <div className="set-label"><span>Gapless playback</span></div>
-            <Switch checked={gapless} onChange={setGapless} />
+            <div className="set-label">
+              <span>Gapless playback</span>
+              {/* Crossfade replaces it: an overlap is the opposite of no gap. */}
+              <small>
+                {!playbackSupports.queue
+                  ? 'Not available on this platform'
+                  : crossfade > 0
+                    ? 'Superseded by crossfade'
+                    : 'Hands the next track over before this one ends'}
+              </small>
+            </div>
+            <Switch
+              checked={gapless && crossfade === 0}
+              onChange={onGapless}
+              disabled={!playbackSupports.queue || crossfade > 0}
+            />
           </div>
           <div className="set-row">
             <div className="set-label"><span>Autoplay next track</span></div>
@@ -224,8 +279,25 @@ export default function Settings({
           </div>
           <div className="set-row">
             <div className="set-label"><span>Output device</span></div>
-            <select disabled className="set-select">
-              <option>System default</option>
+            <select
+              className="set-select"
+              disabled={!playbackSupports.outputDevice}
+              value={outputDevice == null ? '' : String(outputDevice)}
+              onChange={(e) => onOutputDevice(e.target.value === '' ? null : Number(e.target.value))}
+            >
+              <option value="">System default</option>
+              {devices.map((d) => (
+                <option key={d.id} value={String(d.id)}>
+                  {d.name === d.type ? d.name : `${d.name} (${d.type})`}
+                </option>
+              ))}
+              {/* The pinned device isn't here any more (headphones unplugged
+                  since last time). Shown rather than dropped, or the select
+                  would render blank and look broken — playback already fell
+                  back to the system default on its own. */}
+              {outputDevice != null && !devices.some((d) => d.id === outputDevice) && (
+                <option value={String(outputDevice)}>Not connected</option>
+              )}
             </select>
           </div>
         </section>
