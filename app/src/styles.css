@@ -396,6 +396,33 @@ footer.player.closing { animation: player-out 220ms var(--ease) forwards; }
 }
 .np { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .np-art { width: 40px; height: 40px; border-radius: 8px; flex: none; }
+
+/* Stop sits on the artwork instead of in the transport row: it's the one
+   action you almost never want mid-set, and it was holding a permanent slot
+   next to the controls used constantly. */
+.np-art-wrap { position: relative; width: 40px; height: 40px; flex: none; }
+.art-stop {
+  position: absolute; inset: 0;
+  display: grid; place-items: center;
+  border: 0; border-radius: 8px; padding: 0;
+  background: oklch(0% 0 0 / 0.62); color: var(--text);
+  opacity: 0; cursor: pointer;
+  transition: opacity 140ms var(--ease);
+}
+.np-art-wrap:hover .art-stop,
+.art-stop:focus-visible { opacity: 1; }
+.art-stop:hover { color: var(--accent); }
+/* No hover on touch: without this the button would be unreachable there, so
+   it stays visible as a small badge in the corner rather than covering the art. */
+@media (hover: none) {
+  .art-stop {
+    opacity: 1;
+    inset: auto -2px -2px auto;
+    width: 20px; height: 20px; border-radius: 50%;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+  }
+}
 .np-text { display: flex; flex-direction: column; min-width: 0; }
 .np-text strong { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .np-artist { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -478,6 +505,47 @@ button.ctl.stop { color: var(--muted); }
 .player-right { display: flex; justify-content: flex-end; align-items: center; gap: 6px; min-width: 0; }
 .vol { display: flex; align-items: center; gap: 4px; }
 .vol-range { width: 84px; }
+
+/* Gain: the per-track trim, as a knob. Deliberately a different shape from
+   the volume slider next to it — that one is the room, this one is the
+   record, and they should never be reached for by accident. */
+.gain { display: flex; align-items: center; gap: 1px; }
+.gain-value {
+  font-size: 10px; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  min-width: 44px; text-align: right;
+}
+
+.knob {
+  flex: none;
+  cursor: ns-resize;
+  border-radius: 50%;
+  outline: none;
+  /* The pointer would otherwise select the surrounding text mid-drag. */
+  user-select: none;
+  touch-action: none;
+}
+.knob:focus-visible { box-shadow: 0 0 0 3px var(--accent-soft); }
+.knob-track {
+  stroke: oklch(100% 0 0 / 0.10);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+.knob-arc {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+.knob-pointer {
+  stroke: var(--muted);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  transition: stroke 140ms var(--ease);
+}
+/* Away from 0 dB the pointer lights up, so a track carrying a trim is
+   obvious without reading the number. */
+.knob.active .knob-pointer { stroke: var(--text); }
+.knob:hover .knob-pointer { stroke: var(--accent); }
 
 /* ---------- Unified slider (.range): volume, settings, etc. ---------- */
 input.range {
@@ -697,6 +765,14 @@ table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
   background: var(--panel-2); color: var(--text);
   border: 1px solid var(--line); border-radius: 6px;
   padding: 5px 8px; font-size: 12px; outline: none;
+  /* The output-device list arrives asynchronously, so the widest option only
+     exists a moment after the panel opens. A fixed width (not min/max, which
+     the longest option can still push past) keeps the control from growing
+     under the pointer a second after the panel appears. Long device names
+     ellipsize instead of stretching the row. */
+  width: 230px;
+  flex: none;
+  text-overflow: ellipsis;
 }
 .set-select:disabled { opacity: 0.5; }
 .set-slider { width: 140px; }
@@ -799,7 +875,6 @@ table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
 .pair-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .pair-actions .primary { background: var(--accent); border-color: var(--accent); color: oklch(15% 0 0); }
 
-/* Prototype switch */
 .switch {
   width: 38px; height: 22px; border-radius: 999px; padding: 0;
   border: 1px solid var(--line); background: var(--panel-2);
@@ -814,6 +889,10 @@ table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
   transition: left 160ms var(--ease), background 160ms var(--ease);
 }
 .switch.on .switch-knob { left: 20px; background: var(--accent-ink); }
+/* Saved but currently overridden by another setting (gapless under an active
+   crossfade). Dimmed rather than reset: the stored value is still the truth,
+   it just isn't what's deciding right now. */
+.switch.off-duty { opacity: 0.4; cursor: default; }
 
 .swatches { display: flex; gap: 6px; }
 .swatch {

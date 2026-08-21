@@ -44,6 +44,8 @@ pub fn emit_library_changed(handle: &AppHandle, force: bool) {
     }
     LAST_LIBRARY_EVENT.store(now, Ordering::Relaxed);
     let _ = handle.emit("library-changed", ());
+    // Files the sync just brought in have never been measured here.
+    crate::kick_loudness(handle);
 }
 
 /// How long to wait for a person to look at the screen and confirm.

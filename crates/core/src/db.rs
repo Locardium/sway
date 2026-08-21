@@ -26,6 +26,14 @@ pub struct Track {
     /// the main view (the space has already been freed).
     pub in_scope: bool,
     pub uid: Option<String>,
+    /// Manual per-track gain in dB, the way a DJ mixer's trim works: a quiet
+    /// track gets pushed up once and stays that way. Survives restarts, and is
+    /// deliberately separate from the master volume (which is the room, not
+    /// the track).
+    pub gain_db: f64,
+    /// Integrated loudness (EBU R128, LUFS) measured by the analyzer.
+    /// `None` = not analyzed yet. Used only when "normalize volume" is on.
+    pub loudness_lufs: Option<f64>,
 }
 
 const SCHEMA: &str = "
@@ -66,7 +74,26 @@ CREATE TABLE IF NOT EXISTS tracks (
     -- absent   = the row is here, the blob isn't (selective sync: the phone
     --            knows the track but hasn't downloaded it)
     -- pending  = transfer in progress
-    local_state  TEXT NOT NULL DEFAULT 'present'
+    local_state  TEXT NOT NULL DEFAULT 'present',
+    -- Manual trim in dB set from the player, like a mixer's gain knob.
+    gain_db       REAL NOT NULL DEFAULT 0,
+    -- Integrated loudness in LUFS (EBU R128), measured by the analyzer.
+    -- NULL = never analyzed. Derived from the bytes, so it is NOT replicated:
+    -- each device measures its own copy and gets the same number.
+    -- It doubles as the has-this-been-analyzed marker: everything the
+    -- analyzer measures is written in the same pass.
+    loudness_lufs REAL,
+    -- Where the audio actually starts and ends, as absolute positions in ms.
+    -- This is what makes gapless gapless: appending one track after another
+    -- inserts no gap, but the encoder padding and the recorded silence baked
+    -- into the files still play, and that silence IS the gap you hear.
+    --
+    -- The end is stored absolute rather than as silence-from-the-end,
+    -- because that would have to be subtracted from `duration_ms`, which for
+    -- a VBR MP3 is a bitrate ESTIMATE and can be off by seconds. The analyzer
+    -- decodes the file, so this position is exact.
+    lead_silence_ms INTEGER,
+    audio_end_ms    INTEGER
 );
 -- The uid/content_hash indexes are created by migrate(): on an old database
 -- these columns don't exist yet when this batch runs.
@@ -321,6 +348,11 @@ fn migrate(conn: &Connection) -> Result<()> {
         ("tracks", "field_clocks TEXT"),
         ("tracks", "updated_at INTEGER NOT NULL DEFAULT 0"),
         ("tracks", "local_state TEXT NOT NULL DEFAULT 'present'"),
+        // Playback levels: manual trim and what the analyzer measures.
+        ("tracks", "gain_db REAL NOT NULL DEFAULT 0"),
+        ("tracks", "loudness_lufs REAL"),
+        ("tracks", "lead_silence_ms INTEGER"),
+        ("tracks", "audio_end_ms INTEGER"),
         ("playlists", "uid TEXT"),
         ("playlists", "updated_at INTEGER NOT NULL DEFAULT 0"),
         ("playlist_tracks", "added_at INTEGER NOT NULL DEFAULT 0"),
@@ -454,7 +486,8 @@ fn backfill_ranks(conn: &Connection, table: &str, group_by: &str) -> Result<()> 
 
 pub fn list_tracks(conn: &Connection) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
-        "SELECT id, path, title, artist, album, genre, duration_ms, bpm, local_state, uid
+        "SELECT id, path, title, artist, album, genre, duration_ms, bpm, local_state, uid,
+                gain_db, loudness_lufs
          FROM tracks ORDER BY artist, album, title",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -470,6 +503,8 @@ pub fn list_tracks(conn: &Connection) -> Result<Vec<Track>> {
             present: r.get::<_, String>(8)? == "present",
             uid: r.get(9)?,
             in_scope: true,
+            gain_db: r.get(10)?,
+            loudness_lufs: r.get(11)?,
         })
     })?;
     rows.collect()
@@ -477,6 +512,113 @@ pub fn list_tracks(conn: &Connection) -> Result<Vec<Track>> {
 
 pub fn track_path(conn: &Connection, id: i64) -> Result<String> {
     conn.query_row("SELECT path FROM tracks WHERE id = ?1", [id], |r| r.get(0))
+}
+
+// ---------------------------------------------------------------------------
+// Playback levels
+// ---------------------------------------------------------------------------
+
+/// Everything about how one track should be played: how loud, and where its
+/// audio actually starts and ends.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TrackPlayback {
+    /// Manual trim set from the player.
+    pub gain_db: f64,
+    /// Measured loudness. `None` = not analyzed yet.
+    pub loudness_lufs: Option<f64>,
+    /// Absolute positions in ms where the audio starts and ends.
+    /// `None` = not analyzed.
+    pub lead_silence_ms: Option<i64>,
+    pub audio_end_ms: Option<i64>,
+}
+
+pub fn track_playback(conn: &Connection, id: i64) -> Result<TrackPlayback> {
+    conn.query_row(
+        "SELECT gain_db, loudness_lufs, lead_silence_ms, audio_end_ms
+         FROM tracks WHERE id = ?1",
+        [id],
+        |r| {
+            Ok(TrackPlayback {
+                gain_db: r.get(0)?,
+                loudness_lufs: r.get(1)?,
+                lead_silence_ms: r.get(2)?,
+                audio_end_ms: r.get(3)?,
+            })
+        },
+    )
+}
+
+pub fn set_track_gain(conn: &Connection, id: i64, gain_db: f64) -> Result<()> {
+    conn.execute(
+        "UPDATE tracks SET gain_db = ?2 WHERE id = ?1",
+        rusqlite::params![id, gain_db],
+    )?;
+    Ok(())
+}
+
+/// Writes one analysis result. Loudness and the silence bounds are measured
+/// in the same decode, so they are stored in the same statement — a row with
+/// a loudness but no bounds would look analyzed while playing back untrimmed.
+pub fn set_track_analysis(
+    conn: &Connection,
+    id: i64,
+    lufs: f64,
+    lead_ms: i64,
+    audio_end_ms: i64,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE tracks
+            SET loudness_lufs = ?2, lead_silence_ms = ?3, audio_end_ms = ?4
+          WHERE id = ?1",
+        rusqlite::params![id, lufs, lead_ms, audio_end_ms],
+    )?;
+    Ok(())
+}
+
+/// What counts as still needing the analyzer.
+///
+/// Any measurement missing means the row gets measured again — they all come
+/// out of one decode, so a row carrying some of them was written by a build
+/// that measured less. Keying on loudness alone would leave every track
+/// analyzed before the silence bounds existed permanently untrimmed, with
+/// nothing in the UI to suggest why gapless did nothing.
+///
+/// `absent` rows are skipped throughout: measuring needs the bytes, and
+/// selective sync means a device can hold thousands of rows with no audio
+/// behind them.
+const NEEDS_ANALYSIS: &str = "(loudness_lufs IS NULL
+                              OR lead_silence_ms IS NULL
+                              OR audio_end_ms IS NULL)
+                             AND local_state = 'present'";
+
+pub fn tracks_needing_analysis(conn: &Connection, limit: usize) -> Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, path FROM tracks WHERE {NEEDS_ANALYSIS} ORDER BY id LIMIT ?1"
+    ))?;
+    let rows = stmt.query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    rows.collect()
+}
+
+/// How many tracks are still waiting — what the progress line in Settings
+/// counts down.
+pub fn analysis_pending_count(conn: &Connection) -> Result<i64> {
+    conn.query_row(
+        &format!("SELECT COUNT(*) FROM tracks WHERE {NEEDS_ANALYSIS}"),
+        [],
+        |r| r.get(0),
+    )
+}
+
+/// Throws away every measurement so the next sweep redoes the whole library.
+/// What the "Rescan" button calls: the analyzer only ever looks at rows it
+/// hasn't measured, so clearing the results is how you ask for them again.
+pub fn clear_analysis(conn: &Connection) -> Result<usize> {
+    let n = conn.execute(
+        "UPDATE tracks
+            SET loudness_lufs = NULL, lead_silence_ms = NULL, audio_end_ms = NULL",
+        [],
+    )?;
+    Ok(n)
 }
 
 /// Deletes tracks from the library. Files living under the managed
@@ -598,6 +740,140 @@ pub fn set_auto_sync_xml(conn: &Connection, enabled: bool) -> Result<()> {
         rusqlite::params![SETTING_AUTO_SYNC_XML, if enabled { "1" } else { "0" }],
     )?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Playback preferences
+//
+// Local, not replicated: they describe this machine's audio output (which
+// card, how much crossfade), not the library. The phone having its own
+// crossfade is the correct behaviour, not drift to be reconciled.
+// ---------------------------------------------------------------------------
+
+/// The reference level normalization aims for.
+///
+/// -14 rather than the -18 of ReplayGain 2.0: a DJ library is mastered hot
+/// (this one sits between -4 and -8 LUFS), and aiming at -18 pulled every
+/// track down so far that the whole app just sounded quiet. -14 is the level
+/// the streaming services settled on for the same reason, and it still leaves
+/// 14 dB of headroom.
+pub const TARGET_LUFS: f64 = -6.0;
+
+/// Ceiling on how much anything may be turned **up**. Without it one badly
+/// measured track (an ambient intro measured as the whole track) asks for
+/// +40 dB and destroys the speakers. It is also the travel of the gain knob
+/// in the player, in both directions.
+pub const MAX_GAIN_DB: f64 = 12.0;
+
+/// Floor on how much anything may be turned **down**. Deliberately further
+/// from zero than the boost ceiling: attenuation cannot clip or blow
+/// anything, and a modern club master sits 12-14 dB above the reference, so a
+/// symmetric cap would leave exactly the loudest tracks — the ones
+/// normalization is for — still louder than everything else.
+pub const MAX_CUT_DB: f64 = 24.0;
+
+#[derive(Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackPrefs {
+    /// Seconds of overlap between tracks. 0 = off.
+    pub crossfade_secs: f64,
+    /// Feed the next track into the same output so there is no silence at the
+    /// boundary. Moot while `crossfade_secs > 0` — an overlap has no gap to remove.
+    pub gapless: bool,
+    /// Continue to the next track when one ends. Off = playback stops there.
+    pub autoplay: bool,
+    /// Apply the measured loudness so every track lands near `TARGET_LUFS`.
+    pub normalize: bool,
+    /// Output device by name. `None` = follow whatever the system default is,
+    /// including when the user changes it mid-track.
+    pub output_device: Option<String>,
+}
+
+impl Default for PlaybackPrefs {
+    fn default() -> Self {
+        Self {
+            crossfade_secs: 0.0,
+            gapless: true,
+            autoplay: true,
+            normalize: false,
+            output_device: None,
+        }
+    }
+}
+
+const SETTING_PLAYBACK: &str = "playback_prefs";
+
+/// Reads the preferences, falling back to the defaults for anything missing.
+/// Stored as one JSON blob rather than five keys: they are read and written
+/// together, and a partial write would leave playback in a state no screen
+/// ever showed.
+pub fn get_playback_prefs(conn: &Connection) -> Result<PlaybackPrefs> {
+    let raw = get_setting(conn, SETTING_PLAYBACK)?;
+    Ok(raw
+        .and_then(|s| serde_json::from_str::<StoredPrefs>(&s).ok())
+        .map(Into::into)
+        .unwrap_or_default())
+}
+
+pub fn set_playback_prefs(conn: &Connection, prefs: &PlaybackPrefs) -> Result<()> {
+    let stored = StoredPrefs {
+        crossfade_secs: Some(prefs.crossfade_secs),
+        gapless: Some(prefs.gapless),
+        autoplay: Some(prefs.autoplay),
+        normalize: Some(prefs.normalize),
+        output_device: prefs.output_device.clone(),
+    };
+    let json = serde_json::to_string(&stored).unwrap_or_default();
+    set_setting(conn, SETTING_PLAYBACK, &json)
+}
+
+/// Every field optional so a blob written by an older version (which had
+/// fewer keys) still loads, taking the default for what it doesn't carry.
+///
+/// Same key casing as the wire form above on purpose: one shape for this
+/// data, whether it's being read out of the DB or off the API. Two casings
+/// for the same five fields is a trap for whoever looks at the row next.
+#[derive(serde::Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct StoredPrefs {
+    crossfade_secs: Option<f64>,
+    gapless: Option<bool>,
+    autoplay: Option<bool>,
+    normalize: Option<bool>,
+    output_device: Option<String>,
+}
+
+impl From<StoredPrefs> for PlaybackPrefs {
+    fn from(s: StoredPrefs) -> Self {
+        let d = PlaybackPrefs::default();
+        PlaybackPrefs {
+            crossfade_secs: s.crossfade_secs.unwrap_or(d.crossfade_secs),
+            gapless: s.gapless.unwrap_or(d.gapless),
+            autoplay: s.autoplay.unwrap_or(d.autoplay),
+            normalize: s.normalize.unwrap_or(d.normalize),
+            output_device: s.output_device,
+        }
+    }
+}
+
+/// How loud to play a track, in dB relative to the file: the manual trim,
+/// plus what normalization asks for when it's on and the track was measured.
+///
+/// The two add up rather than one replacing the other, which is how a DJ
+/// mixer behaves: auto-gain sets the baseline, the trim knob is what you do
+/// on top of it when the baseline is wrong for this room.
+pub fn playback_gain_db(gain_db: f64, loudness_lufs: Option<f64>, normalize: bool) -> f64 {
+    let auto = match (normalize, loudness_lufs) {
+        (true, Some(lufs)) => TARGET_LUFS - lufs,
+        // Not measured yet (or normalization off): the trim alone decides.
+        _ => 0.0,
+    };
+    (gain_db + auto).clamp(-MAX_CUT_DB, MAX_GAIN_DB)
+}
+
+/// dB to the linear multiplier the audio sink wants.
+pub fn db_to_linear(db: f64) -> f32 {
+    10f64.powf(db / 20.0) as f32
 }
 
 // ---------------------------------------------------------------------------
@@ -829,7 +1105,7 @@ pub fn track_playlists(conn: &Connection, track_id: i64) -> Result<Vec<i64>> {
 pub fn playlist_tracks(conn: &Connection, playlist_id: i64) -> Result<Vec<Track>> {
     let mut stmt = conn.prepare(
         "SELECT t.id, t.path, t.title, t.artist, t.album, t.genre, t.duration_ms, t.bpm,
-                t.local_state, t.uid
+                t.local_state, t.uid, t.gain_db, t.loudness_lufs
          FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id
          WHERE pt.playlist_id = ?1
          ORDER BY pt.rank",
@@ -847,6 +1123,8 @@ pub fn playlist_tracks(conn: &Connection, playlist_id: i64) -> Result<Vec<Track>
             present: r.get::<_, String>(8)? == "present",
             uid: r.get(9)?,
             in_scope: true,
+            gain_db: r.get(10)?,
+            loudness_lufs: r.get(11)?,
         })
     })?;
     rows.collect()
@@ -1007,6 +1285,180 @@ mod tests {
         )
         .unwrap();
         conn.last_insert_rowid()
+    }
+
+    /// The trim is what the user set; normalization off means nothing else
+    /// gets a say, even on a track that was measured.
+    #[test]
+    fn with_normalization_off_only_the_manual_trim_counts() {
+        assert_eq!(playback_gain_db(0.0, Some(-30.0), false), 0.0);
+        assert_eq!(playback_gain_db(3.5, Some(-30.0), false), 3.5);
+        assert_eq!(playback_gain_db(-6.0, None, false), -6.0);
+    }
+
+    /// A track quieter than the target gets pushed up by exactly the
+    /// difference, and one louder gets pulled down.
+    #[test]
+    fn normalization_moves_the_track_to_the_target_level() {
+        assert_eq!(playback_gain_db(0.0, Some(TARGET_LUFS), true), 0.0);
+        // -22 LUFS against a -14 target: 8 dB short.
+        assert_eq!(playback_gain_db(0.0, Some(-22.0), true), 8.0);
+        // -8 LUFS is 6 dB too loud.
+        assert_eq!(playback_gain_db(0.0, Some(-8.0), true), -6.0);
+    }
+
+    /// The trim rides on top of normalization rather than replacing it —
+    /// that's the point of having both, and it's how a mixer behaves.
+    #[test]
+    fn the_trim_adds_on_top_of_normalization() {
+        assert_eq!(playback_gain_db(2.0, Some(-18.0), true), 6.0);
+        assert_eq!(playback_gain_db(-2.0, Some(-18.0), true), 2.0);
+    }
+
+    /// An unmeasured track is left alone rather than guessed at: asking for a
+    /// correction against a level nobody measured is how you get a boost that
+    /// no one intended.
+    #[test]
+    fn an_unmeasured_track_is_not_corrected() {
+        assert_eq!(playback_gain_db(0.0, None, true), 0.0);
+        assert_eq!(playback_gain_db(4.0, None, true), 4.0);
+    }
+
+    /// One badly measured track (a long quiet intro read as the whole thing)
+    /// must not be able to ask for a level that destroys the speakers.
+    #[test]
+    fn the_boost_is_capped() {
+        assert_eq!(playback_gain_db(0.0, Some(-60.0), true), MAX_GAIN_DB);
+        assert_eq!(playback_gain_db(100.0, None, false), MAX_GAIN_DB);
+    }
+
+    /// Turning down is capped much further out, because it cannot clip and a
+    /// club master really does sit 12-14 dB above the reference. A symmetric
+    /// cap would leave the loudest tracks — the ones normalization exists
+    /// for — still standing out.
+    #[test]
+    fn a_loud_master_is_brought_all_the_way_down() {
+        // A real track out of this library: -4.2 LUFS wants -9.8 dB against
+        // the -14 reference.
+        assert!((playback_gain_db(0.0, Some(-4.2), true) - (-9.8)).abs() < 1e-9);
+        // The floor is still there for a nonsense measurement.
+        assert_eq!(playback_gain_db(0.0, Some(40.0), true), -MAX_CUT_DB);
+    }
+
+    #[test]
+    fn decibels_convert_to_the_multiplier_the_sink_wants() {
+        assert!((db_to_linear(0.0) - 1.0).abs() < 1e-6);
+        // +6 dB is roughly double the amplitude, -6 dB roughly half.
+        assert!((db_to_linear(6.0) - 1.995).abs() < 0.01);
+        assert!((db_to_linear(-6.0) - 0.501).abs() < 0.01);
+    }
+
+    /// Round trip through the DB: the trim sticks to the track and the
+    /// measurements land next to it.
+    #[test]
+    fn gain_and_analysis_are_stored_per_track() {
+        let conn = mem();
+        let a = add_track(&conn, "/music/a.flac");
+        let b = add_track(&conn, "/music/b.flac");
+        assert_eq!(track_playback(&conn, a).unwrap(), TrackPlayback::default());
+
+        set_track_gain(&conn, a, 4.5).unwrap();
+        set_track_analysis(&conn, a, -21.0, 120, 340).unwrap();
+        assert_eq!(
+            track_playback(&conn, a).unwrap(),
+            TrackPlayback {
+                gain_db: 4.5,
+                loudness_lufs: Some(-21.0),
+                lead_silence_ms: Some(120),
+                audio_end_ms: Some(340),
+            }
+        );
+        // The other track is untouched.
+        assert_eq!(track_playback(&conn, b).unwrap(), TrackPlayback::default());
+    }
+
+    /// The sweep only offers tracks whose bytes are actually here: measuring
+    /// needs the file, and selective sync leaves rows without one.
+    #[test]
+    fn only_present_and_unmeasured_tracks_are_queued_for_analysis() {
+        let conn = mem();
+        let here = add_track(&conn, "/music/here.flac");
+        let done = add_track(&conn, "/music/done.flac");
+        let gone = add_track(&conn, "/music/gone.flac");
+        set_track_analysis(&conn, done, -18.0, 0, 0).unwrap();
+        conn.execute("UPDATE tracks SET local_state = 'absent' WHERE id = ?1", [gone])
+            .unwrap();
+
+        let pending = tracks_needing_analysis(&conn, 100).unwrap();
+        assert_eq!(pending.len(), 1, "only the present, unmeasured one");
+        assert_eq!(pending[0].0, here);
+        assert_eq!(analysis_pending_count(&conn).unwrap(), 1);
+
+        set_track_analysis(&conn, here, -20.0, 0, 0).unwrap();
+        assert_eq!(analysis_pending_count(&conn).unwrap(), 0);
+    }
+
+    /// A row written by a build that measured less gets picked up again on
+    /// its own. Without this, every track analyzed before the silence bounds
+    /// existed would stay untrimmed forever and gapless would quietly do
+    /// nothing.
+    #[test]
+    fn a_partly_measured_track_is_analyzed_again() {
+        let conn = mem();
+        let old = add_track(&conn, "/music/old.flac");
+        // Exactly what the previous version left behind: loudness, no bounds.
+        conn.execute("UPDATE tracks SET loudness_lufs = -8.0 WHERE id = ?1", [old])
+            .unwrap();
+
+        assert_eq!(analysis_pending_count(&conn).unwrap(), 1);
+        assert_eq!(tracks_needing_analysis(&conn, 10).unwrap()[0].0, old);
+
+        set_track_analysis(&conn, old, -8.0, 40, 900).unwrap();
+        assert_eq!(analysis_pending_count(&conn).unwrap(), 0);
+    }
+
+    /// Rescan puts everything back in the queue — that's the whole mechanism
+    /// behind the button, since the sweep only looks at unmeasured rows.
+    #[test]
+    fn rescan_puts_every_track_back_in_the_queue() {
+        let conn = mem();
+        let a = add_track(&conn, "/music/a.flac");
+        let b = add_track(&conn, "/music/b.flac");
+        set_track_analysis(&conn, a, -20.0, 100, 200).unwrap();
+        set_track_analysis(&conn, b, TARGET_LUFS, 0, 0).unwrap();
+        set_track_gain(&conn, a, 3.0).unwrap();
+        assert_eq!(analysis_pending_count(&conn).unwrap(), 0);
+
+        clear_analysis(&conn).unwrap();
+        assert_eq!(analysis_pending_count(&conn).unwrap(), 2);
+        // The manual trim is not a measurement and must survive a rescan.
+        assert_eq!(track_playback(&conn, a).unwrap().gain_db, 3.0);
+        assert_eq!(track_playback(&conn, a).unwrap().lead_silence_ms, None);
+    }
+
+    /// Preferences survive a round trip, and a blob written before a field
+    /// existed still loads — taking the default for what it doesn't carry.
+    #[test]
+    fn playback_prefs_round_trip_and_tolerate_older_blobs() {
+        let conn = mem();
+        assert_eq!(get_playback_prefs(&conn).unwrap(), PlaybackPrefs::default());
+
+        let mine = PlaybackPrefs {
+            crossfade_secs: 6.0,
+            gapless: false,
+            autoplay: false,
+            normalize: true,
+            output_device: Some("Focusrite".into()),
+        };
+        set_playback_prefs(&conn, &mine).unwrap();
+        assert_eq!(get_playback_prefs(&conn).unwrap(), mine);
+
+        // A blob from a version that only knew about crossfade.
+        set_setting(&conn, SETTING_PLAYBACK, r#"{"crossfadeSecs":3.0}"#).unwrap();
+        let loaded = get_playback_prefs(&conn).unwrap();
+        assert_eq!(loaded.crossfade_secs, 3.0);
+        assert_eq!(loaded.gapless, PlaybackPrefs::default().gapless);
+        assert_eq!(loaded.output_device, None);
     }
 
     fn tombstones_of(conn: &Connection, entity: &str) -> Vec<String> {

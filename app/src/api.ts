@@ -23,6 +23,12 @@ export interface Track {
   /// hidden from the main view.
   inScope: boolean;
   uid: string | null;
+  /// Manual trim in dB, saved on the track (a mixer's gain knob, but it
+  /// sticks). 0 = the file as it is.
+  gainDb: number;
+  /// Integrated loudness in LUFS measured by the analyzer, `null` while it
+  /// hasn't been measured. Only used when "normalize volume" is on.
+  loudnessLufs: number | null;
 }
 
 export type NodeKind = 'folder' | 'playlist';
@@ -112,6 +118,70 @@ export const stopPlayback = android ? nativeAudio.stopPlayback : desktopStopPlay
 export const seekTo = android ? nativeAudio.seekTo : desktopSeekTo;
 export const playbackPosition = android ? nativeAudio.playbackPosition : desktopPlaybackPosition;
 export const setVolume = android ? nativeAudio.setVolume : desktopSetVolume;
+
+// --- Track transitions ------------------------------------------------------
+//
+// Gapless and crossfade need the next track's audio to start while the
+// current one is still playing, which a round trip out to JS and back cannot
+// hit. So the desktop player owns the transition: the UI tells it what comes
+// next, then reads back what is playing now.
+
+/// What is playing right now, not just where it is. `trackId` is how the UI
+/// finds out the player advanced on its own mid-crossfade.
+export interface PlaybackState {
+  trackId: number | null;
+  posMs: number;
+  playing: boolean;
+}
+
+export const playbackState = () => invoke<PlaybackState>('playback_state');
+
+/// Hands the player the next track in the queue, or `null` when nothing
+/// follows (end of the queue, or autoplay off — which is exactly how autoplay
+/// is turned off: the player is simply never told what comes next).
+///
+/// No-op on Android: the native plugin has no queue to pre-load into.
+export const setNextTrack = android
+  ? async (_id: number | null) => {}
+  : (id: number | null) => invoke<void>('set_next_track', { id });
+
+// --- Playback preferences ---------------------------------------------------
+
+export interface PlaybackPrefs {
+  /// Seconds of overlap between tracks. 0 = off.
+  crossfadeSecs: number;
+  /// No silence at the track boundary. Moot while crossfade is on — an
+  /// overlap has no gap to remove.
+  gapless: boolean;
+  /// Continue to the next track when one ends.
+  autoplay: boolean;
+  /// Play every track near the same loudness, using the measured LUFS.
+  normalize: boolean;
+  /// Output device by name. `null` = follow the system default, including
+  /// when it changes mid-track.
+  outputDevice: string | null;
+}
+
+export const getPlaybackPrefs = () => invoke<PlaybackPrefs>('get_playback_prefs');
+export const setPlaybackPrefs = (prefs: PlaybackPrefs) =>
+  invoke<void>('set_playback_prefs', { prefs });
+export const listOutputDevices = () => invoke<string[]>('list_output_devices');
+
+/// Per-track trim in dB. Saved on the track, so a quiet record only needs
+/// correcting once.
+export const setTrackGain = (id: number, gainDb: number) =>
+  invoke<void>('set_track_gain', { id, gainDb });
+
+/// Tracks still waiting on the analyzer. 0 = the library is fully measured.
+export const loudnessPending = () => invoke<number>('loudness_pending');
+
+/// Throws away every measurement and re-analyzes the library. Returns how
+/// many tracks that leaves to do.
+export const rescanAnalysis = () => invoke<number>('rescan_analysis');
+
+/// The level normalization aims for. Mirrors `db::TARGET_LUFS`; shown in the
+/// UI so the setting says what it actually does.
+export const TARGET_LUFS = -18;
 
 // Embedded cover art as a data-URL (null if the file has none).
 export const coverThumb = (id: number) => invoke<string | null>('cover_thumb', { id });

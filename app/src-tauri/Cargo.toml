@@ -61,6 +61,10 @@ windows = { version = "0.58", features = ["Networking_Connectivity"] }
 # were needed.
 env_logger = "0.11.11"
 rodio = { version = "0.19", features = ["symphonia-all"] }
+# Integrated loudness (EBU R128) for "normalize volume". Measured here rather
+# than read from ReplayGain tags: DJ rips mostly have no tags, and a setting
+# that silently does nothing on half the library is worse than no setting.
+ebur128 = "0.1"
 # How much battery is left (Phase 6.7). A desktop PC has none, and that's
 # not an error: it's the answer, and with it the screen knows it shouldn't
 # offer the option.

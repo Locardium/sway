@@ -7,13 +7,26 @@ import {
   exportLibraryXmlNow,
   getAutoSyncXml,
   importFromUri,
+  listOutputDevices,
+  loudnessPending,
+  rescanAnalysis,
   setAutoSyncXml,
+  type PlaybackPrefs,
 } from '../api';
 import { isAndroid } from '../platform';
 
+/// System default is an entry in the list, not a device name: it means
+/// *follow whatever the system does*, which is not the same as pinning the
+/// device that happens to be the default right now. Empty value = `null`
+/// over the wire.
+const SYSTEM_DEFAULT = '';
+
 interface Props {
   trackCount: number;
-  volume: number;
+  /// Playback preferences and their setter, owned by App (the player reads
+  /// them too, so there is one copy and this screen edits it).
+  prefs: PlaybackPrefs;
+  onPrefs: (next: PlaybackPrefs) => void | Promise<void>;
   onClose: () => void;
   onStatus: (msg: string) => void;
   onImported: () => void | Promise<void>;
@@ -50,29 +63,79 @@ function guessFileName(uri: string): string {
   return `track-${Date.now()}.mp3`;
 }
 
-// Settings that are mostly prototype (not yet functional): the UI exists to
-// define the model, the logic arrives in later phases.
 export default function Settings({
   trackCount,
-  volume,
+  prefs,
+  onPrefs,
   onClose,
   onStatus,
   onImported,
   onOpenSync,
 }: Props) {
-  const [gapless, setGapless] = useState(true);
-  const [autoplay, setAutoplay] = useState(true);
-  const [crossfade, setCrossfade] = useState(0);
-  const [compact, setCompact] = useState(false);
-  const [normalize, setNormalize] = useState(false);
-  const [theme, setTheme] = useState('dark');
-  const [accent, setAccent] = useState('sky');
   const [autoSyncXml, setAutoSyncXmlState] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [devices, setDevices] = useState<string[]>([]);
+  /// Tracks still waiting on the analyzer. `null` = not asked yet.
+  const [pending, setPending] = useState<number | null>(null);
+  const [rescanning, setRescanning] = useState(false);
 
   const android = isAndroid();
   const showExport = !android;
+  /// Everything under here needs volume control or a queue, and the Android
+  /// audio plugin exposes neither (see nativeAudio.ts). Hidden rather than
+  /// shown inert.
+  const showPlayback = !android;
+
+  /// Edits one preference and saves the lot — they travel together.
+  function patch(next: Partial<PlaybackPrefs>) {
+    onPrefs({ ...prefs, ...next });
+  }
+
+  useEffect(() => {
+    if (!showPlayback) return;
+    listOutputDevices()
+      .then(setDevices)
+      .catch(() => {});
+  }, [showPlayback]);
+
+  // How much of the library the analyzer still has to get through. Polled
+  // whenever this screen is open, not only while normalization is on: tracks
+  // are measured as they arrive, so the count is the honest answer to "is it
+  // still working" regardless of what the measurement is being used for.
+  useEffect(() => {
+    let alive = true;
+    const read = () =>
+      loudnessPending()
+        .then((n) => {
+          if (alive) setPending(n);
+        })
+        .catch(() => {});
+    read();
+    // The sweep runs in the background; this is just the screen catching up
+    // with it while it's open.
+    const t = setInterval(read, 1500);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, []);
+
+  /// Rescan throws away every measurement and lets the sweep redo the
+  /// library. The button only starts it — the row's progress line is what
+  /// reports how it's going.
+  async function doRescan() {
+    setRescanning(true);
+    try {
+      const n = await rescanAnalysis();
+      setPending(n);
+      onStatus(`Analyzing ${n} track${n === 1 ? '' : 's'}…`);
+    } catch (e) {
+      onStatus('Could not start the rescan: ' + e);
+    } finally {
+      setRescanning(false);
+    }
+  }
 
   useEffect(() => {
     if (!showExport) return;
@@ -132,14 +195,6 @@ export default function Settings({
     }
   }
 
-  const accents: { id: string; color: string }[] = [
-    { id: 'sky', color: 'oklch(80% 0.11 220)' },
-    { id: 'green', color: 'oklch(80% 0.15 155)' },
-    { id: 'violet', color: 'oklch(72% 0.15 300)' },
-    { id: 'amber', color: 'oklch(80% 0.13 75)' },
-    { id: 'rose', color: 'oklch(72% 0.16 15)' },
-  ];
-
   return (
     <Modal title="Settings" onClose={onClose} wide>
       <div className="settings">
@@ -169,10 +224,17 @@ export default function Settings({
           <div className="set-row">
             <div className="set-label">
               <span>Tracks in library</span>
+              <small>
+                {pending == null || pending === 0
+                  ? 'Rescan re-measures loudness and silent edges for every track'
+                  : `Analyzing — ${pending} track${pending === 1 ? '' : 's'} to go`}
+              </small>
             </div>
             <div className="set-control">
               <span className="set-value">{trackCount}</span>
-              <button disabled>Rescan</button>
+              <button onClick={doRescan} disabled={rescanning}>
+                {rescanning ? 'Starting…' : 'Rescan'}
+              </button>
             </div>
           </div>
         </section>
@@ -190,75 +252,93 @@ export default function Settings({
           </div>
         </section>
 
-        <section>
-          <h4>Playback</h4>
-          <div className="set-row">
-            <div className="set-label">
-              <span>Crossfade</span>
-              <small>{crossfade === 0 ? 'Off' : `${crossfade}s`}</small>
+        {showPlayback && (
+          <section>
+            <h4>Playback</h4>
+            <div className="set-row">
+              <div className="set-label">
+                <span>Crossfade</span>
+                <small>
+                  {prefs.crossfadeSecs === 0
+                    ? 'Off — one track ends before the next begins'
+                    : `${prefs.crossfadeSecs}s of overlap between tracks`}
+                </small>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={12}
+                value={prefs.crossfadeSecs}
+                onChange={(e) => patch({ crossfadeSecs: Number(e.target.value) })}
+                className="range set-slider"
+                style={{ ['--fill' as string]: `${(prefs.crossfadeSecs / 12) * 100}%` }}
+                aria-label="Crossfade in seconds"
+              />
             </div>
-            <input
-              type="range"
-              min={0}
-              max={12}
-              value={crossfade}
-              onChange={(e) => setCrossfade(Number(e.target.value))}
-              className="range set-slider"
-              style={{ ['--fill' as string]: `${(crossfade / 12) * 100}%` }}
-            />
-          </div>
-          <div className="set-row">
-            <div className="set-label"><span>Gapless playback</span></div>
-            <Switch checked={gapless} onChange={setGapless} />
-          </div>
-          <div className="set-row">
-            <div className="set-label"><span>Autoplay next track</span></div>
-            <Switch checked={autoplay} onChange={setAutoplay} />
-          </div>
-          <div className="set-row">
-            <div className="set-label">
-              <span>Normalize volume</span>
-              <small>ReplayGain</small>
+            <div className="set-row">
+              <div className="set-label">
+                <span>Gapless playback</span>
+                <small>
+                  {prefs.crossfadeSecs > 0
+                    ? 'Not used while crossfade is on — an overlap has no gap'
+                    : 'Trims the silence at the start and end of each file so tracks run straight into each other'}
+                </small>
+              </div>
+              <Switch
+                checked={prefs.gapless}
+                onChange={(v) => patch({ gapless: v })}
+                disabled={prefs.crossfadeSecs > 0}
+              />
             </div>
-            <Switch checked={normalize} onChange={setNormalize} />
-          </div>
-          <div className="set-row">
-            <div className="set-label"><span>Output device</span></div>
-            <select disabled className="set-select">
-              <option>System default</option>
-            </select>
-          </div>
-        </section>
+            <div className="set-row">
+              <div className="set-label">
+                <span>Autoplay next track</span>
+                <small>
+                  {prefs.autoplay
+                    ? 'Keeps going through the queue on its own'
+                    : 'Stops when the track ends and stays there'}
+                </small>
+              </div>
+              <Switch checked={prefs.autoplay} onChange={(v) => patch({ autoplay: v })} />
+            </div>
+            <div className="set-row">
+              <div className="set-label">
+                <span>Normalize volume</span>
+                <small>
+                  Brings every track to the same perceived loudness,
+                  turning down what was mastered loud and turning up what wasn&rsquo;t. Your
+                  gain knob still applies on top.
+                </small>
+              </div>
+              <Switch checked={prefs.normalize} onChange={(v) => patch({ normalize: v })} />
+            </div>
 
-        <section>
-          <h4>Appearance</h4>
-          <div className="set-row">
-            <div className="set-label"><span>Theme</span></div>
-            <select value={theme} onChange={(e) => setTheme(e.target.value)} className="set-select">
-              <option value="dark">Dark</option>
-              <option value="light">Light</option>
-              <option value="system">System</option>
-            </select>
-          </div>
-          <div className="set-row">
-            <div className="set-label"><span>Accent color</span></div>
-            <div className="swatches">
-              {accents.map((a) => (
-                <button
-                  key={a.id}
-                  className={'swatch' + (accent === a.id ? ' on' : '')}
-                  style={{ background: a.color }}
-                  onClick={() => setAccent(a.id)}
-                  aria-label={a.id}
-                />
-              ))}
+            <div className="set-row">
+              <div className="set-label">
+                <span>Output device</span>
+                <small>
+                  {prefs.outputDevice
+                    ? 'Pinned — system output changes are ignored'
+                    : 'Follows the system, including changes mid-track'}
+                </small>
+              </div>
+              <select
+                className="set-select"
+                value={prefs.outputDevice ?? SYSTEM_DEFAULT}
+                onChange={(e) =>
+                  patch({ outputDevice: e.target.value === SYSTEM_DEFAULT ? null : e.target.value })
+                }
+              >
+                <option value={SYSTEM_DEFAULT}>System default</option>
+                {devices.map((d) => (
+                  <option key={d} value={d}>
+                    {d}
+                  </option>
+                ))}
+              </select>
             </div>
-          </div>
-          <div className="set-row">
-            <div className="set-label"><span>Compact rows</span></div>
-            <Switch checked={compact} onChange={setCompact} />
-          </div>
-        </section>
+          </section>
+        )}
 
         {showExport && (
           <section>
@@ -275,19 +355,12 @@ export default function Settings({
             </div>
             <div className="set-row">
               <div className="set-label">
-                <span>Rekordbox / iTunes XML</span>
+                <span>iTunes XML</span>
                 <small>Writes the library now, regardless of auto-sync</small>
               </div>
               <button onClick={syncNow} disabled={syncing}>
                 {syncing ? 'Syncing…' : 'Sync now'}
               </button>
-            </div>
-            <div className="set-row">
-              <div className="set-label">
-                <span>Serato crates</span>
-                <small>Coming in a later phase</small>
-              </div>
-              <button disabled>Export…</button>
             </div>
           </section>
         )}
@@ -296,11 +369,11 @@ export default function Settings({
           <h4>About</h4>
           <div className="set-row">
             <div className="set-label"><span>Version</span></div>
-            <span className="set-value">Sway 0.1.0</span>
+            <span className="set-value">1.0.0</span>
           </div>
-          <p className="set-note">
+          {/* <p className="set-note">
             Sway — a DJ library manager. Current output volume {Math.round(volume * 100)}%.
-          </p>
+          </p> */}
         </section>
       </div>
     </Modal>

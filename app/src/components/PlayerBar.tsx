@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { Track } from '../api';
 import Cover from './Cover';
+import Knob from './Knob';
 
 /// `track` = repeats the current one until you turn it off. `once` = repeats
 /// it one more time and turns itself off, then continues with the queue.
@@ -39,9 +40,22 @@ interface Props {
   onNext: () => void;
   onSeek: (secs: number) => void;
   onVolume: (v: number) => void;
+  onGain: (gainDb: number) => void;
   onToggleShuffle: () => void;
   onCycleRepeat: () => void;
   showVolume?: boolean;
+  /// Gain needs somewhere to apply itself. On Android the native plugin
+  /// exposes no volume control at all, so the knob is hidden rather than
+  /// shown doing nothing.
+  showGain?: boolean;
+}
+
+/// Range of the gain knob, matching `db::MAX_GAIN_DB` in the backend (which
+/// clamps to the same figure). ±12 dB is the usual travel on a mixer's trim.
+const GAIN_RANGE = 12;
+
+function fmtGain(db: number): string {
+  return `${db > 0 ? '+' : ''}${db.toFixed(1)} dB`;
 }
 
 function fmt(ms: number): string {
@@ -70,9 +84,11 @@ export default function PlayerBar({
   onNext,
   onSeek,
   onVolume,
+  onGain,
   onToggleShuffle,
   onCycleRepeat,
   showVolume = true,
+  showGain = true,
 }: Props) {
   const barRef = useRef<HTMLDivElement>(null);
   // While dragging, the bar shows the finger/mouse position and the actual
@@ -109,7 +125,16 @@ export default function PlayerBar({
   return (
     <footer className={'player' + (closing ? ' closing' : '')}>
       <div className="np">
-        <Cover trackId={track.id} className="np-art" eager />
+        {/* Stop lives on the artwork, revealed on hover. It's the one
+            transport action you almost never want mid-set, and it was taking
+            a permanent slot next to controls used constantly. Kept reachable
+            (and always visible on touch, where there is no hover — see the CSS). */}
+        <div className="np-art-wrap">
+          <Cover trackId={track.id} className="np-art" eager />
+          <button className="art-stop" onClick={onStop} title="Stop" aria-label="Stop">
+            <Square size={13} fill="currentColor" />
+          </button>
+        </div>
         <div className="np-text">
           <strong>{track.title}</strong>
           <span className="np-artist">{track.artist}</span>
@@ -159,11 +184,34 @@ export default function PlayerBar({
         </div>
       </div>
       <div className="player-right">
-        <button className="ctl side stop" onClick={onStop} title="Stop">
-          <Square size={13} fill="currentColor" />
-        </button>
+        {showGain && (
+          <div className="gain">
+            <Knob
+              value={track.gainDb}
+              min={-GAIN_RANGE}
+              max={GAIN_RANGE}
+              center={0}
+              step={0.5}
+              size={26}
+              label="Gain"
+              format={fmtGain}
+              onChange={onGain}
+            />
+            <span className="gain-value">{fmtGain(track.gainDb)}</span>
+          </div>
+        )}
         {showVolume && (
-          <div className="vol">
+          // Wheel over the whole volume group, not just the slider: the
+          // pointer is usually on its way past the icon, and having to land
+          // on a 4 px track first would defeat the point.
+          <div
+            className="vol"
+            onWheel={(e) => {
+              const step = e.shiftKey ? 0.01 : 0.05;
+              const next = volume + (e.deltaY < 0 ? step : -step);
+              onVolume(Math.min(1, Math.max(0, Math.round(next * 100) / 100)));
+            }}
+          >
             <button
               className="ctl side"
               onClick={() => onVolume(volume === 0 ? 1 : 0)}

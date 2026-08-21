@@ -23,7 +23,11 @@ import {
   pausePlayback,
   resumePlayback,
   stopPlayback,
-  playbackPosition,
+  playbackState,
+  setNextTrack,
+  getPlaybackPrefs,
+  setPlaybackPrefs,
+  setTrackGain,
   subscribePlayback,
   setAppVisible,
   seekTo,
@@ -31,6 +35,7 @@ import {
   revealTrack,
   syncXmlAfterChange,
   watchConditions,
+  type PlaybackPrefs,
 } from './api';
 import { beginDrag, didDrag, DragPayload, RawTarget } from './dnd';
 import { isAndroid } from './platform';
@@ -101,6 +106,17 @@ export default function App() {
     const v = Number(localStorage.getItem(VOL_STORAGE));
     return isNaN(v) || v < 0 || v > 1 ? 1 : v;
   });
+  // Playback preferences live in the backend (the audio thread needs them
+  // anyway), and this is the copy the screens read. Defaults match
+  // `db::PlaybackPrefs::default` so the UI isn't blank for the one frame
+  // before the real values land.
+  const [prefs, setPrefs] = useState<PlaybackPrefs>({
+    crossfadeSecs: 0,
+    gapless: true,
+    autoplay: true,
+    normalize: false,
+    outputDevice: null,
+  });
   const [status, setStatus] = useState('');
   const queueRef = useRef<number[]>([]);
   const volPending = useRef<number | null>(null);
@@ -127,6 +143,7 @@ export default function App() {
       try {
         await Promise.all([refreshLibrary(), refreshPlaylists()]);
         await setVolumeBackend(volume);
+        setPrefs(await getPlaybackPrefs());
       } catch {
         if (tries++ < 5) setTimeout(attempt, 300);
       }
@@ -143,19 +160,49 @@ export default function App() {
     }
   }, [selection]);
 
-  // Position poll (desktop). Android doesn't use it: the native plugin pushes
+  // State poll (desktop). Android doesn't use it: the native plugin pushes
   // its state, see the effect below.
+  //
+  // It reads which track is playing and not only the position, because with
+  // gapless and crossfade the player moves to the next track by itself — the
+  // change is announced here rather than decided here. 250 ms rather than the
+  // old 500: that interval is also how long the title can lag behind the
+  // audio at a transition.
   useEffect(() => {
     if (subscribePlayback) return;
     const t = setInterval(async () => {
-      if (currentId != null && !paused && Date.now() >= seekGuard.current) {
-        try {
-          setPosMs((await playbackPosition()) * 1000);
-        } catch {}
-      }
-    }, 500);
+      if (currentId == null || paused) return;
+      try {
+        const st = await playbackState();
+        // The player advanced on its own (gapless / crossfade boundary).
+        if (st.trackId != null && st.trackId !== currentId) {
+          setCurrentId(st.trackId);
+          setPosMs(st.posMs);
+          return;
+        }
+        // The player stopped at the end of a track.
+        //
+        // With autoplay on and somewhere left to go, that is not where we
+        // should end up: the seamless hand-off did not happen for whatever
+        // reason, so the queue is advanced from here instead. It costs a gap
+        // where there should not have been one, which is worth far more than
+        // playback quietly stopping mid-list.
+        if (!st.playing) {
+          if (prefs.autoplay && followerOfRef.current(currentId) != null) {
+            onTrackEndedRef.current();
+            return;
+          }
+          // Nothing follows: end of the queue, or autoplay off. Stays on the
+          // track, paused — the same place the skip button leaves you.
+          setPosMs(st.posMs);
+          setPaused(true);
+          return;
+        }
+        if (Date.now() >= seekGuard.current) setPosMs(st.posMs);
+      } catch {}
+    }, 250);
     return () => clearInterval(t);
-  }, [currentId, paused]);
+  }, [currentId, paused, prefs.autoplay]);
 
   // Android: position, track end and play/pause arrive pushed by the plugin
   // instead of by polling.
@@ -404,6 +451,41 @@ export default function App() {
     return [firstId, ...shuffled(ids.filter((i) => i !== firstId))];
   }
 
+  /// Which track follows `id`, by the same rules the transport buttons use.
+  /// `null` = nothing follows, which is also how autoplay-off is expressed to
+  /// the player: it is simply never told what comes next. Repeat means the
+  /// next track is this one again.
+  const followerOf = useCallback(
+    (id: number | null): number | null => {
+      if (id == null || !prefs.autoplay) return null;
+      if (repeat === 'track' || repeat === 'once') return id;
+      const q = queueRef.current;
+      return q[q.indexOf(id) + 1] ?? null;
+    },
+    [prefs.autoplay, repeat],
+  );
+  // The state poll is declared above this point and needs it; a ref keeps the
+  // two independent of declaration order.
+  const followerOfRef = useRef(followerOf);
+  followerOfRef.current = followerOf;
+
+  /// Starts a track and immediately tells the player what follows it.
+  ///
+  /// The two have to travel together. Starting a track clears whatever the
+  /// player had queued behind the old one — it belongs to a queue position
+  /// that no longer applies — so anything that plays a track owes it a new
+  /// follower. Leaving that to an effect keyed on the current track silently
+  /// fails when the SAME track is played again: the id doesn't change, the
+  /// effect doesn't re-run, and the player sits with nothing queued and stops
+  /// dead at the end of it.
+  const startTrack = useCallback(
+    async (id: number) => {
+      await playTrack(id);
+      setNextTrack(followerOf(id)).catch(() => {});
+    },
+    [followerOf],
+  );
+
   const onPlay = useCallback(
     async (id: number) => {
       // A track out of scope shows and can be organized, but won't play,
@@ -422,7 +504,7 @@ export default function App() {
       }
       try {
         queueRef.current = buildQueue(visibleTracks.map((t) => t.id), id, shuffle);
-        await playTrack(id);
+        await startTrack(id);
         setCurrentId(id);
         setPaused(false);
         setPosMs(0);
@@ -430,7 +512,7 @@ export default function App() {
         setStatus('Playback error: ' + e);
       }
     },
-    [visibleTracks, shuffle],
+    [visibleTracks, shuffle, startTrack],
   );
 
   const playOffset = useCallback(
@@ -452,17 +534,31 @@ export default function App() {
         }
         return;
       }
-      await playTrack(next);
+      await startTrack(next);
       setCurrentId(next);
       setPaused(false);
       setPosMs(0);
     },
-    [currentId],
+    [currentId, startTrack],
   );
   const playOffsetRef = useRef(playOffset);
   playOffsetRef.current = playOffset;
   const posMsRef = useRef(posMs);
   posMsRef.current = posMs;
+
+  // Keeps the follower correct when the queue or the rules change underneath
+  // a track that is already playing (shuffle toggled, repeat cycled, autoplay
+  // switched off). Playing a track is handled by `startTrack`, not here.
+  useEffect(() => {
+    setNextTrack(followerOf(currentId)).catch(() => {});
+  }, [followerOf, currentId, shuffle]);
+
+
+  /// Desktop only, and only while a seamless mode is on: there the player
+  /// advances by itself and the poll reports it. Everywhere else the app still
+  /// deduces the end of the track from the position.
+  const playerDrivesTransitions =
+    !subscribePlayback && (prefs.gapless || prefs.crossfadeSecs > 0);
 
   // Track end: repeat mode governs the current track, not the queue. 'once'
   // turns itself off after repeating, so the next lap moves on normally.
@@ -475,6 +571,13 @@ export default function App() {
   const advancing = useRef(false);
   const onTrackEnded = useCallback(async () => {
     if (currentId == null || advancing.current) return;
+    // Autoplay off: the track ends and playback stays there, on it. Same
+    // place the end of the queue leaves you.
+    if (!prefs.autoplay) {
+      await pausePlayback();
+      setPaused(true);
+      return;
+    }
     advancing.current = true;
     try {
       if (repeat === 'track' || repeat === 'once') {
@@ -482,7 +585,7 @@ export default function App() {
           setRepeat('off');
           localStorage.setItem('sway.repeat', 'off');
         }
-        await playTrack(currentId);
+        await startTrack(currentId);
         setPaused(false);
         setPosMs(0);
       } else {
@@ -491,19 +594,23 @@ export default function App() {
     } finally {
       advancing.current = false;
     }
-  }, [currentId, repeat, playOffset]);
+  }, [currentId, repeat, playOffset, prefs.autoplay, startTrack]);
   const onTrackEndedRef = useRef(onTrackEnded);
   onTrackEndedRef.current = onTrackEnded;
 
   // Auto-advance on desktop: there's no track-end event, it's deduced from
   // the position. On Android it's triggered by the plugin (see the
   // subscription effect).
+  //
+  // Skipped entirely while a seamless mode is on: there the player already
+  // moved to the next track before this position was ever reported, so acting
+  // on it here would skip a second one.
   useEffect(() => {
-    if (subscribePlayback) return;
+    if (subscribePlayback || playerDrivesTransitions) return;
     if (current && !paused && current.durationMs > 0 && posMs >= current.durationMs - 600) {
       onTrackEnded();
     }
-  }, [posMs, current, paused, onTrackEnded]);
+  }, [posMs, current, paused, onTrackEnded, playerDrivesTransitions]);
 
   function onToggleShuffle() {
     setShuffle((s) => {
@@ -531,13 +638,23 @@ export default function App() {
   }
 
   async function onToggle() {
-    if (paused) {
-      await resumePlayback();
-      setPaused(false);
-    } else {
+    if (!paused) {
       await pausePlayback();
       setPaused(true);
+      return;
     }
+    // Play on a track that already finished: there is nothing left to resume
+    // — the source ran out — so it starts over. Without this the button
+    // flips back to paused a moment later and looks broken, which is what
+    // happens whenever the queue ends or autoplay is off.
+    if (current && current.durationMs > 0 && posMs >= current.durationMs - 1000) {
+      await startTrack(current.id);
+      setPosMs(0);
+      setPaused(false);
+      return;
+    }
+    await resumePlayback();
+    setPaused(false);
   }
 
   async function onStop() {
@@ -560,6 +677,45 @@ export default function App() {
     setPosMs(secs * 1000);
     await seekTo(secs);
   }
+
+  // Gain: the per-track trim, saved on the track. Separate from the volume
+  // above on purpose — volume is the room, gain is this record. Turning up a
+  // quiet track has to survive it coming round again, which is why it goes to
+  // the DB and not to a slider that resets.
+  //
+  // Written through with the same throttle as the volume (dragging a knob
+  // fires per pixel), and mirrored into the loaded lists so the value shown
+  // doesn't wait for a library refresh.
+  const gainPending = useRef<{ id: number; db: number } | null>(null);
+  function onGain(gainDb: number) {
+    if (currentId == null) return;
+    const id = currentId;
+    const patch = (ts: Track[]) =>
+      ts.map((t) => (t.id === id ? { ...t, gainDb } : t));
+    setLibrary(patch);
+    setPlTracks(patch);
+    const first = gainPending.current == null;
+    gainPending.current = { id, db: gainDb };
+    if (first) {
+      setTimeout(() => {
+        const p = gainPending.current;
+        gainPending.current = null;
+        if (p) setTrackGain(p.id, p.db).catch(() => {});
+      }, 60);
+    }
+  }
+
+  // Playback preferences. Saved in the backend (the audio thread reads them
+  // too), so the screen sends the whole object and keeps the copy it just
+  // sent — no reload round trip to see the switch move.
+  const onPrefs = useCallback(async (next: PlaybackPrefs) => {
+    setPrefs(next);
+    try {
+      await setPlaybackPrefs(next);
+    } catch (e) {
+      setStatus('Could not save playback settings: ' + e);
+    }
+  }, []);
 
   // Volume: the UI responds instantly, the backend updates with throttling.
   function onVolume(v: number) {
@@ -1028,9 +1184,11 @@ export default function App() {
           onNext={() => playOffset(1)}
           onSeek={onSeek}
           onVolume={onVolume}
+          onGain={onGain}
           onToggleShuffle={onToggleShuffle}
           onCycleRepeat={onCycleRepeat}
           showVolume={!isAndroid()}
+          showGain={!isAndroid()}
         />
       )}
 
@@ -1117,7 +1275,8 @@ export default function App() {
       {modal?.type === 'settings' && (
         <Settings
           trackCount={library.length}
-          volume={volume}
+          prefs={prefs}
+          onPrefs={onPrefs}
           onClose={() => setModal(null)}
           onStatus={setStatus}
           onImported={async () => {

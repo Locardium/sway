@@ -27,7 +27,14 @@ mod player;
 #[path = "player_stub.rs"]
 mod player;
 
-use player::Player;
+// Measuring loudness means decoding, and the decoder is rodio/symphonia —
+// desktop only. On Android normalization has nothing to apply itself to
+// anyway (the native plugin exposes no volume control), so there is nothing
+// to measure for.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod loudness;
+
+use player::{Cue, Player};
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -191,6 +198,9 @@ pub struct AppState {
     conditions: Mutex<power::Conditions>,
     /// Open connections waiting for the server to announce changes.
     watchers: watch::Watchers,
+    /// Background EBU R128 sweep behind "normalize volume" (desktop only).
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    loudness: loudness::Analyzer,
 }
 
 /// How long events are ignored for a file the sync just dropped.
@@ -299,7 +309,28 @@ fn import_folder(app: AppHandle, state: State<AppState>, folder: String) -> Resu
         .map_err(|e| e.to_string())?
     };
     autosync::note_change(&app);
+    kick_loudness(&app);
     Ok(n)
+}
+
+/// Wakes the analyzer after tracks arrive, so a track is measured once when
+/// it enters the library rather than the first time something needs it.
+///
+/// Measuring is not gated on normalization being on. A track gets analyzed
+/// when it shows up, so that turning normalization on is instant instead of
+/// kicking off a decode of the whole library, and so the same pass can carry
+/// whatever else gets measured later. It runs on one background thread and
+/// touches each file once, ever.
+///
+/// Cheap to call from anywhere: the analyzer ignores it when a sweep is
+/// already running — that sweep re-reads what's pending on every batch and
+/// will reach the new rows on its own.
+pub fn kick_loudness(app: &AppHandle) {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        app.state::<AppState>().loudness.sweep(app.clone());
+    }
+    let _ = app;
 }
 
 /// Reports when something running with the DB lock held took long enough
@@ -357,6 +388,7 @@ fn import_files(
         .map_err(|e| e.to_string())?
     };
     autosync::note_change(&app);
+    kick_loudness(&app);
     Ok(ids)
 }
 
@@ -612,13 +644,62 @@ fn reorder_playlist_tracks(
     Ok(())
 }
 
+/// Everything the player needs about a track, resolved in one place: where
+/// the file is, how loud to play it, and how long it runs.
+///
+/// The gain is worked out here rather than in the player because it depends
+/// on the library (the track's trim, its measured loudness) and on a
+/// preference — none of which the audio thread should be reaching for while
+/// it's mid-decode.
+fn cue_for(conn: &Connection, id: i64, normalize: bool) -> Result<Cue, String> {
+    let (path, duration_ms): (String, i64) = conn
+        .query_row("SELECT path, duration_ms FROM tracks WHERE id = ?1", [id], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    let a = db::track_playback(conn, id).unwrap_or_default();
+    Ok(Cue {
+        id,
+        path: std::path::PathBuf::from(path),
+        gain: db::db_to_linear(db::playback_gain_db(a.gain_db, a.loudness_lufs, normalize)),
+        duration_ms: duration_ms.max(0) as u64,
+        // Unanalyzed tracks trim nothing: playing them untrimmed is the old
+        // behaviour, and guessing where the audio starts without measuring is
+        // how you clip the first beat off a track.
+        lead_ms: a.lead_silence_ms.unwrap_or(0).max(0) as u64,
+        audio_end_ms: a.audio_end_ms.unwrap_or(0).max(0) as u64,
+    })
+}
+
 #[tauri::command]
 fn play_track(state: State<AppState>, id: i64) -> Result<(), String> {
-    let path = {
+    let cue = {
         let conn = state.db.lock().unwrap();
-        db::track_path(&conn, id).map_err(|e| e.to_string())?
+        let normalize = db::get_playback_prefs(&conn).unwrap_or_default().normalize;
+        cue_for(&conn, id, normalize)?
     };
-    state.player.play(std::path::PathBuf::from(path));
+    state.player.play(cue);
+    Ok(())
+}
+
+/// What to play when the current track ends. The UI owns the queue, so it is
+/// the only thing that knows this; the player owns the *transition*, so it is
+/// the only thing that can make it gapless. `None` = nothing follows.
+///
+/// Sent on every track change rather than only when a mode needs it: the
+/// player ignores it unless gapless or crossfade is on, and this way turning
+/// crossfade on mid-track takes effect on the very next boundary.
+#[tauri::command]
+fn set_next_track(state: State<AppState>, id: Option<i64>) -> Result<(), String> {
+    let next = match id {
+        None => None,
+        Some(id) => {
+            let conn = state.db.lock().unwrap();
+            let normalize = db::get_playback_prefs(&conn).unwrap_or_default().normalize;
+            Some(cue_for(&conn, id, normalize)?)
+        }
+    };
+    state.player.set_next(next);
     Ok(())
 }
 
@@ -645,6 +726,101 @@ fn seek_to(state: State<AppState>, secs: u64) {
 #[tauri::command]
 fn playback_position(state: State<AppState>) -> u64 {
     state.player.position_secs()
+}
+
+/// Position **and** which track is playing. The second half is what matters:
+/// with gapless and crossfade the player moves to the next track by itself,
+/// so the position alone no longer tells the UI what it's showing. Polled on
+/// the same interval the position always was — no new machinery.
+#[tauri::command]
+fn playback_state(state: State<AppState>) -> player::PlaybackState {
+    state.player.state()
+}
+
+// ---------------------------------------------------------------------------
+// Playback preferences and levels
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn get_playback_prefs(state: State<AppState>) -> Result<db::PlaybackPrefs, String> {
+    let conn = state.db_read.lock().unwrap();
+    db::get_playback_prefs(&conn).map_err(|e| e.to_string())
+}
+
+/// Saves the preferences and pushes the ones the audio thread cares about.
+///
+/// Turning normalization on or off changes how loud the *current* track
+/// should be, so its gain is recomputed right here — otherwise the switch
+/// would appear to do nothing until the next track.
+#[tauri::command]
+fn set_playback_prefs(
+    app: AppHandle,
+    state: State<AppState>,
+    prefs: db::PlaybackPrefs,
+) -> Result<(), String> {
+    {
+        let conn = state.db.lock().unwrap();
+        db::set_playback_prefs(&conn, &prefs).map_err(|e| e.to_string())?;
+        if let Some(id) = state.player.state().track_id {
+            if let Ok(cue) = cue_for(&conn, id, prefs.normalize) {
+                state.player.set_gain(cue.gain);
+            }
+        }
+    }
+    state.player.configure(prefs.crossfade_secs as f32, prefs.gapless);
+    state.player.set_device(prefs.output_device.clone());
+    // Turning normalization on with a partly-measured library: make sure the
+    // sweep is awake so the gap closes instead of sitting there.
+    if prefs.normalize {
+        kick_loudness(&app);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn list_output_devices() -> Vec<String> {
+    player::output_devices()
+}
+
+/// Per-track trim, in dB. Saved on the track: a quiet record is quiet every
+/// time it comes up, so correcting it once should be the last time.
+#[tauri::command]
+fn set_track_gain(state: State<AppState>, id: i64, gain_db: f64) -> Result<(), String> {
+    let clamped = gain_db.clamp(-db::MAX_GAIN_DB, db::MAX_GAIN_DB);
+    let conn = state.db.lock().unwrap();
+    db::set_track_gain(&conn, id, clamped).map_err(|e| e.to_string())?;
+    // Applied live only when it's this track that's playing — the knob is on
+    // the player bar, so that's the usual case, but the table can set it on
+    // any row.
+    if state.player.state().track_id == Some(id) {
+        let normalize = db::get_playback_prefs(&conn).unwrap_or_default().normalize;
+        if let Ok(cue) = cue_for(&conn, id, normalize) {
+            state.player.set_gain(cue.gain);
+        }
+    }
+    Ok(())
+}
+
+/// How many tracks are still waiting to be analyzed. 0 = the library is fully
+/// measured.
+#[tauri::command]
+fn loudness_pending(state: State<AppState>) -> Result<i64, String> {
+    let conn = state.db_read.lock().unwrap();
+    db::analysis_pending_count(&conn).map_err(|e| e.to_string())
+}
+
+/// Throws away every measurement and starts over. What the Rescan button
+/// calls — the analyzer only ever looks at rows it hasn't measured, so
+/// clearing the results is how you ask for them again.
+#[tauri::command]
+fn rescan_analysis(app: AppHandle, state: State<AppState>) -> Result<i64, String> {
+    {
+        let conn = state.db.lock().unwrap();
+        db::clear_analysis(&conn).map_err(|e| e.to_string())?;
+    }
+    kick_loudness(&app);
+    let conn = state.db_read.lock().unwrap();
+    db::analysis_pending_count(&conn).map_err(|e| e.to_string())
 }
 
 /// Identity of this device, to display it and let it be renamed in
@@ -929,6 +1105,7 @@ fn after_scope_change(app: &AppHandle, device_uid: &str) {
             // own. Without this event the change wouldn't show up until
             // restart.
             let _ = app.emit("library-changed", ());
+            kick_loudness(&app);
         });
     }
 
@@ -1301,6 +1478,7 @@ fn spawn_folder_watch(handle: AppHandle, dir: PathBuf) {
                 eprintln!("[watch] imported new files ({} paths), notifying UI", paths.len());
                 autosync::note_change(&handle);
                 let _ = handle.emit("library-changed", ());
+                kick_loudness(&handle);
             }
         }
     });
@@ -1310,11 +1488,21 @@ fn spawn_folder_watch(handle: AppHandle, dir: PathBuf) {
 pub fn run() {
     // Desktop: without this the sync's log::* calls aren't seen anywhere.
     // RUST_LOG=debug for more detail; info by default.
+    //
+    // The decoders are pinned to `error`. At their own default they narrate
+    // every ID3 frame they don't implement, every VBR duration they estimate
+    // and every stray RIFF chunk — hundreds of lines per track, none of them
+    // actionable, and they bury the handful of lines that say what the app
+    // itself is doing. That noise has already cost this project real
+    // debugging time. `RUST_LOG=symphonia=info` brings them back when the
+    // question actually is about decoding.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        let _ = env_logger::Builder::from_env(
-            env_logger::Env::default().default_filter_or("info"),
-        )
+        let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(
+            "info,symphonia=error,symphonia_core=error,symphonia_bundle_mp3=error,\
+             symphonia_metadata=error,symphonia_format_riff=error,symphonia_codec_pcm=error,\
+             lofty=error",
+        ))
         .try_init();
     }
 
@@ -1403,6 +1591,8 @@ pub fn run() {
                 autosync: autosync::AutoSync::default(),
                 conditions: Mutex::new(power::Conditions::default()),
                 watchers: watch::Watchers::default(),
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                loudness: loudness::Analyzer::default(),
             });
 
             // Devices with a fixed address (the file server) go before the
@@ -1450,6 +1640,22 @@ pub fn run() {
             // After the watch: the backfill can take minutes with a large
             // library and must not delay startup.
             spawn_hash_backfill(app.handle().clone());
+
+            // Playback preferences are read once here and pushed to the audio
+            // thread, so crossfade and the pinned output device survive a
+            // restart without the UI having to re-send them on every startup.
+            {
+                let state = app.state::<AppState>();
+                let prefs = {
+                    let conn = state.db.lock().unwrap();
+                    db::get_playback_prefs(&conn).unwrap_or_default()
+                };
+                state.player.configure(prefs.crossfade_secs as f32, prefs.gapless);
+                state.player.set_device(prefs.output_device.clone());
+            }
+            // Picks up anything that entered the library while this device
+            // was closed (imports on another machine, files brought by sync).
+            kick_loudness(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1478,6 +1684,14 @@ pub fn run() {
             stop_playback,
             seek_to,
             playback_position,
+            playback_state,
+            set_next_track,
+            get_playback_prefs,
+            set_playback_prefs,
+            list_output_devices,
+            set_track_gain,
+            loudness_pending,
+            rescan_analysis,
             export_library_xml_now,
             get_auto_sync_xml,
             set_auto_sync_xml,
