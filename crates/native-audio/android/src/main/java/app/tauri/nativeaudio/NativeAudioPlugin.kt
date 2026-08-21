@@ -7,7 +7,9 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioAttributes as PlatformAudioAttributes
 import android.media.AudioDeviceInfo
+import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.audiofx.LoudnessEnhancer
 import android.net.Uri
@@ -79,6 +81,10 @@ private const val MAX_GAIN_DB = 12.0
 /// loud modern master needs more room coming down than a quiet one needs
 /// going up.
 private const val MAX_CUT_DB = 24.0
+
+/// How far down to go when the system asks us to duck rather than stop —
+/// a navigation prompt talking over the music. Roughly -14 dB.
+private const val DUCK_VOLUME = 0.2f
 
 data class NativeAudioState(
     val status: String,
@@ -236,6 +242,106 @@ object NativeAudioRuntime {
     private var masterVolume: Float = 1f
     private var crossfadeMs: Long = 0L
     private var outputDeviceId: Int? = null
+
+    // --- Audio focus ---------------------------------------------------------
+    //
+    // Held once for the whole runtime rather than per player, because during a
+    // crossfade there are two players and letting each request focus makes them
+    // fight: the second request revokes the first, and the loser is paused
+    // mid-fade. See `newDeckLocked`.
+
+    private var focusRequest: AudioFocusRequest? = null
+    private var hasFocus = false
+    /// Playback was stopped by losing focus, not by the user, so regaining it
+    /// should start it again. A user pause clears this — coming back from a
+    /// phone call should not undo a deliberate pause.
+    private var pausedByFocusLoss = false
+    /// Attenuation asked for by the system while something more important is
+    /// talking over us. Multiplied into every deck's volume like the master.
+    private var focusDuck = 1f
+
+    private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
+        synchronized(lock) {
+            when (change) {
+                AudioManager.AUDIOFOCUS_LOSS -> {
+                    hasFocus = false
+                    pausedByFocusLoss = false
+                    focusDuck = 1f
+                    abortFadeLocked()
+                    decks.forEach { it?.player?.pause() }
+                }
+                AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                    hasFocus = false
+                    pausedByFocusLoss = player?.isPlaying == true
+                    decks.forEach { it?.player?.pause() }
+                }
+                AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                    focusDuck = DUCK_VOLUME
+                    decks.forEach { applyVolumeLocked(it) }
+                }
+                AudioManager.AUDIOFOCUS_GAIN -> {
+                    hasFocus = true
+                    focusDuck = 1f
+                    decks.forEach { applyVolumeLocked(it) }
+                    if (pausedByFocusLoss) {
+                        pausedByFocusLoss = false
+                        player?.play()
+                    }
+                }
+            }
+            syncTickingLocked()
+        }
+        emitState()
+    }
+
+    /// Takes audio focus for the whole plugin. Returns false when the system
+    /// refuses, which is its way of saying something else owns the output right
+    /// now — a call, mostly — and playback should not start.
+    private fun requestFocusLocked(context: Context): Boolean {
+        if (hasFocus) return true
+        val manager = context.applicationContext
+            .getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return true
+        val result = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val attrs = PlatformAudioAttributes.Builder()
+                .setUsage(PlatformAudioAttributes.USAGE_MEDIA)
+                .setContentType(PlatformAudioAttributes.CONTENT_TYPE_MUSIC)
+                .build()
+            val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(attrs)
+                .setOnAudioFocusChangeListener(focusListener, tickHandler)
+                .build()
+            focusRequest = request
+            manager.requestAudioFocus(request)
+        } else {
+            @Suppress("DEPRECATION")
+            manager.requestAudioFocus(
+                focusListener,
+                AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN,
+            )
+        }
+        hasFocus = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        return hasFocus
+    }
+
+    /// Gives focus back. Called when playback stops for good, not on a pause:
+    /// handing it over and taking it again on every pause makes other apps
+    /// resume in the gap.
+    private fun abandonFocusLocked(context: Context) {
+        if (!hasFocus) return
+        val manager = context.applicationContext
+            .getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            focusRequest?.let { manager.abandonAudioFocusRequest(it) }
+            focusRequest = null
+        } else {
+            @Suppress("DEPRECATION")
+            manager.abandonAudioFocus(focusListener)
+        }
+        hasFocus = false
+        pausedByFocusLoss = false
+        focusDuck = 1f
+    }
 
     /// What plays after the current item and hasn't started yet.
     private var stagedNext: SourceSpec? = null
@@ -450,7 +556,15 @@ object NativeAudioRuntime {
             .setSeekForwardIncrementMs(SEEK_INCREMENT_MS)
             .setLooper(Looper.getMainLooper())
             .build()
-        exoPlayer.setAudioAttributes(audioAttributes, true)
+        // `false` = this player does NOT manage audio focus. It cannot: there
+        // are two of them, and during a crossfade both are playing. A player
+        // that handles its own focus requests it on `play()`, and that request
+        // takes the focus away from the other one — same app or not — whose
+        // focus handler then pauses it on the spot. The outgoing track would be
+        // cut dead the instant the incoming one started, which is the opposite
+        // of a crossfade. Focus is owned by the runtime instead, once for both
+        // decks: see `requestFocusLocked`.
+        exoPlayer.setAudioAttributes(audioAttributes, false)
         exoPlayer.setHandleAudioBecomingNoisy(true)
         exoPlayer.setWakeMode(C.WAKE_MODE_LOCAL)
 
@@ -598,6 +712,14 @@ object NativeAudioRuntime {
         synchronized(lock) {
             ensure(context)
             val exoPlayer = player ?: return
+            // Nothing owns the output for us any more (see `newDeckLocked`), so
+            // this is where it is asked for. Refused means something like a call
+            // is using it, and starting anyway would talk over it.
+            if (!requestFocusLocked(context)) {
+                lastError = "audio focus denied"
+                return@synchronized
+            }
+            pausedByFocusLoss = false
             if (exoPlayer.playbackState == Player.STATE_ENDED) {
                 exoPlayer.seekTo(0L)
             }
@@ -614,6 +736,8 @@ object NativeAudioRuntime {
         synchronized(lock) {
             ensure(context)
             pendingSeekState = null
+            // Deliberate: coming back from a phone call should not undo it.
+            pausedByFocusLoss = false
             // A crossfade is an overlap in wall-clock time: freezing one side of
             // it while the ramp keeps running would resume out of step, so
             // pausing collapses it onto the incoming track first.
@@ -751,6 +875,7 @@ object NativeAudioRuntime {
     fun dispose(context: Context) {
         synchronized(lock) {
             persistProgressCheckpointLocked(context.applicationContext, snapshotLocked(), force = true)
+            abandonFocusLocked(context)
             tickHandler.removeCallbacks(tickRunnable)
             tickHandler.removeCallbacks(fadeRunnable)
             tickScheduled = false
@@ -1015,7 +1140,7 @@ object NativeAudioRuntime {
         val gain = deck.gainDb.coerceIn(-MAX_CUT_DB, MAX_GAIN_DB)
         val cutDb = gain.coerceAtMost(0.0)
         val boostDb = gain.coerceAtLeast(0.0)
-        val duck = masterVolume * deck.fade
+        val duck = masterVolume * deck.fade * focusDuck
         exoPlayer.volume = (duck * dbToLinear(cutDb)).coerceIn(0f, 1f)
         applyBoostLocked(deck, if (duck >= 1f) boostDb else 0.0)
     }

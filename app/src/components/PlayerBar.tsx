@@ -43,6 +43,11 @@ interface Props {
   onGain: (gainDb: number) => void;
   onToggleShuffle: () => void;
   onCycleRepeat: () => void;
+  /// Hidden on the phone, where the hardware buttons already are the volume
+  /// and a second one on screen only invites the two to disagree. The player
+  /// is left at full there and the gain knob does the per-track trimming,
+  /// which is the control that actually belongs to a set.
+  showVolume?: boolean;
 }
 
 /// Range of the gain knob, matching `db::MAX_GAIN_DB` in the backend (which
@@ -82,6 +87,7 @@ export default function PlayerBar({
   onGain,
   onToggleShuffle,
   onCycleRepeat,
+  showVolume = true,
 }: Props) {
   const barRef = useRef<HTMLDivElement>(null);
   // While dragging, the bar shows the finger/mouse position and the actual
@@ -191,35 +197,37 @@ export default function PlayerBar({
           />
           <span className="gain-value">{fmtGain(track.gainDb)}</span>
         </div>
-        {/* Wheel over the whole volume group, not just the slider: the
-            pointer is usually on its way past the icon, and having to land
-            on a 4 px track first would defeat the point. */}
-        <div
-          className="vol"
-          onWheel={(e) => {
-            const step = e.shiftKey ? 0.01 : 0.05;
-            const next = volume + (e.deltaY < 0 ? step : -step);
-            onVolume(Math.min(1, Math.max(0, Math.round(next * 100) / 100)));
-          }}
-        >
-          <button
-            className="ctl side"
-            onClick={() => onVolume(volume === 0 ? 1 : 0)}
-            title={volume === 0 ? 'Unmute' : 'Mute'}
+        {showVolume && (
+          // Wheel over the whole volume group, not just the slider: the
+          // pointer is usually on its way past the icon, and having to land
+          // on a 4 px track first would defeat the point.
+          <div
+            className="vol"
+            onWheel={(e) => {
+              const step = e.shiftKey ? 0.01 : 0.05;
+              const next = volume + (e.deltaY < 0 ? step : -step);
+              onVolume(Math.min(1, Math.max(0, Math.round(next * 100) / 100)));
+            }}
           >
-            <VolIcon v={volume} />
-          </button>
-          <input
-            className="range vol-range"
-            type="range"
-            min={0}
-            max={100}
-            value={Math.round(volume * 100)}
-            onChange={(e) => onVolume(Number(e.target.value) / 100)}
-            style={{ ['--fill' as string]: `${Math.round(volume * 100)}%` }}
-            aria-label="Volume"
-          />
-        </div>
+            <button
+              className="ctl side"
+              onClick={() => onVolume(volume === 0 ? 1 : 0)}
+              title={volume === 0 ? 'Unmute' : 'Mute'}
+            >
+              <VolIcon v={volume} />
+            </button>
+            <input
+              className="range vol-range"
+              type="range"
+              min={0}
+              max={100}
+              value={Math.round(volume * 100)}
+              onChange={(e) => onVolume(Number(e.target.value) / 100)}
+              style={{ ['--fill' as string]: `${Math.round(volume * 100)}%` }}
+              aria-label="Volume"
+            />
+          </div>
+        )}
       </div>
     </footer>
   );

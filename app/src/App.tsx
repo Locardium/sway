@@ -103,7 +103,11 @@ export default function App() {
     if (saved === 'all' || saved === 'one') return 'track';
     return 'off';
   });
+  // On the phone the player is left wide open and the hardware buttons are the
+  // volume — there is no slider to restore, and a stored value from a desktop
+  // session must not quietly hold the phone at half level.
   const [volume, setVol] = useState(() => {
+    if (isAndroid()) return 1;
     const v = Number(localStorage.getItem(VOL_STORAGE));
     return isNaN(v) || v < 0 || v > 1 ? 1 : v;
   });
@@ -1231,6 +1235,7 @@ export default function App() {
           onGain={onGain}
           onToggleShuffle={onToggleShuffle}
           onCycleRepeat={onCycleRepeat}
+          showVolume={!isAndroid()}
         />
       )}
 
