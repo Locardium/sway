@@ -1,0 +1,23 @@
+[default]
+description = "Default permissions for the plugin"
+permissions = [
+  "allow-initialize",
+  "allow-register-listener",
+  "allow-remove-listener",
+  "allow-set-source",
+  "allow-play",
+  "allow-pause",
+  "allow-seek-to",
+  "allow-set-rate",
+  "allow-get-state",
+  "allow-get-progress-checkpoint",
+  "allow-clear-progress-checkpoint",
+  "allow-dispose",
+  "allow-set-volume",
+  "allow-set-source-gain",
+  "allow-set-next-source",
+  "allow-skip-to-next",
+  "allow-set-crossfade",
+  "allow-list-output-devices",
+  "allow-set-output-device",
+]

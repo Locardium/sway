@@ -1,17 +1,16 @@
-//! `Player` stub for Android/iOS. Real playback there goes through
-//! `tauri-plugin-native-audio`, controlled directly from JS (see
-//! `app/src/nativeAudio.ts`) — not through this Rust `Player` (which on
-//! desktop drives rodio). The playback commands in `lib.rs` (`play_track`,
-//! `pause_playback`, etc.) are unreachable from the frontend on Android
-//! (`api.ts` routes to `nativeAudio.ts` instead), but `AppState` still needs
-//! them to compile without duplicating `lib.rs` per platform. Same public
-//! signature as `player.rs`, with no real behavior.
+//! `Player` stub for Android/iOS. Real playback there goes through the
+//! vendored native-audio plugin (`crates/native-audio`), controlled directly
+//! from JS (see `app/src/nativeAudio.ts`) — not through this Rust `Player`
+//! (which on desktop drives rodio). The playback commands in `lib.rs`
+//! (`play_track`, `pause_playback`, etc.) are unreachable from the frontend on
+//! Android (`api.ts` routes to `nativeAudio.ts` instead), but `AppState` still
+//! needs them to compile without duplicating `lib.rs` per platform. Same
+//! public signature as `player.rs`, with no real behavior.
 //!
-//! The gain/gapless/crossfade/device methods are stubs here for a second
-//! reason: that plugin's API is `setSource/play/pause/seekTo/setRate` and
-//! nothing else — no volume, no queue, no device selection. Making any of
-//! those work on the phone means forking the plugin (Kotlin + Media3), which
-//! is its own piece of work.
+//! Volume, gain, gapless, crossfade and output device all work on the phone —
+//! the fork added them (see `crates/native-audio/FORK.md`). They are still
+//! no-ops *here* because none of it is on this side of the wire: the plugin is
+//! the player, and JS is what talks to it.
 
 use std::path::PathBuf;
 
@@ -26,6 +25,11 @@ pub struct Cue {
     /// `lib.rs::cue_for` builds compiles the same on both platforms: that
     /// function is shared, and the alternative is a `#[cfg]` around the two
     /// fields it fills in.
+    ///
+    /// The plugin does the equivalent work from its own end: it gets the level
+    /// through `track_cue` (same `db::playback_gain_db` this `gain` comes
+    /// from) and the seamless handover from ExoPlayer's playlist, so nothing
+    /// is missing on the phone — it just doesn't arrive through this struct.
     pub lead_ms: u64,
     pub audio_end_ms: u64,
 }

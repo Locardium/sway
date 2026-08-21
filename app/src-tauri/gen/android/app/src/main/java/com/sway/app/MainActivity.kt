@@ -9,25 +9,20 @@ import android.os.Build
 import android.provider.Settings
 import android.system.Os
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import android.webkit.WebView
-import androidx.media3.common.ForwardingPlayer
-import androidx.media3.common.Player
 import androidx.media3.ui.PlayerNotificationManager
 import app.tauri.nativeaudio.NativeAudioRuntime
 
 /// Sway maneja la cola de reproduccion del lado JS (ver App.tsx), asi que la
 /// app necesita dos cosas del lado nativo que Tauri no da solo.
 class MainActivity : TauriActivity() {
-    private val main = Handler(Looper.getMainLooper())
 
     /// El `MediaSession` del plugin sobrevive a la Activity (lo sostiene un
     /// foreground service), y `tauri android dev` la recrea en cada reload.
-    /// Por eso el player envuelto no puede quedarse con una referencia a la
-    /// Activity: apuntaria a una WebView muerta despues del primer reload.
-    /// Resuelve contra la Activity viva en cada toque.
+    /// Por eso el interceptor de transporte no puede quedarse con una
+    /// referencia a la Activity: apuntaria a una WebView muerta despues del
+    /// primer reload. Resuelve contra la Activity viva en cada toque.
     companion object {
         private const val TAG = "Sway"
 
@@ -118,7 +113,7 @@ class MainActivity : TauriActivity() {
         exportDeviceName()
         super.onCreate(savedInstanceState)
         live = this
-        main.post(installTransportWrapper)
+        installTransportInterceptor()
         acquireMulticastLock()
 
         val filter = IntentFilter().apply {
@@ -142,7 +137,6 @@ class MainActivity : TauriActivity() {
     }
 
     override fun onDestroy() {
-        main.removeCallbacks(installTransportWrapper)
         runCatching { unregisterReceiver(notificationButtons) }
         multicastLock?.let { lock -> runCatching { if (lock.isHeld) lock.release() } }
         multicastLock = null
@@ -184,34 +178,29 @@ class MainActivity : TauriActivity() {
 
     /// Anterior/siguiente de la notificacion y el lockscreen -> la app.
     ///
-    /// `tauri-plugin-native-audio` publica un `MediaSession` cuyo player
-    /// redirige a proposito `seekToNext()`/`seekToPrevious()` a
-    /// `seekForward()`/`seekBack()`: saltos de 10s dentro del track, nunca
-    /// cambio de cancion. No expone ningun evento ni forma de reconfigurarlo.
+    /// El player del `MediaSession` redirige a proposito
+    /// `seekToNext()`/`seekToPrevious()` a `seekForward()`/`seekBack()`:
+    /// saltos de 10s dentro del track, nunca cambio de cancion. Desde Android
+    /// 13 los controles de la notificacion multimedia los dibuja el sistema a
+    /// partir del `MediaSession`, asi que ese player es el unico punto por
+    /// donde pasan esos botones.
     ///
-    /// Desde Android 13 los controles de la notificacion multimedia los dibuja
-    /// el sistema a partir del `MediaSession`, no de las acciones de la
-    /// notificacion, asi que ese player es el unico punto por donde pasan
-    /// esos botones. `MediaSession.setPlayer()` es publico y
-    /// `NativeAudioRuntime.mediaSession()` tambien: alcanza con envolver el
-    /// player que ya tiene y quedarse con los comandos de transporte, dejando
-    /// todo el resto (estado, metadata, play/pause, seek) delegado tal cual.
-    /// El plugin queda intacto.
+    /// Antes esto se resolvia desde aca reemplazando `mediaSession.player` por
+    /// un `ForwardingPlayer` propio, esperando en un Runnable a que la sesion
+    /// existiera. Dejo de servir cuando el plugin gano crossfade: cada fade
+    /// cambia de deck y reconstruye el player de la sesion, y el reemplazo se
+    /// perdia sin aviso. El hook vive ahora adentro del fork
+    /// (`crates/native-audio`), que lo re-aplica en cada swap.
     ///
     /// Del lado JS lo recibe `window.__swayMediaButton` (ver App.tsx).
-    private class TransportPlayer(inner: Player) : ForwardingPlayer(inner) {
-        override fun seekToNext() = dispatchMediaButton("next")
-        override fun seekToNextMediaItem() = dispatchMediaButton("next")
-        override fun seekForward() = dispatchMediaButton("next")
-        override fun seekToPrevious() = dispatchMediaButton("prev")
-        override fun seekToPreviousMediaItem() = dispatchMediaButton("prev")
-        override fun seekBack() = dispatchMediaButton("prev")
+    private fun installTransportInterceptor() {
+        NativeAudioRuntime.transportInterceptor = { button -> dispatchMediaButton(button) }
     }
 
     /// Segundo camino para los mismos botones, por las dudas.
     ///
     /// Desde Android 13 los controles de la notificacion multimedia salen del
-    /// `MediaSession` (los agarra `TransportPlayer`), pero en versiones
+    /// `MediaSession` (lo agarra el interceptor de arriba), pero en versiones
     /// anteriores — y en las capas de algunos fabricantes — los dibuja el
     /// propio `PlayerNotificationManager`, que despacha cada boton como un
     /// broadcast dentro del paquete con acciones que son constantes publicas.
@@ -224,26 +213,6 @@ class MainActivity : TauriActivity() {
                 PlayerNotificationManager.ACTION_NEXT -> dispatchMediaButton("next")
                 PlayerNotificationManager.ACTION_REWIND,
                 PlayerNotificationManager.ACTION_PREVIOUS -> dispatchMediaButton("prev")
-            }
-        }
-    }
-
-    /// La sesion la crea el plugin la primera vez que JS lo inicializa, o sea
-    /// despues de que arranca la activity: hay que esperarla.
-    private val installTransportWrapper = object : Runnable {
-        override fun run() {
-            val session = NativeAudioRuntime.mediaSession()
-            val player = session?.player
-            if (session == null || player == null) {
-                main.postDelayed(this, 1000)
-                return
-            }
-            // Si ya esta envuelto (Activity recreada, la sesion sobrevivio) no
-            // hay nada que hacer: `dispatchMediaButton` resuelve solo contra la
-            // Activity viva.
-            if (player !is TransportPlayer) {
-                session.player = TransportPlayer(player)
-                Log.i(TAG, "MediaSession transport wrapper instalado")
             }
         }
     }

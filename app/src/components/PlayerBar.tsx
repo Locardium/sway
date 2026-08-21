@@ -43,11 +43,6 @@ interface Props {
   onGain: (gainDb: number) => void;
   onToggleShuffle: () => void;
   onCycleRepeat: () => void;
-  showVolume?: boolean;
-  /// Gain needs somewhere to apply itself. On Android the native plugin
-  /// exposes no volume control at all, so the knob is hidden rather than
-  /// shown doing nothing.
-  showGain?: boolean;
 }
 
 /// Range of the gain knob, matching `db::MAX_GAIN_DB` in the backend (which
@@ -87,8 +82,6 @@ export default function PlayerBar({
   onGain,
   onToggleShuffle,
   onCycleRepeat,
-  showVolume = true,
-  showGain = true,
 }: Props) {
   const barRef = useRef<HTMLDivElement>(null);
   // While dragging, the bar shows the finger/mouse position and the actual
@@ -184,53 +177,49 @@ export default function PlayerBar({
         </div>
       </div>
       <div className="player-right">
-        {showGain && (
-          <div className="gain">
-            <Knob
-              value={track.gainDb}
-              min={-GAIN_RANGE}
-              max={GAIN_RANGE}
-              center={0}
-              step={0.5}
-              size={26}
-              label="Gain"
-              format={fmtGain}
-              onChange={onGain}
-            />
-            <span className="gain-value">{fmtGain(track.gainDb)}</span>
-          </div>
-        )}
-        {showVolume && (
-          // Wheel over the whole volume group, not just the slider: the
-          // pointer is usually on its way past the icon, and having to land
-          // on a 4 px track first would defeat the point.
-          <div
-            className="vol"
-            onWheel={(e) => {
-              const step = e.shiftKey ? 0.01 : 0.05;
-              const next = volume + (e.deltaY < 0 ? step : -step);
-              onVolume(Math.min(1, Math.max(0, Math.round(next * 100) / 100)));
-            }}
+        <div className="gain">
+          <Knob
+            value={track.gainDb}
+            min={-GAIN_RANGE}
+            max={GAIN_RANGE}
+            center={0}
+            step={0.5}
+            size={26}
+            label="Gain"
+            format={fmtGain}
+            onChange={onGain}
+          />
+          <span className="gain-value">{fmtGain(track.gainDb)}</span>
+        </div>
+        {/* Wheel over the whole volume group, not just the slider: the
+            pointer is usually on its way past the icon, and having to land
+            on a 4 px track first would defeat the point. */}
+        <div
+          className="vol"
+          onWheel={(e) => {
+            const step = e.shiftKey ? 0.01 : 0.05;
+            const next = volume + (e.deltaY < 0 ? step : -step);
+            onVolume(Math.min(1, Math.max(0, Math.round(next * 100) / 100)));
+          }}
+        >
+          <button
+            className="ctl side"
+            onClick={() => onVolume(volume === 0 ? 1 : 0)}
+            title={volume === 0 ? 'Unmute' : 'Mute'}
           >
-            <button
-              className="ctl side"
-              onClick={() => onVolume(volume === 0 ? 1 : 0)}
-              title={volume === 0 ? 'Unmute' : 'Mute'}
-            >
-              <VolIcon v={volume} />
-            </button>
-            <input
-              className="range vol-range"
-              type="range"
-              min={0}
-              max={100}
-              value={Math.round(volume * 100)}
-              onChange={(e) => onVolume(Number(e.target.value) / 100)}
-              style={{ ['--fill' as string]: `${Math.round(volume * 100)}%` }}
-              aria-label="Volume"
-            />
-          </div>
-        )}
+            <VolIcon v={volume} />
+          </button>
+          <input
+            className="range vol-range"
+            type="range"
+            min={0}
+            max={100}
+            value={Math.round(volume * 100)}
+            onChange={(e) => onVolume(Number(e.target.value) / 100)}
+            style={{ ['--fill' as string]: `${Math.round(volume * 100)}%` }}
+            aria-label="Volume"
+          />
+        </div>
       </div>
     </footer>
   );

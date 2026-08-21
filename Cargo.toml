@@ -11,7 +11,12 @@
 # over the same engine.
 [workspace]
 resolver = "2"
-members = ["app/src-tauri", "crates/core", "crates/server"]
+members = ["app/src-tauri", "crates/core", "crates/native-audio", "crates/server"]
+
+# `crates/native-audio` is a vendored fork of the crates.io plugin
+# `tauri-plugin-native-audio` (see its FORK.md). It is a member so `cargo check`
+# at the root covers it; it only ships real code for Android/iOS, and the app
+# depends on it under the same target gate.
 
 # Dependencies are also optimized in debug. Without this, the sync
 # encrypted channel runs unoptimized and gives 3.5 MB/s: sending a 40 MB

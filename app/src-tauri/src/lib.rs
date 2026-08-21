@@ -462,6 +462,37 @@ fn get_track_path(state: State<AppState>, id: i64) -> Result<String, String> {
     db::track_path(&conn, id).map_err(|e| e.to_string())
 }
 
+/// The same answer `cue_for` gives the desktop player, in the shape the
+/// Android plugin takes.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrackCue {
+    path: String,
+    /// Trim and normalization folded into one figure, in dB. Desktop turns
+    /// this into a linear multiplier inside `cue_for`; the plugin wants the
+    /// dB, so the conversion doesn't happen here.
+    gain_db: f64,
+}
+
+/// Path and level for a track, for the platforms whose player lives outside
+/// Rust.
+///
+/// Android's audio is the native plugin, which JS drives, so the numbers the
+/// desktop `Player` reads straight out of `Cue` have to make the trip out to
+/// JS instead. Same inputs and the same `db::playback_gain_db` as `cue_for`,
+/// so a track plays at one level on both platforms.
+#[tauri::command]
+fn track_cue(state: State<AppState>, id: i64) -> Result<TrackCue, String> {
+    let conn = state.db.lock().unwrap();
+    let path = db::track_path(&conn, id).map_err(|e| e.to_string())?;
+    let a = db::track_playback(&conn, id).unwrap_or_default();
+    let normalize = db::get_playback_prefs(&conn).unwrap_or_default().normalize;
+    Ok(TrackCue {
+        path,
+        gain_db: db::playback_gain_db(a.gain_db, a.loudness_lufs, normalize),
+    })
+}
+
 #[tauri::command]
 fn reveal_track(state: State<AppState>, id: i64) -> Result<(), String> {
     let path = {
@@ -1669,6 +1700,7 @@ pub fn run() {
             cover_thumb,
             reveal_track,
             get_track_path,
+            track_cue,
             list_playlists,
             create_playlist,
             rename_playlist,

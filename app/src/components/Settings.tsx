@@ -11,6 +11,7 @@ import {
   loudnessPending,
   rescanAnalysis,
   setAutoSyncXml,
+  supportsLoudnessAnalysis,
   type PlaybackPrefs,
 } from '../api';
 import { isAndroid } from '../platform';
@@ -82,28 +83,19 @@ export default function Settings({
 
   const android = isAndroid();
   const showExport = !android;
-  /// Everything under here needs volume control or a queue, and the Android
-  /// audio plugin exposes neither (see nativeAudio.ts). Hidden rather than
-  /// shown inert.
-  const showPlayback = !android;
 
   /// Edits one preference and saves the lot — they travel together.
   function patch(next: Partial<PlaybackPrefs>) {
     onPrefs({ ...prefs, ...next });
   }
 
-  useEffect(() => {
-    if (!showPlayback) return;
-    listOutputDevices()
-      .then(setDevices)
-      .catch(() => {});
-  }, [showPlayback]);
 
   // How much of the library the analyzer still has to get through. Polled
   // whenever this screen is open, not only while normalization is on: tracks
   // are measured as they arrive, so the count is the honest answer to "is it
   // still working" regardless of what the measurement is being used for.
   useEffect(() => {
+    if (!supportsLoudnessAnalysis) return;
     let alive = true;
     const read = () =>
       loudnessPending()
@@ -143,6 +135,15 @@ export default function Settings({
       .then(setAutoSyncXmlState)
       .catch(() => {});
   }, [showExport]);
+
+  // Read when the screen opens rather than kept live: headphones plugged in
+  // while this modal is on screen is not worth a listener, and reopening it
+  // re-reads.
+  useEffect(() => {
+    listOutputDevices()
+      .then(setDevices)
+      .catch(() => setDevices([]));
+  }, []);
 
   async function toggleAutoSync(v: boolean) {
     setAutoSyncXmlState(v);
@@ -221,20 +222,27 @@ export default function Settings({
               </button>
             </div>
           )}
+          {/* The analyzer decodes every file, which is rodio/symphonia and so
+              desktop-only. On Android the row is the count and nothing else,
+              rather than a Rescan button with nothing behind it. */}
           <div className="set-row">
             <div className="set-label">
               <span>Tracks in library</span>
-              <small>
-                {pending == null || pending === 0
-                  ? 'Rescan re-measures loudness and silent edges for every track'
-                  : `Analyzing — ${pending} track${pending === 1 ? '' : 's'} to go`}
-              </small>
+              {supportsLoudnessAnalysis && (
+                <small>
+                  {pending == null || pending === 0
+                    ? 'Rescan re-measures loudness and silent edges for every track'
+                    : `Analyzing — ${pending} track${pending === 1 ? '' : 's'} to go`}
+                </small>
+              )}
             </div>
             <div className="set-control">
               <span className="set-value">{trackCount}</span>
-              <button onClick={doRescan} disabled={rescanning}>
-                {rescanning ? 'Starting…' : 'Rescan'}
-              </button>
+              {supportsLoudnessAnalysis && (
+                <button onClick={doRescan} disabled={rescanning}>
+                  {rescanning ? 'Starting…' : 'Rescan'}
+                </button>
+              )}
             </div>
           </div>
         </section>
@@ -252,55 +260,57 @@ export default function Settings({
           </div>
         </section>
 
-        {showPlayback && (
-          <section>
-            <h4>Playback</h4>
-            <div className="set-row">
-              <div className="set-label">
-                <span>Crossfade</span>
-                <small>
-                  {prefs.crossfadeSecs === 0
-                    ? 'Off — one track ends before the next begins'
-                    : `${prefs.crossfadeSecs}s of overlap between tracks`}
-                </small>
-              </div>
-              <input
-                type="range"
-                min={0}
-                max={12}
-                value={prefs.crossfadeSecs}
-                onChange={(e) => patch({ crossfadeSecs: Number(e.target.value) })}
-                className="range set-slider"
-                style={{ ['--fill' as string]: `${(prefs.crossfadeSecs / 12) * 100}%` }}
-                aria-label="Crossfade in seconds"
-              />
+        <section>
+          <h4>Playback</h4>
+          <div className="set-row">
+            <div className="set-label">
+              <span>Crossfade</span>
+              <small>
+                {prefs.crossfadeSecs === 0
+                  ? 'Off — one track ends before the next begins'
+                  : `${prefs.crossfadeSecs}s of overlap between tracks`}
+              </small>
             </div>
-            <div className="set-row">
-              <div className="set-label">
-                <span>Gapless playback</span>
-                <small>
-                  {prefs.crossfadeSecs > 0
-                    ? 'Not used while crossfade is on — an overlap has no gap'
-                    : 'Trims the silence at the start and end of each file so tracks run straight into each other'}
-                </small>
-              </div>
-              <Switch
-                checked={prefs.gapless}
-                onChange={(v) => patch({ gapless: v })}
-                disabled={prefs.crossfadeSecs > 0}
-              />
+            <input
+              type="range"
+              min={0}
+              max={12}
+              value={prefs.crossfadeSecs}
+              onChange={(e) => patch({ crossfadeSecs: Number(e.target.value) })}
+              className="range set-slider"
+              style={{ ['--fill' as string]: `${(prefs.crossfadeSecs / 12) * 100}%` }}
+              aria-label="Crossfade in seconds"
+            />
+          </div>
+          <div className="set-row">
+            <div className="set-label">
+              <span>Gapless playback</span>
+              <small>
+                {prefs.crossfadeSecs > 0
+                  ? 'Not used while crossfade is on — an overlap has no gap'
+                  : 'Trims the silence at the start and end of each file so tracks run straight into each other'}
+              </small>
             </div>
-            <div className="set-row">
-              <div className="set-label">
-                <span>Autoplay next track</span>
-                <small>
-                  {prefs.autoplay
-                    ? 'Keeps going through the queue on its own'
-                    : 'Stops when the track ends and stays there'}
-                </small>
-              </div>
-              <Switch checked={prefs.autoplay} onChange={(v) => patch({ autoplay: v })} />
+            <Switch
+              checked={prefs.gapless}
+              onChange={(v) => patch({ gapless: v })}
+              disabled={prefs.crossfadeSecs > 0}
+            />
+          </div>
+          <div className="set-row">
+            <div className="set-label">
+              <span>Autoplay next track</span>
+              <small>
+                {prefs.autoplay
+                  ? 'Keeps going through the queue on its own'
+                  : 'Stops when the track ends and stays there'}
+              </small>
             </div>
+            <Switch checked={prefs.autoplay} onChange={(v) => patch({ autoplay: v })} />
+          </div>
+          {/* Needs a measured LUFS per track, and the analyzer that produces
+              it is desktop-only. The per-track gain knob works on both. */}
+          {supportsLoudnessAnalysis && (
             <div className="set-row">
               <div className="set-label">
                 <span>Normalize volume</span>
@@ -312,33 +322,40 @@ export default function Settings({
               </div>
               <Switch checked={prefs.normalize} onChange={(v) => patch({ normalize: v })} />
             </div>
+          )}
 
-            <div className="set-row">
-              <div className="set-label">
-                <span>Output device</span>
-                <small>
-                  {prefs.outputDevice
-                    ? 'Pinned — system output changes are ignored'
-                    : 'Follows the system, including changes mid-track'}
-                </small>
-              </div>
-              <select
-                className="set-select"
-                value={prefs.outputDevice ?? SYSTEM_DEFAULT}
-                onChange={(e) =>
-                  patch({ outputDevice: e.target.value === SYSTEM_DEFAULT ? null : e.target.value })
-                }
-              >
-                <option value={SYSTEM_DEFAULT}>System default</option>
-                {devices.map((d) => (
-                  <option key={d} value={d}>
-                    {d}
-                  </option>
-                ))}
-              </select>
+          <div className="set-row">
+            <div className="set-label">
+              <span>Output device</span>
+              <small>
+                {prefs.outputDevice
+                  ? 'Pinned — system output changes are ignored'
+                  : 'Follows the system, including changes mid-track'}
+              </small>
             </div>
-          </section>
-        )}
+            <select
+              className="set-select"
+              value={prefs.outputDevice ?? SYSTEM_DEFAULT}
+              onChange={(e) =>
+                patch({ outputDevice: e.target.value === SYSTEM_DEFAULT ? null : e.target.value })
+              }
+            >
+              <option value={SYSTEM_DEFAULT}>System default</option>
+              {devices.map((d) => (
+                <option key={d} value={d}>
+                  {d}
+                </option>
+              ))}
+              {/* The pinned device isn't in the list any more (headphones
+                  unplugged since last time). Shown rather than dropped, or the
+                  select renders blank and looks broken — playback already fell
+                  back to the system default on its own. */}
+              {prefs.outputDevice != null && !devices.includes(prefs.outputDevice) && (
+                <option value={prefs.outputDevice}>{prefs.outputDevice} — not connected</option>
+              )}
+            </select>
+          </div>
+        </section>
 
         {showExport && (
           <section>

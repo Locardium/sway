@@ -27,6 +27,7 @@ import {
   setNextTrack,
   getPlaybackPrefs,
   setPlaybackPrefs,
+  applyPlaybackPrefs,
   setTrackGain,
   subscribePlayback,
   setAppVisible,
@@ -143,7 +144,11 @@ export default function App() {
       try {
         await Promise.all([refreshLibrary(), refreshPlaylists()]);
         await setVolumeBackend(volume);
-        setPrefs(await getPlaybackPrefs());
+        const saved = await getPlaybackPrefs();
+        setPrefs(saved);
+        // Desktop's player is handed these by Rust at startup; Android's is
+        // the native plugin, which only JS can reach. See applyPlaybackPrefs.
+        await applyPlaybackPrefs(saved);
       } catch {
         if (tries++ < 5) setTimeout(attempt, 300);
       }
@@ -217,6 +222,9 @@ export default function App() {
           break;
         case 'playing':
           setPaused(!e.value);
+          break;
+        case 'advanced':
+          onAdvancedRef.current(e.id);
           break;
         case 'ended':
           onTrackEndedRef.current();
@@ -597,6 +605,31 @@ export default function App() {
   }, [currentId, repeat, playOffset, prefs.autoplay, startTrack]);
   const onTrackEndedRef = useRef(onTrackEnded);
   onTrackEndedRef.current = onTrackEnded;
+
+  /// The player moved on by itself: the staged track took over, gaplessly or
+  /// through a crossfade. Nothing ended, so `onTrackEnded` never runs and this
+  /// is where the queue position catches up.
+  ///
+  /// Android only — pushed by the plugin. Desktop learns the same thing from
+  /// the state poll above, which has `playbackState` to read and so doesn't
+  /// need to be told.
+  const onAdvanced = useCallback(
+    (id: number) => {
+      if (repeat === 'once') {
+        setRepeat('off');
+        localStorage.setItem('sway.repeat', 'off');
+      }
+      setCurrentId(id);
+      setPaused(false);
+      setPosMs(0);
+      // The one that just took over needs a follower of its own: the plugin
+      // consumed what was staged, so nothing is queued behind it now.
+      setNextTrack(followerOfRef.current(id)).catch(() => {});
+    },
+    [repeat],
+  );
+  const onAdvancedRef = useRef(onAdvanced);
+  onAdvancedRef.current = onAdvanced;
 
   // Auto-advance on desktop: there's no track-end event, it's deduced from
   // the position. On Android it's triggered by the plugin (see the
@@ -1187,8 +1220,6 @@ export default function App() {
           onGain={onGain}
           onToggleShuffle={onToggleShuffle}
           onCycleRepeat={onCycleRepeat}
-          showVolume={!isAndroid()}
-          showGain={!isAndroid()}
         />
       )}
 

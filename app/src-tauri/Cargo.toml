@@ -72,5 +72,10 @@ battery = { package = "starship-battery", version = "0.10" }
 
 # Mobile playback: Media3/ExoPlayer via native plugin, controlled from JS
 # (see app/src/nativeAudio.ts). Validated in Phase 0.5, see spike-android-audio/.
+#
+# Vendored, not from crates.io: upstream 1.0.5 exposes one media item and no
+# volume, which leaves gain/ReplayGain, gapless, crossfade and output-device
+# selection impossible to reach from outside the plugin. See
+# `crates/native-audio/FORK.md`.
 [target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
-tauri-plugin-native-audio = "1"
+tauri-plugin-native-audio = { path = "../../crates/native-audio" }

@@ -123,8 +123,12 @@ export const setVolume = android ? nativeAudio.setVolume : desktopSetVolume;
 //
 // Gapless and crossfade need the next track's audio to start while the
 // current one is still playing, which a round trip out to JS and back cannot
-// hit. So the desktop player owns the transition: the UI tells it what comes
-// next, then reads back what is playing now.
+// hit. So the player owns the transition on both platforms: the UI tells it
+// what comes next, and finds out afterwards what actually took over.
+//
+// How it finds out differs. Desktop is polled (`playbackState`); Android is
+// pushed a `advanced` event by the plugin, because there the transition
+// happens inside ExoPlayer and there is no `ended` in between.
 
 /// What is playing right now, not just where it is. `trackId` is how the UI
 /// finds out the player advanced on its own mid-crossfade.
@@ -134,15 +138,15 @@ export interface PlaybackState {
   playing: boolean;
 }
 
+/// Desktop only — on Android the plugin pushes this instead, so the poll that
+/// calls it never runs there (see `subscribePlayback`).
 export const playbackState = () => invoke<PlaybackState>('playback_state');
 
 /// Hands the player the next track in the queue, or `null` when nothing
 /// follows (end of the queue, or autoplay off — which is exactly how autoplay
 /// is turned off: the player is simply never told what comes next).
-///
-/// No-op on Android: the native plugin has no queue to pre-load into.
 export const setNextTrack = android
-  ? async (_id: number | null) => {}
+  ? nativeAudio.setNextTrack
   : (id: number | null) => invoke<void>('set_next_track', { id });
 
 // --- Playback preferences ---------------------------------------------------
@@ -159,18 +163,59 @@ export interface PlaybackPrefs {
   normalize: boolean;
   /// Output device by name. `null` = follow the system default, including
   /// when it changes mid-track.
+  ///
+  /// By name and not by id because Android's `AudioDeviceInfo` ids are handed
+  /// out per connection: the same pair of headphones is a different number
+  /// after unplugging them, and a saved preference has to outlive that.
   outputDevice: string | null;
 }
 
 export const getPlaybackPrefs = () => invoke<PlaybackPrefs>('get_playback_prefs');
-export const setPlaybackPrefs = (prefs: PlaybackPrefs) =>
-  invoke<void>('set_playback_prefs', { prefs });
-export const listOutputDevices = () => invoke<string[]>('list_output_devices');
+
+/// Hands the player the settings it holds rather than looks up.
+///
+/// Desktop does this in Rust — `lib.rs` pushes them into the `Player` when the
+/// app starts and again on every save. On Android the player is the plugin,
+/// which the Rust side can't reach, so the same two pushes happen from here:
+/// once at startup (App.tsx) and once per save, below.
+///
+/// `gapless` isn't in the list because the plugin doesn't have a switch for
+/// it: staging a track IS the gapless path there, so the decision is made by
+/// what the app does or doesn't stage.
+export const applyPlaybackPrefs = async (prefs: PlaybackPrefs) => {
+  if (!android) return;
+  await nativeAudio.setCrossfade(prefs.crossfadeSecs);
+  await nativeAudio.setOutputDeviceByName(prefs.outputDevice);
+};
+
+/// Saves the preferences. They are stored by the Rust side on both platforms
+/// — the DB is the same one — but only desktop's `Player` reads them back out
+/// of there.
+export const setPlaybackPrefs = async (prefs: PlaybackPrefs) => {
+  await invoke<void>('set_playback_prefs', { prefs });
+  await applyPlaybackPrefs(prefs);
+};
+
+export const listOutputDevices = android
+  ? nativeAudio.listOutputDeviceNames
+  : () => invoke<string[]>('list_output_devices');
 
 /// Per-track trim in dB. Saved on the track, so a quiet record only needs
 /// correcting once.
-export const setTrackGain = (id: number, gainDb: number) =>
-  invoke<void>('set_track_gain', { id, gainDb });
+///
+/// Desktop's command re-applies it to the running player itself; Android's
+/// player is the plugin, which the Rust side can't reach, so that half
+/// happens here.
+export const setTrackGain = async (id: number, gainDb: number) => {
+  await invoke<void>('set_track_gain', { id, gainDb });
+  if (android) await nativeAudio.refreshGain(id);
+};
+
+/// Whether the loudness analyzer exists on this platform. It decodes every
+/// file with rodio/symphonia, which is desktop-only, so on Android there is
+/// nothing measuring and `normalize` would be a switch over an empty column.
+/// The manual per-track gain works on both.
+export const supportsLoudnessAnalysis = !android;
 
 /// Tracks still waiting on the analyzer. 0 = the library is fully measured.
 export const loudnessPending = () => invoke<number>('loudness_pending');
