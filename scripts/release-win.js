@@ -1,18 +1,28 @@
 // Bump version, commit, tag, build Windows app + Windows/Linux server, publish GitHub Release.
-// Usage: node scripts/release-win.js 1.0.0-beta.1
+//
+// Usage: node scripts/release-win.js <build-version> [release-label]
+//
+// <build-version> goes into package.json / tauri.conf.json / Cargo.toml, so
+// it must satisfy WiX's msi rule: pre-release identifiers numeric-only
+// (e.g. 1.0.0-1). [release-label] is what shows up as the git tag and the
+// GitHub release title/notes when you want a friendlier name than the raw
+// build version (e.g. release-win.js 1.0.0-1 1.0.0-beta.1).
 const { execSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
 const version = process.argv[2];
+const label = process.argv[3] || version;
 if (!version || !/^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/.test(version)) {
-  console.error("Usage: node scripts/release-win.js <version>  (e.g. 1.0.0-beta.1)");
+  console.error(
+    "Usage: node scripts/release-win.js <build-version> [release-label]  (e.g. 1.0.0-1 1.0.0-beta.1)"
+  );
   process.exit(1);
 }
 
 const root = path.resolve(__dirname, "..");
-const isPrerelease = version.includes("-");
-const tag = `v${version}`;
+const isPrerelease = label.includes("-");
+const tag = `v${label}`;
 
 function run(cmd) {
   console.log(`\n$ ${cmd}`);
