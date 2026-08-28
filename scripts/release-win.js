@@ -1,4 +1,4 @@
-// Bump version, commit, tag, build Windows, publish GitHub Release.
+// Bump version, commit, tag, build Windows app + Windows/Linux server, publish GitHub Release.
 // Usage: node scripts/release-win.js 1.0.0-beta.1
 const { execSync } = require("child_process");
 const fs = require("fs");
@@ -36,8 +36,10 @@ run(`git tag ${tag}`);
 run(`git push`);
 run(`git push origin ${tag}`);
 
-// 4. Build Windows bundle.
+// 4. Build Windows app bundle + Windows/Linux server binaries.
 run(`pnpm build:win`);
+run(`pnpm server:build-win`);
+run(`pnpm server:build-linux`);
 
 // 5. Find the generated .msi.
 const msiDir = path.join(root, "app/src-tauri/target/release/bundle/msi");
@@ -49,10 +51,29 @@ if (!msiFile) {
 const msiPath = path.join(msiDir, msiFile);
 console.log(`\nFound bundle: ${msiPath}`);
 
-// 6. Publish GitHub Release with the .msi attached.
+const serverWinPath = path.join(root, "target/release/sway-server.exe");
+if (!fs.existsSync(serverWinPath)) {
+  console.error(`No server binary found at ${serverWinPath}`);
+  process.exit(1);
+}
+
+const serverLinuxPath = path.join(
+  root,
+  "target/x86_64-unknown-linux-musl/release/sway-server"
+);
+if (!fs.existsSync(serverLinuxPath)) {
+  console.error(`No server binary found at ${serverLinuxPath}`);
+  process.exit(1);
+}
+
+// 6. Publish GitHub Release with the app + both server binaries attached.
 const prereleaseFlag = isPrerelease ? "--prerelease" : "";
 run(
-  `gh release create ${tag} "${msiPath}" --title "Sway ${tag}" ${prereleaseFlag} --notes "Sway ${tag}"`
+  `gh release create ${tag} ` +
+    `"${msiPath}" ` +
+    `"${serverWinPath}#sway-server-windows.exe" ` +
+    `"${serverLinuxPath}#sway-server-linux" ` +
+    `--title "Sway ${tag}" ${prereleaseFlag} --notes "Sway ${tag}"`
 );
 
 console.log(`\nDone. Release ${tag} published.`);
