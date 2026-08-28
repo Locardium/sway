@@ -41,9 +41,19 @@ if (status) {
 // 2. Bump version across package.json / tauri.conf.json / Cargo.toml.
 run(`node scripts/bump-version.js ${version}`);
 
-// 3. Commit + tag + push.
+// 3. Commit (if the bump actually changed anything) + tag + push.
 run(`git add -A`);
-run(`git commit -m "chore: release ${tag}"`);
+const staged = execSync("git status --porcelain", { cwd: root }).toString().trim();
+if (staged) {
+  run(`git commit -m "chore: release ${tag}"`);
+} else {
+  console.log("\nVersion already at the target value, nothing to commit.");
+}
+const existingTags = execSync("git tag -l", { cwd: root }).toString().split("\n");
+if (existingTags.includes(tag)) {
+  console.error(`Tag ${tag} already exists locally. Delete it first if you want to redo this release: git tag -d ${tag}`);
+  process.exit(1);
+}
 run(`git tag ${tag}`);
 run(`git push`);
 run(`git push origin ${tag}`);
