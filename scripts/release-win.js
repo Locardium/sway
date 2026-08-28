@@ -1,23 +1,25 @@
 // Bump version, commit, tag, build Windows app + Windows/Linux server, publish GitHub Release.
+// Usage: node scripts/release-win.js 1.0.0-beta.1
 //
-// Usage: node scripts/release-win.js <build-version> [release-label]
-//
-// <build-version> goes into package.json / tauri.conf.json / Cargo.toml, so
-// it must satisfy WiX's msi rule: pre-release identifiers numeric-only
-// (e.g. 1.0.0-1). [release-label] is what shows up as the git tag and the
-// GitHub release title/notes when you want a friendlier name than the raw
-// build version (e.g. release-win.js 1.0.0-1 1.0.0-beta.1).
+// The tag / GitHub release name use this version as-is. WiX's msi target
+// only accepts a numeric-only pre-release, so any non-numeric pre-release
+// (e.g. "beta.1") is auto-reduced to its digits ("1") just for the version
+// written into package.json / tauri.conf.json / Cargo.toml.
 const { execSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
-const version = process.argv[2];
-const label = process.argv[3] || version;
-if (!version || !/^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/.test(version)) {
-  console.error(
-    "Usage: node scripts/release-win.js <build-version> [release-label]  (e.g. 1.0.0-1 1.0.0-beta.1)"
-  );
+const label = process.argv[2];
+if (!label || !/^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/.test(label)) {
+  console.error("Usage: node scripts/release-win.js <version>  (e.g. 1.0.0-beta.1)");
   process.exit(1);
+}
+
+const [core, pre] = label.split(/-(.+)/);
+const numericPre = pre ? pre.replace(/\D/g, "") || "1" : null;
+const version = numericPre ? `${core}-${numericPre}` : core;
+if (version !== label) {
+  console.log(`msi needs a numeric-only pre-release: building as ${version} (release tag stays ${label})`);
 }
 
 const root = path.resolve(__dirname, "..");
