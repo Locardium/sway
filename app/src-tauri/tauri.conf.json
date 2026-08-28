@@ -35,11 +35,6 @@
     ],
     "android": {
       "minSdkVersion": 26
-    },
-    "windows": {
-      "wix": {
-        "installMode": "perMachine"
-      }
     }
   }
 }
