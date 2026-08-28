@@ -96,7 +96,7 @@ try {
   run(`pnpm server:build-linux`);
 
   // 6. Find the generated .msi.
-  const msiDir = path.join(root, "app/src-tauri/target/release/bundle/msi");
+  const msiDir = path.join(root, "target/release/bundle/msi");
   const msiFile = fs.readdirSync(msiDir).find((f) => f.endsWith(".msi"));
   if (!msiFile) {
     throw new Error(`No .msi found in ${msiDir}`);
