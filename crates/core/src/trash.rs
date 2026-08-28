@@ -1,7 +1,7 @@
 //! The library's own trash.
 //!
 //! A deletion that arrives via sync doesn't destroy bytes. The file gets
-//! moved to `<music>/.sway-trash/` and stays there for a long while before
+//! moved to `<sway>/trash/` and stays there for a long while before
 //! actually disappearing.
 //!
 //! The reason is the hard requirement of all of Phase 5: never lose music. A
@@ -10,13 +10,17 @@
 //! tombstone, or a bug. The trash is what makes that case recoverable instead
 //! of final.
 
+use crate::internal_dir::internal_base;
 use std::path::{Path, PathBuf};
 
 /// How long a deleted file survives before it's actually cleaned up.
 pub const RETENTION_DAYS: u64 = 30;
 
+/// `music_dir` is the folder tracks are scanned from (`<sway>/library` on
+/// desktop). The trash sits one level up, next to the db, so it never gets
+/// mistaken for a track by the scanner.
 pub fn trash_dir(music_dir: &Path) -> PathBuf {
-    music_dir.join(".sway-trash")
+    internal_base(music_dir).join("trash")
 }
 
 /// Sends a file to the trash. Returns where it ended up.

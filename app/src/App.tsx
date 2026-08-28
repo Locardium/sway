@@ -40,6 +40,7 @@ import {
 } from './api';
 import { beginDrag, didDrag, DragPayload, RawTarget } from './dnd';
 import { isAndroid } from './platform';
+import { useUiSetting } from './uiSettings';
 import Sidebar, { Selection, NodeDropHint } from './components/Sidebar';
 import TrackTable from './components/TrackTable';
 import PlayerBar, { RepeatMode, REPEAT_LABEL } from './components/PlayerBar';
@@ -94,23 +95,42 @@ export default function App() {
   const [currentId, setCurrentId] = useState<number | null>(null);
   const [paused, setPaused] = useState(false);
   const [posMs, setPosMs] = useState(0);
-  const [shuffle, setShuffle] = useState(() => localStorage.getItem('sway.shuffle') === '1');
-  const [repeat, setRepeat] = useState<RepeatMode>(() => {
-    // 'all'/'one' are the old names (queue repeat). The mode is now always
-    // about the current track, see RepeatMode in PlayerBar.
-    const saved = localStorage.getItem('sway.repeat');
-    if (saved === 'track' || saved === 'once') return saved;
-    if (saved === 'all' || saved === 'one') return 'track';
-    return 'off';
-  });
+  // These three used to sit in localStorage, which is the webview's profile
+  // under AppData. They live in the db now, next to the library.
+  const [shuffle, setShuffle] = useUiSetting(
+    'shuffle',
+    false,
+    (r) => r === '1',
+    (v) => (v ? '1' : '0'),
+    { legacyKey: 'sway.shuffle' },
+  );
+  const [repeat, setRepeat] = useUiSetting<RepeatMode>(
+    'repeat',
+    'off',
+    (saved) => {
+      // 'all'/'one' are the old names (queue repeat). The mode is now always
+      // about the current track, see RepeatMode in PlayerBar.
+      if (saved === 'track' || saved === 'once') return saved;
+      if (saved === 'all' || saved === 'one') return 'track';
+      return 'off';
+    },
+    (v) => v,
+    { legacyKey: 'sway.repeat' },
+  );
   // On the phone the player is left wide open and the hardware buttons are the
   // volume — there is no slider to restore, and a stored value from a desktop
-  // session must not quietly hold the phone at half level.
-  const [volume, setVol] = useState(() => {
-    if (isAndroid()) return 1;
-    const v = Number(localStorage.getItem(VOL_STORAGE));
-    return isNaN(v) || v < 0 || v > 1 ? 1 : v;
-  });
+  // session must not quietly hold the phone at half level. So on Android this
+  // is plain state: never read back, never written.
+  const [volume, setVol] = useUiSetting(
+    'volume',
+    1,
+    (raw) => {
+      const v = Number(raw);
+      return isNaN(v) || v < 0 || v > 1 ? null : v;
+    },
+    (v) => String(v),
+    { legacyKey: VOL_STORAGE, enabled: !isAndroid() },
+  );
   // Playback preferences live in the backend (the audio thread needs them
   // anyway), and this is the copy the screens read. Defaults match
   // `db::PlaybackPrefs::default` so the UI isn't blank for the one frame
@@ -606,7 +626,6 @@ export default function App() {
       if (repeat === 'track' || repeat === 'once') {
         if (repeat === 'once') {
           setRepeat('off');
-          localStorage.setItem('sway.repeat', 'off');
         }
         await startTrack(currentId);
         setPaused(false);
@@ -632,7 +651,6 @@ export default function App() {
     (id: number) => {
       if (repeat === 'once') {
         setRepeat('off');
-        localStorage.setItem('sway.repeat', 'off');
       }
       setCurrentId(id);
       setPaused(false);
@@ -663,7 +681,6 @@ export default function App() {
   function onToggleShuffle() {
     setShuffle((s) => {
       const next = !s;
-      localStorage.setItem('sway.shuffle', next ? '1' : '0');
       // Rebuilds the queue keeping the current track first.
       if (currentId != null) {
         queueRef.current = next
@@ -677,7 +694,6 @@ export default function App() {
   function onCycleRepeat() {
     setRepeat((r) => {
       const next: RepeatMode = r === 'off' ? 'track' : r === 'track' ? 'once' : 'off';
-      localStorage.setItem('sway.repeat', next);
       // On mobile there's no tooltip: the toast is the only way to know what
       // state the button ended up in.
       setStatus(REPEAT_LABEL[next]);
@@ -775,7 +791,6 @@ export default function App() {
         const val = volPending.current;
         volPending.current = null;
         if (val != null) {
-          localStorage.setItem(VOL_STORAGE, String(val));
           setVolumeBackend(val).catch(() => {});
         }
       }, 60);

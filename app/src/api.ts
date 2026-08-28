@@ -239,6 +239,14 @@ export const syncXmlAfterChange = () => invoke<void>('sync_xml_after_change');
 export const getAutoSyncXml = () => invoke<boolean>('get_auto_sync_xml');
 export const setAutoSyncXml = (enabled: boolean) => invoke<void>('set_auto_sync_xml', { enabled });
 
+/// UI state the frontend owns (column layout, and whatever comes next).
+/// Deliberately NOT `localStorage`: that lives in the webview's profile under
+/// AppData, and nothing Sway owns belongs there. These land in the db, in
+/// `<Music>/Sway`, next to the library.
+export const getUiSetting = (key: string) => invoke<string | null>('get_ui_setting', { key });
+export const setUiSetting = (key: string, value: string) =>
+  invoke<void>('set_ui_setting', { key, value });
+
 // P2P sync on the LAN (Phase 5).
 
 /// Has to match `discovery::PROTO` on the Rust side. A peer announcing a

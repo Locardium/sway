@@ -94,7 +94,7 @@ export default function Sidebar({
             node.inScope ? '' : 'out-scope',
           ].join(' ')}
           title={node.inScope ? undefined : 'Not synced to this device — still taking up space'}
-          style={{ paddingLeft: 10 + depth * 15 }}
+          style={{ paddingLeft: 12 + depth * 16 }}
           data-dnd="node"
           data-node-id={node.id}
           data-node-kind={node.kind}

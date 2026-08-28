@@ -693,23 +693,27 @@ fn reorder_playlist_tracks(
 /// on the library (the track's trim, its measured loudness) and on a
 /// preference — none of which the audio thread should be reaching for while
 /// it's mid-decode.
-fn cue_for(conn: &Connection, id: i64, normalize: bool) -> Result<Cue, String> {
+fn cue_for(conn: &Connection, id: i64, prefs: &db::PlaybackPrefs) -> Result<Cue, String> {
     let (path, duration_ms): (String, i64) = conn
         .query_row("SELECT path, duration_ms FROM tracks WHERE id = ?1", [id], |r| {
             Ok((r.get(0)?, r.get(1)?))
         })
         .map_err(|e| e.to_string())?;
     let a = db::track_playback(conn, id).unwrap_or_default();
+    // Crossfade overlaps the tracks, so there is no gap for trimming to close;
+    // gapless off means the edges should sound the way the file has them.
+    // Same rule `track_cue` (Android) follows.
+    let trim = prefs.gapless && prefs.crossfade_secs <= 0.0;
     Ok(Cue {
         id,
         path: std::path::PathBuf::from(path),
-        gain: db::db_to_linear(db::playback_gain_db(a.gain_db, a.loudness_lufs, normalize)),
+        gain: db::db_to_linear(db::playback_gain_db(a.gain_db, a.loudness_lufs, prefs.normalize)),
         duration_ms: duration_ms.max(0) as u64,
         // Unanalyzed tracks trim nothing: playing them untrimmed is the old
         // behaviour, and guessing where the audio starts without measuring is
         // how you clip the first beat off a track.
-        lead_ms: a.lead_silence_ms.unwrap_or(0).max(0) as u64,
-        audio_end_ms: a.audio_end_ms.unwrap_or(0).max(0) as u64,
+        lead_ms: if trim { a.lead_silence_ms.unwrap_or(0).max(0) as u64 } else { 0 },
+        audio_end_ms: if trim { a.audio_end_ms.unwrap_or(0).max(0) as u64 } else { 0 },
     })
 }
 
@@ -717,8 +721,8 @@ fn cue_for(conn: &Connection, id: i64, normalize: bool) -> Result<Cue, String> {
 fn play_track(state: State<AppState>, id: i64) -> Result<(), String> {
     let cue = {
         let conn = state.db.lock().unwrap();
-        let normalize = db::get_playback_prefs(&conn).unwrap_or_default().normalize;
-        cue_for(&conn, id, normalize)?
+        let prefs = db::get_playback_prefs(&conn).unwrap_or_default();
+        cue_for(&conn, id, &prefs)?
     };
     state.player.play(cue);
     Ok(())
@@ -737,8 +741,8 @@ fn set_next_track(state: State<AppState>, id: Option<i64>) -> Result<(), String>
         None => None,
         Some(id) => {
             let conn = state.db.lock().unwrap();
-            let normalize = db::get_playback_prefs(&conn).unwrap_or_default().normalize;
-            Some(cue_for(&conn, id, normalize)?)
+            let prefs = db::get_playback_prefs(&conn).unwrap_or_default();
+            Some(cue_for(&conn, id, &prefs)?)
         }
     };
     state.player.set_next(next);
@@ -804,7 +808,7 @@ fn set_playback_prefs(
         let conn = state.db.lock().unwrap();
         db::set_playback_prefs(&conn, &prefs).map_err(|e| e.to_string())?;
         if let Some(id) = state.player.state().track_id {
-            if let Ok(cue) = cue_for(&conn, id, prefs.normalize) {
+            if let Ok(cue) = cue_for(&conn, id, &prefs) {
                 state.player.set_gain(cue.gain);
             }
         }
@@ -835,8 +839,8 @@ fn set_track_gain(state: State<AppState>, id: i64, gain_db: f64) -> Result<(), S
     // the player bar, so that's the usual case, but the table can set it on
     // any row.
     if state.player.state().track_id == Some(id) {
-        let normalize = db::get_playback_prefs(&conn).unwrap_or_default().normalize;
-        if let Ok(cue) = cue_for(&conn, id, normalize) {
+        let prefs = db::get_playback_prefs(&conn).unwrap_or_default();
+        if let Ok(cue) = cue_for(&conn, id, &prefs) {
             state.player.set_gain(cue.gain);
         }
     }
@@ -1335,6 +1339,136 @@ fn set_auto_sync_xml(state: State<AppState>, enabled: bool) -> Result<(), String
     db::set_auto_sync_xml(&conn, enabled).map_err(|e| e.to_string())
 }
 
+/// Small pieces of UI state the frontend owns (column layout, and whatever
+/// comes next). They go through the db so they land in `<Music>/Sway`, next
+/// to everything else Sway owns — the webview's own `localStorage` would put
+/// them under AppData, which is the one place none of our data belongs.
+///
+/// Local to this device on purpose: the shape of your table is not something
+/// the phone should inherit. That's why it's `app_settings` and not one of
+/// the replicated tables.
+#[tauri::command]
+fn get_ui_setting(state: State<AppState>, key: String) -> Result<Option<String>, String> {
+    let conn = state.db.lock().unwrap();
+    db::get_setting(&conn, &ui_key(&key)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_ui_setting(state: State<AppState>, key: String, value: String) -> Result<(), String> {
+    let conn = state.db.lock().unwrap();
+    db::set_setting(&conn, &ui_key(&key), &value).map_err(|e| e.to_string())
+}
+
+/// Namespaced so a frontend key can never collide with a setting the backend
+/// owns (`device_uid`, `auto_sync_xml`, …).
+fn ui_key(key: &str) -> String {
+    format!("ui.{key}")
+}
+
+/// Empties `%LOCALAPPDATA%\com.sway.app`, once, the first time a build that
+/// keeps the webview profile in the music folder runs.
+///
+/// Only `Local Storage` is carried across, and for one reason: it holds the
+/// settings the frontend is about to migrate into the db (column layout,
+/// shuffle, repeat, volume). Pointing the webview at an empty directory
+/// without it would lose them silently.
+///
+/// Everything else in that profile is disposable — caches, shader caches,
+/// metrics, hyphenation data, filter lists. On a real profile that was 166 MB
+/// against 16 KB of settings. WebView2 rebuilds all of it on demand, so it is
+/// dropped rather than dragged along; copying it would move the junk instead
+/// of getting rid of it.
+///
+/// Best effort throughout: what is at stake is four preferences, not the
+/// library, so it is never worth failing startup over.
+#[cfg(target_os = "windows")]
+fn adopt_legacy_webview_profile(app: &AppHandle, target: &std::path::Path) {
+    let Ok(legacy) = app.path().app_local_data_dir() else {
+        return;
+    };
+    if !legacy.exists() {
+        return; // nothing there: a clean install, or already cleaned up
+    }
+    // Carrying the settings only makes sense the first time, before the new
+    // profile exists — after that the live ones are the truth.
+    if !target.exists() {
+        // The webview is not running yet — this is still `setup` — so the
+        // database behind Local Storage is not open and is safe to copy.
+        const LOCAL_STORAGE: &str = r"EBWebView\Default\Local Storage";
+        let from = legacy.join(LOCAL_STORAGE);
+        if from.exists() {
+            match copy_dir_all(&from, &target.join(LOCAL_STORAGE)) {
+                Ok(()) => eprintln!("[webview] settings carried out of AppData"),
+                Err(e) => {
+                    // Leaves the old profile alone so the next launch can
+                    // retry, rather than deleting the only copy.
+                    std::fs::remove_dir_all(target).ok();
+                    eprintln!("[webview] could not carry the settings out of AppData ({e})");
+                    return;
+                }
+            }
+        }
+    }
+    // Attempted on EVERY startup while the directory is still there, not just
+    // the run that created the new profile. The first attempt routinely fails
+    // in part: WebView2 keeps its own processes alive briefly after the app
+    // closes, and they still hold files inside the old profile. Each run
+    // clears what it can and the folder disappears within a launch or two.
+    remove_dir_all_best_effort(&legacy);
+    if legacy.exists() {
+        eprintln!("[webview] {} not fully removed yet, retrying next launch", legacy.display());
+    } else {
+        eprintln!("[webview] removed {}", legacy.display());
+    }
+}
+
+/// `std::fs::remove_dir_all` gives up on the first entry it cannot handle,
+/// which leaves the rest of a large browser profile behind. This one keeps
+/// going, and deletes a reparse point as a link rather than descending into
+/// whatever it points at.
+#[cfg(target_os = "windows")]
+fn remove_dir_all_best_effort(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.is_dir() && !meta.file_type().is_symlink() {
+            remove_dir_all_best_effort(&path);
+            std::fs::remove_dir(&path).ok();
+        } else if meta.is_dir() {
+            std::fs::remove_dir(&path).ok(); // the link, never the target
+        } else {
+            if meta.permissions().readonly() {
+                let mut perms = meta.permissions();
+                #[allow(clippy::permissions_set_readonly_false)]
+                perms.set_readonly(false);
+                std::fs::set_permissions(&path, perms).ok();
+            }
+            std::fs::remove_file(&path).ok();
+        }
+    }
+    std::fs::remove_dir(dir).ok();
+}
+
+#[cfg(target_os = "windows")]
+fn copy_dir_all(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let dest = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&entry.path(), &dest)?;
+        } else {
+            std::fs::copy(entry.path(), &dest)?;
+        }
+    }
+    Ok(())
+}
+
 /// Called by the frontend after every mutation (import, playlists, tracks).
 /// The backend decides whether to do anything: if the toggle is off, no-op.
 ///
@@ -1468,7 +1602,7 @@ fn spawn_folder_watch(handle: AppHandle, dir: PathBuf) {
                 // with the other device's uid: re-importing it would
                 // duplicate it incorrectly.
                 .filter(|e| !state.is_expected(&e.path))
-                // And whatever is in .sway-trash / .sway-incoming isn't
+                // And whatever is in trash / incoming isn't
                 // library content: it's what was just deleted and what's
                 // being downloaded. Auto-importing it would resurrect
                 // every deletion.
@@ -1555,8 +1689,22 @@ pub fn run() {
             .with_tag("sway"),
     );
 
-    #[allow(unused_mut)] // mut is only needed in the cfg below (android/ios)
-    let mut builder = tauri::Builder::default()
+    #[allow(unused_mut)] // mut is only needed in the cfg blocks below
+    let mut builder = tauri::Builder::default();
+    // Desktop only: a second launch focuses the running window instead of
+    // opening a second player on the same library/db. Must be registered
+    // before the other plugins to catch the relaunch as early as possible.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }));
+    }
+    builder = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_os::init());
@@ -1566,9 +1714,22 @@ pub fn run() {
     }
     builder
         .setup(|app| {
-            let dir = app.path().app_data_dir().expect("app data dir");
+            // Everything Sway owns lives next to the user's music, not in
+            // AppData: on desktop that's `<Music>/Sway`, so the db travels
+            // with the library instead of being orphaned on reinstall. On
+            // Android `audio_dir()` is already private to the app
+            // (`getExternalFilesDir(DIRECTORY_MUSIC)`), so no extra nesting.
+            let audio_dir = app
+                .path()
+                .audio_dir()
+                .unwrap_or_else(|_| app.path().app_data_dir().expect("app data dir"));
+            let dir = if cfg!(target_os = "android") {
+                audio_dir
+            } else {
+                audio_dir.join("Sway")
+            };
             std::fs::create_dir_all(&dir).ok();
-            let db_file = dir.join("sway.sqlite");
+            let db_file = dir.join("db.sqlite");
             // TEMPORARY — see `perf_line`. Truncated on every startup so
             // what's read is always from the current run.
             let perf = dir.join("perf.log");
@@ -1583,17 +1744,13 @@ pub fn run() {
                 .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
                 .unwrap_or(-1);
             eprintln!("[db] tracks at startup: {n}");
-            // Managed folder. On desktop `audio_dir()` is the user's Music
-            // folder, shared with everything else, so Sway stays in its
-            // own subdirectory. On Android it's already a folder private
-            // to the app (`getExternalFilesDir(DIRECTORY_MUSIC)`, i.e.
-            // `…/files/Music`): nesting another "Sway" inside it would
-            // only add a level that doesn't separate anything.
-            let audio_dir = app.path().audio_dir().unwrap_or_else(|_| dir.clone());
+            // Managed folder for the actual audio files, kept apart from
+            // the db so browsing `Music/Sway` in a file manager shows a
+            // clean `library` folder instead of db/log files mixed in.
             let music_dir = if cfg!(target_os = "android") {
-                audio_dir
+                dir.clone()
             } else {
-                audio_dir.join("Sway")
+                dir.join("library")
             };
             std::fs::create_dir_all(&music_dir).ok();
             if let Err(e) = flatten_legacy_subdir(&conn, &music_dir) {
@@ -1697,6 +1854,39 @@ pub fn run() {
             // Picks up anything that entered the library while this device
             // was closed (imports on another machine, files brought by sync).
             kick_loudness(app.handle());
+
+            // The window is built here, not declared in tauri.conf.json,
+            // for one reason: the config route forces the webview's data
+            // directory to be relative to LocalAppData and rejects an
+            // absolute path outright (`WebviewAttributes::from_config`).
+            // Only the Rust builder can put it somewhere else, and Tauri
+            // respects a directory that was specified rather than forcing
+            // its own (`manager/webview.rs`: "we do respect
+            // user-specification"). Without this, WebView2 keeps its whole
+            // profile — cache, cookies, local storage — under
+            // `%LOCALAPPDATA%\com.sway.app`, and nothing Sway owns belongs
+            // outside the music folder.
+            //
+            // Last thing in setup, after `manage`: the webview starts
+            // invoking commands the moment it exists, and those commands
+            // read `AppState`.
+            #[cfg(target_os = "windows")]
+            {
+                let webview_dir = dir.join("webview");
+                adopt_legacy_webview_profile(app.handle(), &webview_dir);
+                std::fs::create_dir_all(&webview_dir).ok();
+                eprintln!("[webview] profile: {}", webview_dir.display());
+                tauri::WebviewWindowBuilder::new(
+                    app.handle(),
+                    "main",
+                    tauri::WebviewUrl::default(),
+                )
+                .title("Sway")
+                .inner_size(1100.0, 720.0)
+                .min_inner_size(720.0, 480.0)
+                .data_directory(webview_dir)
+                .build()?;
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1737,6 +1927,8 @@ pub fn run() {
             export_library_xml_now,
             get_auto_sync_xml,
             set_auto_sync_xml,
+            get_ui_setting,
+            set_ui_setting,
             sync_xml_after_change,
             get_auto_sync_p2p,
             set_auto_sync_p2p,

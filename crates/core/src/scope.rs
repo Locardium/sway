@@ -650,7 +650,7 @@ pub fn evictable(
 // ---------------------------------------------------------------------------
 //
 // Re-marking a freed playlist can't re-download over the network files that
-// are still sitting in `.sway-trash`, one `rename` away. But verification is
+// are still sitting in `trash`, one `rename` away. But verification is
 // by hash, and hashing is expensive, so the work is split into three parts
 // — finding candidates, hashing, applying — because **the hash CANNOT be
 // computed while the DB lock is held**. Holding it while gigabytes get

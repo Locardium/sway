@@ -229,7 +229,7 @@ fn tombstone_at(conn: &Connection, entity: &str, uid: &str) -> Option<i64> {
 /// rare case and became the rule.
 ///
 /// What protects against an accidental delete is the trash, which filters
-/// nothing and always works: the file goes to `.sway-trash` and stays
+/// nothing and always works: the file goes to `trash` and stays
 /// there for 30 days.
 pub fn apply(
     conn: &Connection,

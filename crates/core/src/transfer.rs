@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! 1. request the file from byte N (N = whatever is already in the .part)
-//! 2. write to  <music>/.sway-incoming/<hash>.part
+//! 2. write to  <sway>/incoming/<hash>.part
 //! 3. network cut / app killed -> the .part survives, resumes from there
 //! 4. complete -> blake3 of the WHOLE .part
 //!      different  -> the .part is deleted, the library was never touched
@@ -31,11 +31,12 @@ use std::path::{Path, PathBuf};
 /// frames (Noise's cap); this is just how much is read from disk per round.
 const CHUNK: usize = 1024 * 1024;
 
-/// Half-finished downloads. Deliberately placed inside the managed folder:
-/// `rename()` is only atomic within the same filesystem, and on Android the
-/// app folder and the music folder can be on different volumes.
+/// Half-finished downloads. Deliberately kept on the same filesystem as the
+/// managed folder (`rename()` is only atomic within one filesystem, and on
+/// Android the app folder and the music folder can be on different
+/// volumes) — see `internal_dir::internal_base`.
 pub fn incoming_dir(music_dir: &Path) -> PathBuf {
-    music_dir.join(".sway-incoming")
+    crate::internal_dir::internal_base(music_dir).join("incoming")
 }
 
 fn part_path(music_dir: &Path, hash: &str) -> PathBuf {

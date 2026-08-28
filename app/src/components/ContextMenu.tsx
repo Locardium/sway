@@ -23,6 +23,7 @@ interface Props {
 export default function ContextMenu({ x, y, items, onClose, keepOpen }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ x, y });
+  const anyCheckable = items.some((i) => i.checked !== undefined);
 
   // Clamps within the viewport.
   useLayoutEffect(() => {
@@ -68,7 +69,10 @@ export default function ContextMenu({ x, y, items, onClose, keepOpen }: Props) {
               if (!keepOpen) onClose();
             }}
           >
-            {it.checked !== undefined && (
+            {/* If anything in this menu is checkable, every item reserves the
+                check column — otherwise a plain item mixed in with checkboxes
+                starts its label 24px to the left of all the others. */}
+            {anyCheckable && (
               <span className="ctx-check">{it.checked ? <Check size={13} /> : null}</span>
             )}
             {it.label}

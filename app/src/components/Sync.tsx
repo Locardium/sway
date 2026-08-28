@@ -234,7 +234,7 @@ function ScopeEditor({ nodes, scope, onMode, onDirection, onToggle }: ScopeEdito
         const partial = onCount > 0 && onCount < total;
         return (
           <div key={n.id}>
-            <label className="scope-node" style={{ paddingLeft: 4 + depth * 16 }}>
+            <label className="scope-node" style={{ paddingLeft: 6 + depth * 16 }}>
               <input
                 type="checkbox"
                 checked={on}
@@ -996,7 +996,7 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
               </small>
             </div>
           </div>
-          <div className="set-row">
+          <div className="set-row form">
             <input
               className="set-input"
               placeholder="host or address"
@@ -1013,7 +1013,7 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
               disabled={addingServer}
             />
           </div>
-          <div className="set-row">
+          <div className="set-row form">
             <input
               className="set-input"
               type="password"

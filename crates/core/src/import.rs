@@ -269,13 +269,13 @@ pub fn import_bytes(conn: &Connection, managed: &Path, name: &str, bytes: &[u8])
 /// Internal app directories inside the managed folder. NOTHING inside these
 /// gets imported.
 ///
-/// `.sway-trash` is the case that matters: it keeps the file's original name
+/// `trash` is the case that matters: it keeps the file's original name
 /// and extension, so without this exclusion the watcher sees a .flac appear,
 /// auto-imports it, and what you just deleted reappears in the library with
 /// a new uid — and on the next sync you send it to the other device. A
 /// delete that undoes itself.
 pub fn is_internal_dir(name: &str) -> bool {
-    name.starts_with(".sway-")
+    name == "trash" || name == "incoming"
 }
 
 /// True if the path is inside an internal app directory.
@@ -404,8 +404,8 @@ mod tests {
     #[test]
     fn internal_folders_are_never_imported() {
         let root = std::env::temp_dir().join(format!("sway-imp-{}", std::process::id()));
-        let trash = root.join(".sway-trash");
-        let incoming = root.join(".sway-incoming");
+        let trash = root.join("trash");
+        let incoming = root.join("incoming");
         std::fs::create_dir_all(&trash).unwrap();
         std::fs::create_dir_all(&incoming).unwrap();
         std::fs::write(root.join("normal.flac"), b"x").unwrap();

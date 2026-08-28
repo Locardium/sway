@@ -18,6 +18,35 @@
   --radius: 8px;
   --shadow: 0 12px 32px oklch(0% 0 0 / 0.5);
 
+  /* 4pt spacing scale. Every padding, gap and margin comes from here — the
+     app used to mix 3/5/7/9/11/13/14/18px and nothing lined up between two
+     neighbouring components. */
+  --space-3xs: 2px;
+  --space-2xs: 4px;
+  --space-xs: 6px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 24px;
+  --space-2xl: 32px;
+
+  /* The gutter every top-level surface (header, view head, table, panels)
+     indents its content by, so the title of a view sits exactly above the
+     first column of its table. */
+  --gutter: 16px;
+
+  /* One height for every control that can share a row: button, select,
+     input, code chip. Without this a row read as ragged because a button was
+     31px, a select 26px and a switch 22px. */
+  --control-h: 30px;
+  --control-h-sm: 26px;
+
+  /* The floating player overlaps the bottom of every scroll area; each one
+     used to reserve a different amount (96 / 96 / 110). */
+  --player-clear: 96px;
+  /* The player's own inset from the window edge — toasts align to it. */
+  --player-inset: 12px;
+
   /* semantic z-index */
   --z-sticky: 10;
   --z-player: 30;
@@ -51,12 +80,12 @@ header {
   display: grid;
   grid-template-columns: 1fr minmax(200px, 440px) 1fr;
   align-items: center;
-  gap: 16px;
-  padding: calc(10px + env(safe-area-inset-top)) 16px 10px;
+  gap: var(--space-lg);
+  padding: calc(var(--space-md) + env(safe-area-inset-top)) var(--gutter) var(--space-md);
   border-bottom: 1px solid var(--line);
   background: var(--bg);
 }
-.header-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.header-left { display: flex; align-items: center; gap: var(--space-sm); min-width: 0; }
 header h1 {
   font-size: 17px; margin: 0; font-weight: 700; letter-spacing: 0.5px;
   color: var(--accent);
@@ -68,7 +97,8 @@ header h1 {
   border: 1px solid var(--line);
   border-radius: 999px;
   color: var(--text);
-  padding: 7px 16px;
+  height: var(--control-h);
+  padding: 0 var(--space-lg);
   font-size: 13px;
   outline: none;
   transition: border-color 150ms var(--ease), background 150ms var(--ease);
@@ -80,8 +110,10 @@ header h1 {
 button {
   background: transparent; color: var(--text);
   border: 1px solid var(--line); border-radius: var(--radius);
-  padding: 7px 12px; font-size: 13px; cursor: pointer;
-  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  min-height: var(--control-h); padding: 0 var(--space-md);
+  font-size: 13px; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  gap: var(--space-xs);
   transition: border-color 150ms var(--ease), background 150ms var(--ease),
     color 150ms var(--ease), transform 150ms var(--ease);
 }
@@ -95,7 +127,7 @@ button.primary {
 button.primary:hover { background: oklch(85% 0.1 220); }
 button.mini {
   background: transparent; border: 0; color: var(--muted);
-  padding: 3px 6px;
+  min-height: 0; padding: var(--space-2xs) var(--space-xs);
 }
 button.mini:hover { color: var(--accent); }
 button.danger-btn {
@@ -113,38 +145,46 @@ button.danger-btn {
   background: var(--bg);
   border-right: 1px solid var(--line);
   display: flex; flex-direction: column;
-  padding: 8px 0 96px;
+  padding: var(--space-sm) 0 var(--player-clear);
   overflow-y: auto;
 }
+/* Left padding matches a row's icon column (row margin 4 + row padding 12),
+   so the section label sits exactly above the icons under it. Right padding
+   is short by the action buttons' own padding, so they land on the same
+   right edge as the track counts. */
 .tree-head {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 16px 12px 6px;
+  padding: var(--space-lg) var(--space-md) var(--space-xs) var(--gutter);
   color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: 1px;
   text-transform: uppercase;
 }
-.tree-actions { display: flex; gap: 2px; }
+.tree-actions { display: flex; gap: var(--space-3xs); }
 .tree-actions button {
-  border: 0; padding: 3px 5px; color: var(--muted); border-radius: 5px;
+  border: 0; min-height: 0; padding: var(--space-2xs); color: var(--muted);
+  border-radius: 5px;
 }
 .tree-actions button:hover { color: var(--accent); background: var(--panel-2); }
 
 .tree { flex: 1; min-height: 140px; }
 .tree.drop-root { box-shadow: inset 0 -2px 0 var(--accent); }
-.tree-empty { color: var(--muted); font-size: 12px; padding: 4px 12px; margin: 0; }
+.tree-empty {
+  color: var(--muted); font-size: 12px; margin: 0;
+  padding: var(--space-2xs) var(--gutter);
+}
 
 .tree-row {
-  display: flex; align-items: center; gap: 7px;
-  padding: 6px 10px;
+  display: flex; align-items: center; gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-md);
   cursor: pointer;
   border-radius: 6px;
-  margin: 0 6px;
+  margin: 0 var(--space-2xs);
   color: var(--text);
   position: relative;
   transition: background 120ms var(--ease), color 120ms var(--ease);
 }
 .tree-row:hover { background: var(--panel); }
 .tree-row.active { background: var(--accent-soft); color: var(--accent); }
-.tree-row.library { margin: 0 6px 2px; font-weight: 600; }
+.tree-row.library { margin: 0 var(--space-2xs) var(--space-3xs); font-weight: 600; }
 .tree-icon {
   width: 16px; display: inline-flex; align-items: center; justify-content: center;
   color: var(--muted); flex: none;
@@ -154,11 +194,14 @@ button.danger-btn {
 .tree-row.active .tree-icon { color: var(--accent); }
 .tree-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
 .tree-count { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+/* Pulled left by its own border + padding so the text stays exactly where
+   .tree-name had it: starting a rename must not shift the name sideways. */
 .tree-edit {
   flex: 1; min-width: 0;
   background: var(--bg); color: var(--text);
   border: 1px solid var(--accent-dim); border-radius: 4px;
-  padding: 2px 6px; font-size: 13px; outline: none;
+  padding: var(--space-3xs) var(--space-xs); font-size: 13px; outline: none;
+  margin-left: calc((var(--space-xs) + 1px) * -1);
 }
 
 /* Unchecked for this device but still taking up space. Disappears from the
@@ -175,8 +218,8 @@ button.danger-btn {
   border: 1px solid var(--line);
   border-radius: 10px;
   box-shadow: var(--shadow);
-  padding: 4px;
-  min-width: 190px;
+  padding: var(--space-2xs);
+  min-width: 192px;
   display: flex; flex-direction: column;
   animation: menu-in 130ms var(--ease);
 }
@@ -186,29 +229,36 @@ button.danger-btn {
 }
 .ctx-menu button {
   border: 0; justify-content: flex-start; text-align: left;
-  padding: 7px 10px; border-radius: 6px; font-size: 13px;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md); border-radius: 6px; font-size: 13px;
 }
 .ctx-menu button:hover:not(:disabled) { background: var(--accent-soft); }
 .ctx-menu button.danger { color: var(--danger); }
 .ctx-menu button.danger:hover:not(:disabled) { background: var(--danger-soft); }
-.ctx-menu hr { border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
+.ctx-menu hr { border: 0; border-top: 1px solid var(--line); margin: var(--space-2xs) 0; }
+/* Same width as .tree-icon: checkmarked and plain items share a text column. */
 .ctx-check {
-  width: 15px; display: inline-flex; align-items: center;
+  width: 16px; display: inline-flex; align-items: center;
   color: var(--accent); flex: none;
 }
 
 /* ---------- Main / tabla ---------- */
 main { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg); }
 
+/* Padding-x is the table's cell padding, not the app gutter: the view title
+   has to sit exactly above the first column header under it. */
 .view-head {
-  display: flex; align-items: baseline; gap: 12px;
-  padding: 14px 18px 8px;
+  display: flex; align-items: baseline; gap: var(--space-md);
+  padding: var(--space-md) var(--space-md) var(--space-sm);
 }
 .view-head h2 { margin: 0; font-size: 17px; font-weight: 700; }
 .view-meta { color: var(--muted); font-size: 12px; }
 .view-head .status { margin-left: auto; color: var(--accent); font-size: 12px; }
 
-.table-wrap { flex: 1; overflow-y: auto; overflow-x: hidden; outline: none; padding-bottom: 96px; }
+.table-wrap {
+  flex: 1; overflow-y: auto; overflow-x: hidden; outline: none;
+  padding-bottom: var(--player-clear);
+}
 
 /* width:100% => rows take up the full width (selection/hover reaches the edge)
    and columns adapt to the resolution without horizontal scroll. */
@@ -216,28 +266,52 @@ table.tracks { width: 100%; border-collapse: collapse; font-size: 13px; table-la
 table.tracks th {
   text-align: left; position: sticky; top: 0; z-index: var(--z-sticky);
   background: var(--bg);
-  padding: 8px 12px;
+  padding: var(--space-sm) var(--space-md);
   color: var(--muted); font-weight: 600; font-size: 12px;
   border-bottom: 1px solid var(--line);
   white-space: nowrap;
 }
 table.tracks td {
-  padding: 5px 12px;
+  padding: var(--space-2xs) var(--space-md);
   border-bottom: 1px solid oklch(23% 0 0 / 0.45);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   height: 48px;
 }
+/* Numeric columns read left like every other one, so the header row is even
+   all the way across. Tabular figures stay: every digit is the same width,
+   so the numbers still form clean vertical strokes even without a shared
+   right edge. */
 table.tracks th.num, table.tracks td.num {
-  text-align: right; font-variant-numeric: tabular-nums;
+  font-variant-numeric: tabular-nums;
 }
-.col-cover { width: 56px; }
+/* Kept in sync with COVER_COL_W in TrackTable.tsx. */
+.col-cover { width: 62px; }
 .t-title { font-weight: 600; }
 
+/* The grab zone straddles the boundary between two headers — 5px either
+   side of the divider, the way Explorer's does. It is invisible itself; the
+   thin grey line the user aims at is drawn by ::before, and sits exactly on
+   the boundary rather than inside one header or the other. */
 .col-handle {
-  position: absolute; top: 0; right: -4px; width: 9px; height: 100%;
+  position: absolute; top: 0; right: -5px; width: 11px; height: 100%;
   cursor: col-resize;
 }
-.col-handle:hover { box-shadow: inset -3px 0 0 var(--accent-dim); }
+.col-handle::before {
+  content: '';
+  position: absolute; left: 5px; width: 1px;
+  /* Inset from the header's full height, so the divider reads as a
+     separator between labels and not as a table border. */
+  top: 25%; bottom: 25%;
+  background: var(--line);
+  transition: background 120ms var(--ease), top 120ms var(--ease),
+    bottom 120ms var(--ease);
+}
+/* Aiming at it lights the full height in the accent, so it is obvious which
+   boundary is about to move. */
+.col-handle:hover::before,
+body.col-resizing .col-handle::before {
+  background: var(--accent-dim); top: 0; bottom: 0;
+}
 body.col-resizing { cursor: col-resize; }
 body.col-resizing * { cursor: col-resize !important; }
 
@@ -266,7 +340,7 @@ table.tracks tbody tr.drop-after > td { box-shadow: inset 0 -2px 0 0 var(--accen
 .drop-tail { height: 56px; }
 .drop-tail.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
 
-.empty { color: var(--muted); text-align: center; margin-top: 60px; }
+.empty { color: var(--muted); text-align: center; margin-top: calc(var(--space-2xl) * 2); }
 
 /* ---------- Covers ---------- */
 .cover {
@@ -318,7 +392,7 @@ tr:hover .row-cover .play-ov { opacity: 1; transform: scale(1); }
   border: 1px solid var(--accent-dim);
   color: var(--text);
   border-radius: 8px;
-  padding: 5px 12px;
+  padding: var(--space-xs) var(--space-md);
   font-size: 12px; font-weight: 600;
   box-shadow: var(--shadow);
   max-width: 260px;
@@ -344,21 +418,27 @@ body.dragging * { cursor: grabbing !important; }
 /* On desktop the panel coexists with the table (you click a track and the
    panel shows it), so it carries no scrim: it only becomes a drawer on small screens. */
 .rp-scrim { display: none; }
-.rp-inner { width: 288px; padding: 14px 16px 110px; overflow-y: auto; height: 100%; }
+.rp-inner {
+  width: 288px; overflow-y: auto; height: 100%;
+  padding: var(--space-lg) var(--gutter) var(--player-clear);
+}
 .rp-head {
   display: flex; align-items: center; justify-content: space-between;
   color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: 1px;
   text-transform: uppercase;
-  margin-bottom: 12px;
+  margin-bottom: var(--space-md);
 }
 .rp-art {
   width: 100%; height: auto; aspect-ratio: 1; border-radius: 12px;
-  margin-bottom: 12px;
+  margin-bottom: var(--space-md);
 }
 .rp-art svg.cover-fallback { width: 40px; height: 40px; }
-.rp-title { margin: 0 0 2px; font-size: 15px; font-weight: 700; }
-.rp-artist { margin: 0 0 14px; color: var(--muted); font-size: 13px; }
-.rp-meta { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 7px 12px; font-size: 12px; }
+.rp-title { margin: 0 0 var(--space-3xs); font-size: 15px; font-weight: 700; }
+.rp-artist { margin: 0 0 var(--space-lg); color: var(--muted); font-size: 13px; }
+.rp-meta {
+  margin: 0; display: grid; grid-template-columns: auto 1fr;
+  gap: var(--space-sm) var(--space-md); font-size: 12px;
+}
 .rp-meta dt { color: var(--muted); }
 .rp-meta dd { margin: 0; overflow: hidden; text-overflow: ellipsis; }
 .rp-path { white-space: nowrap; direction: rtl; text-align: left; }
@@ -367,8 +447,8 @@ body.dragging * { cursor: grabbing !important; }
 /* ---------- Floating translucent player ---------- */
 footer.player {
   position: fixed;
-  left: 12px; right: 12px;
-  bottom: calc(12px + env(safe-area-inset-bottom));
+  left: var(--player-inset); right: var(--player-inset);
+  bottom: calc(var(--player-inset) + env(safe-area-inset-bottom));
   z-index: var(--z-player);
   border: 1px solid oklch(100% 0 0 / 0.07);
   border-radius: 18px;
@@ -376,13 +456,13 @@ footer.player {
   backdrop-filter: blur(24px) saturate(1.2);
   -webkit-backdrop-filter: blur(24px) saturate(1.2);
   box-shadow: var(--shadow);
-  padding: 10px 18px;
+  padding: var(--space-md) var(--space-lg);
   display: grid;
   /* Columns in fr => scale continuously with the width, no jumps.
      The sides have a small min so they don't collapse; the center leads. */
   grid-template-columns: minmax(120px, 1fr) minmax(0, 2.4fr) minmax(120px, 1fr);
   align-items: center;
-  gap: clamp(8px, 2vw, 18px);
+  gap: clamp(var(--space-sm), 2vw, var(--space-lg));
   animation: player-in 260ms var(--ease);
 }
 @keyframes player-in {
@@ -394,7 +474,7 @@ footer.player.closing { animation: player-out 220ms var(--ease) forwards; }
   from { opacity: 1; transform: none; }
   to { opacity: 0; transform: translateY(16px); }
 }
-.np { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.np { display: flex; align-items: center; gap: var(--space-md); min-width: 0; }
 .np-art { width: 40px; height: 40px; border-radius: 8px; flex: none; }
 
 /* Stop sits on the artwork instead of in the transport row: it's the one
@@ -427,11 +507,11 @@ footer.player.closing { animation: player-out 220ms var(--ease) forwards; }
 .np-text strong { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .np-artist { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-.player-center { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
-.controls { display: flex; justify-content: center; align-items: center; gap: 6px; }
+.player-center { display: flex; flex-direction: column; gap: var(--space-xs); min-width: 0; }
+.controls { display: flex; justify-content: center; align-items: center; gap: var(--space-xs); }
 button.ctl {
   border: 0; background: transparent; color: var(--text);
-  padding: 6px; border-radius: 999px;
+  min-height: 0; padding: var(--space-xs); border-radius: 999px;
 }
 button.ctl:hover { color: var(--accent); transform: scale(1.08); }
 button.ctl.side { color: var(--muted); }
@@ -463,11 +543,17 @@ button.ctl.stop { color: var(--muted); }
   .seek-bar.dragging .seek-fill { background: var(--accent); }
 }
 
-.seek { display: flex; align-items: center; gap: 10px; }
+.seek { display: flex; align-items: center; gap: var(--space-md); }
+/* Reserved width so the bar's ends stay put when the elapsed time rolls over
+   from 9:59 to 10:00 mid-track. Elapsed hugs the bar from the left, total
+   from the right. */
 .time {
   color: var(--muted); font-size: 11px;
   font-variant-numeric: tabular-nums; font-family: 'Cascadia Mono', monospace;
+  min-width: 38px; flex: none;
 }
+.seek .time:first-child { text-align: right; }
+.seek .time:last-child { text-align: left; }
 .seek-bar {
   position: relative; flex: 1; height: 4px;
   background: oklch(100% 0 0 / 0.14); border-radius: 999px;
@@ -502,14 +588,17 @@ button.ctl.stop { color: var(--muted); }
   .seek-knob { opacity: 1; }
 }
 
-.player-right { display: flex; justify-content: flex-end; align-items: center; gap: 6px; min-width: 0; }
-.vol { display: flex; align-items: center; gap: 4px; }
+.player-right {
+  display: flex; justify-content: flex-end; align-items: center;
+  gap: var(--space-sm); min-width: 0;
+}
+.vol { display: flex; align-items: center; gap: var(--space-2xs); }
 .vol-range { width: 84px; }
 
 /* Gain: the per-track trim, as a knob. Deliberately a different shape from
    the volume slider next to it — that one is the room, this one is the
    record, and they should never be reached for by accident. */
-.gain { display: flex; align-items: center; gap: 1px; }
+.gain { display: flex; align-items: center; gap: var(--space-3xs); }
 .gain-value {
   font-size: 10px; color: var(--muted);
   font-variant-numeric: tabular-nums;
@@ -551,6 +640,10 @@ button.ctl.stop { color: var(--muted); }
 input.range {
   appearance: none;
   -webkit-appearance: none;
+  /* Chrome's UA sheet puts 2px of margin on a range input, which left the
+     crossfade slider sitting 2px inside the column every other control in
+     the panel lines up with. */
+  margin: 0;
   height: 4px; border-radius: 999px;
   background: linear-gradient(
     to right,
@@ -587,11 +680,13 @@ input.range:active::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--accent-so
   border: 1px solid var(--line);
   border-radius: 14px;
   box-shadow: var(--shadow);
-  padding: 16px 18px;
+  padding: var(--space-xl);
   width: min(400px, calc(100vw - 40px));
   animation: modal-in 180ms var(--ease);
 }
-.modal.wide { width: min(680px, calc(100vw - 48px)); padding: 20px 24px; }
+/* Same inner padding as the narrow modal — only the width differs, so a
+   settings row and a rename field start on the same edge. */
+.modal.wide { width: min(680px, calc(100vw - 48px)); }
 @keyframes modal-in {
   from { opacity: 0; transform: translateY(8px) scale(0.98); }
   to { opacity: 1; transform: none; }
@@ -603,29 +698,39 @@ input.range:active::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--accent-so
 }
 .modal-head {
   display: flex; align-items: center; justify-content: space-between;
-  margin-bottom: 12px;
+  margin-bottom: var(--space-lg);
 }
 .modal-head h3 { margin: 0; font-size: 15px; }
+/* The close glyph, not the button's padding box, lines up with the modal's
+   right edge. Same trick in the info panel's header. */
+.modal-head > .mini,
+.rp-head > .mini { margin-right: calc(var(--space-xs) * -1); }
 .modal-input {
   width: 100%;
   background: var(--panel-2); color: var(--text);
   border: 1px solid var(--line); border-radius: var(--radius);
-  padding: 8px 12px; font-size: 14px; outline: none;
+  min-height: var(--control-h);
+  padding: var(--space-sm) var(--space-md); font-size: 14px; outline: none;
 }
 .modal-input:focus { border-color: var(--accent-dim); }
-.modal-msg { margin: 0 0 4px; font-size: 13px; line-height: 1.5; }
+.modal-msg { margin: 0 0 var(--space-2xs); font-size: 13px; line-height: 1.5; }
 .modal-msg.muted { color: var(--muted); }
 .modal-actions {
-  display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px;
+  display: flex; justify-content: flex-end; gap: var(--space-sm);
+  margin-top: var(--space-xl);
 }
-.pick-list { display: flex; flex-direction: column; gap: 2px; max-height: 300px; overflow-y: auto; }
+.pick-list {
+  display: flex; flex-direction: column; gap: var(--space-3xs);
+  max-height: 320px; overflow-y: auto;
+}
 .pick-list button {
   border: 0; justify-content: flex-start; text-align: left;
-  padding: 8px 10px; border-radius: 6px;
+  padding: var(--space-sm) var(--space-md); border-radius: 6px;
 }
 .pick-list button:hover { background: var(--accent-soft); }
 .settings-list {
-  margin: 0 0 10px; display: grid; grid-template-columns: auto 1fr; gap: 7px 16px;
+  margin: 0 0 var(--space-md); display: grid; grid-template-columns: auto 1fr;
+  gap: var(--space-sm) var(--space-lg);
   font-size: 13px;
 }
 .settings-list dt { color: var(--muted); }
@@ -639,20 +744,22 @@ input.range:active::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--accent-so
 ::-webkit-scrollbar-corner { background: transparent; }
 
 /* ---------- Import toast ---------- */
+/* Both toasts sit on the player's own left/right insets and share its
+   clearance, so they read as part of the same floating layer. */
 .import-toast {
   position: fixed; z-index: var(--z-toast, 45);
-  right: 18px; bottom: 96px;
-  width: min(320px, calc(100vw - 36px));
+  right: var(--player-inset); bottom: var(--player-clear);
+  width: min(320px, calc(100vw - var(--player-inset) * 2));
   background: var(--panel-2);
   border: 1px solid var(--line);
   border-radius: 12px;
   box-shadow: var(--shadow);
-  padding: 12px 14px;
+  padding: var(--space-md);
   animation: modal-in 180ms var(--ease);
 }
 .import-toast-head {
   display: flex; justify-content: space-between; align-items: center;
-  font-size: 12px; margin-bottom: 8px;
+  font-size: 12px; margin-bottom: var(--space-sm);
 }
 .import-toast-count { color: var(--muted); font-variant-numeric: tabular-nums; }
 .import-bar {
@@ -671,7 +778,11 @@ input.range:active::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--accent-so
 /* Mobile: sidebar as a drawer + hamburger. The player stays fluid. */
 @media (max-width: 680px) {
   .burger { display: inline-flex; }
-  header { grid-template-columns: auto 1fr auto; gap: 10px; padding: 9px 12px; }
+  header {
+    grid-template-columns: auto 1fr auto;
+    gap: var(--space-sm);
+    padding: calc(var(--space-sm) + env(safe-area-inset-top)) var(--space-md) var(--space-sm);
+  }
 
   .sidebar {
     position: absolute; top: 0; left: 0; bottom: 0; z-index: var(--z-menu);
@@ -704,22 +815,28 @@ input.range:active::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--accent-so
 button.mini.on { color: var(--accent); }
 
 /* ---------- Column headers: drag to reorder ---------- */
-table.tracks th { position: relative; cursor: grab; }
+/* Default cursor, like Explorer: the only thing that advertises a cursor
+   here is the resize divider. The grabbing cursor appears once a drag has
+   actually started, not on every press. */
+table.tracks th { position: relative; cursor: default; }
 .th-label { pointer-events: none; }
 body.col-dragging, body.col-dragging * { cursor: grabbing !important; }
 table.tracks th.col-dragging-src { opacity: 0.4; }
-table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
+/* Which side of the target the column will land on. The marker sits on the
+   edge the column is going to, so the drop is predictable before releasing. */
+table.tracks th.col-drop-before { box-shadow: inset 2px 0 0 var(--accent); }
+table.tracks th.col-drop-after { box-shadow: inset -2px 0 0 var(--accent); }
 
 /* ---------- Status toast (auto-dismiss) ---------- */
 
 .status-toast {
   position: fixed; z-index: var(--z-menu);
-  left: 16px; bottom: 96px;
+  left: var(--player-inset); bottom: var(--player-clear);
   background: var(--panel-2);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 12px;
   box-shadow: var(--shadow);
-  padding: 9px 13px;
+  padding: var(--space-md);
   font-size: 13px; color: var(--text);
   max-width: 320px;
   animation: toast-in 200ms var(--ease);
@@ -731,80 +848,141 @@ table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
 
 /* ---------- Settings ---------- */
 .settings {
-  display: flex; flex-direction: column; gap: 18px;
+  /* Width of the control column every row aligns to. Kept narrow: a slider
+     that spans it has to read as a control, not as a second progress bar,
+     and the description column is where the extra width is worth more. */
+  --set-control-col: 176px;
+  display: flex; flex-direction: column; gap: var(--space-xl);
   /* Twice on purpose: `dvh` tracks the window's REAL height, so when the
      phone's keyboard appears the panel shrinks and the focused field stays
      within view. `vh` doesn't know about the keyboard — it's the fallback
      for engines that don't support `dvh`. */
   max-height: 74vh;
   max-height: 74dvh;
-  overflow-y: auto; margin: 2px -4px 0; padding: 0 4px;
+  overflow-y: auto;
+  /* The negative margin lets a focused control's outline bleed past the
+     scroll box instead of being clipped by it. */
+  margin: var(--space-3xs) calc(var(--space-2xs) * -1) 0;
+  padding: 0 var(--space-2xs);
 }
-.settings section { display: flex; flex-direction: column; gap: 2px; }
+.settings section { display: flex; flex-direction: column; gap: var(--space-3xs); }
 .settings h4 {
-  margin: 0 0 8px; font-size: 11px; font-weight: 700; letter-spacing: 1px;
+  margin: 0 0 var(--space-sm); font-size: 11px; font-weight: 700; letter-spacing: 1px;
   text-transform: uppercase; color: var(--accent);
 }
+
+/* Two real columns, not `space-between`. The control column is a fixed
+   track, so every switch, select, slider and button in the panel lands on
+   the same vertical axis, and every description wraps at the same width
+   instead of one row's text running further right than its neighbour's. */
 .set-row {
-  display: flex; align-items: center; justify-content: space-between; gap: 16px;
-  min-height: 40px; padding: 6px 0; border-bottom: 1px solid oklch(23% 0 0 / 0.5);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--set-control-col, 240px);
+  align-items: center;
+  column-gap: var(--space-lg);
+  min-height: 44px; padding: var(--space-sm) 0;
+  border-bottom: 1px solid oklch(23% 0 0 / 0.5);
 }
+.set-row > * { min-width: 0; }
+/* The control side hugs the right edge of its track; a row that is only a
+   label keeps the full width. */
+.set-row > :last-child:not(:only-child) { justify-self: end; }
 .set-row:last-child { border-bottom: 0; }
-.set-label { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+/* Rows that are a form rather than a labelled setting: the fields sit next
+   to each other and the action closes the row, instead of a field being
+   flung to the far side of the control track.
+   Whatever closes the row — the port field on one, the submit button on the
+   next — shares one width, so the port and the button line up on a left
+   edge and the field leading each row ends on the same right edge. Sized to
+   hold the button's longest label ("Connecting…"); kept well short of the
+   control column so the port still reads as the small half of an address. */
+.set-row.form { display: flex; gap: var(--space-sm); --form-tail: 104px; }
+.set-row.form .set-input { flex: 1; width: auto; }
+.set-row.form > .set-input.port,
+.set-row.form > button { flex: none; width: var(--form-tail); }
+.set-label { display: flex; flex-direction: column; gap: var(--space-3xs); min-width: 0; }
 .set-label span { font-size: 13px; }
-.set-label small { color: var(--muted); font-size: 11px; }
-.set-control { display: flex; align-items: center; gap: 8px; }
+.set-label small { color: var(--muted); font-size: 11px; line-height: 1.45; }
+.set-control { display: flex; align-items: center; gap: var(--space-sm); }
 .set-value { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
-.set-path {
-  background: var(--panel-2); border: 1px solid var(--line); border-radius: 5px;
-  padding: 3px 7px; font-size: 12px; color: var(--muted);
-  font-family: 'Cascadia Mono', monospace;
+
+/* Every control that can share a settings row is the same height, so the
+   right column reads as one line of controls rather than a ragged stack.
+   The switch and the colour swatches are excluded by name: they are buttons
+   too, and this selector outranks their own sizing rules, which stretched
+   the switch into a 26px pill. */
+.settings button:not(.switch):not(.swatch),
+.settings .set-select,
+.settings .set-input,
+.settings .set-path {
+  height: var(--control-h-sm); min-height: var(--control-h-sm);
 }
-.settings button { padding: 5px 11px; font-size: 12px; }
+.set-path {
+  display: inline-flex; align-items: center;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 5px;
+  padding: 0 var(--space-sm); font-size: 12px; color: var(--muted);
+  font-family: 'Cascadia Mono', monospace;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* Inside a description `small`, the path is prose, not a control. */
+.set-label small .set-path { height: auto; min-height: 0; padding: 0 var(--space-2xs); }
+.settings button { padding: 0 var(--space-md); font-size: 12px; }
 .set-select {
   background: var(--panel-2); color: var(--text);
   border: 1px solid var(--line); border-radius: 6px;
-  padding: 5px 8px; font-size: 12px; outline: none;
+  padding: 0 var(--space-sm); font-size: 12px; outline: none;
   /* The output-device list arrives asynchronously, so the widest option only
      exists a moment after the panel opens. A fixed width (not min/max, which
      the longest option can still push past) keeps the control from growing
      under the pointer a second after the panel appears. Long device names
      ellipsize instead of stretching the row. */
-  width: 230px;
+  /* Fills the control track, so it shares a left edge with the text inputs
+     and sliders in the rows above and below it. */
+  width: 100%;
   flex: none;
   text-overflow: ellipsis;
 }
 .set-select:disabled { opacity: 0.5; }
-.set-slider { width: 140px; }
-.set-note { color: var(--muted); font-size: 12px; margin: 6px 0 0; line-height: 1.5; }
-/* A note worth reading: something configured here doesn't do what it looks like. */
+.set-slider { width: 100%; }
+.set-note { color: var(--muted); font-size: 12px; margin: var(--space-sm) 0 0; line-height: 1.5; }
+/* A note worth reading: something configured here doesn't do what it looks
+   like. A full tinted panel, not an accent stripe down one side. */
 .set-note.warn {
-  color: var(--text); border-left: 2px solid var(--accent);
-  padding: 6px 0 6px 10px; background: oklch(23% 0 0 / 0.35); border-radius: 0 5px 5px 0;
+  color: var(--text);
+  border: 1px solid color-mix(in oklch, var(--accent) 30%, transparent);
+  background: var(--accent-soft);
+  padding: var(--space-sm) var(--space-md); border-radius: var(--radius);
 }
 .set-input {
   background: var(--panel-2); color: var(--text);
   border: 1px solid var(--line); border-radius: 6px;
-  padding: 6px 9px; font-size: 12px; outline: none; width: 180px;
+  padding: 0 var(--space-sm); font-size: 12px; outline: none; width: 100%;
   transition: border-color 160ms var(--ease);
 }
 .set-input:focus { border-color: var(--accent); }
 .set-input:disabled { opacity: 0.5; }
-/* The host takes up the width; the port is four digits. */
-.set-row > .set-input:not(.port) { flex: 1; width: auto; }
-.set-input.port { width: 76px; font-variant-numeric: tabular-nums; }
+/* Server address row: the host takes the label column, the port is four
+   digits and sits in the control track. */
+.set-row > .set-input.port { width: 76px; font-variant-numeric: tabular-nums; }
 
 /* Devices seen on the LAN (Phase 5) */
-.peer-list { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.peer-list {
+  list-style: none; margin: var(--space-sm) 0 0; padding: 0;
+  display: flex; flex-direction: column; gap: var(--space-sm);
+}
 .peer {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--line); border-radius: var(--radius);
   background: var(--panel-2);
 }
 /* Paired but off the network: still yours, just not around right now. */
 .peer.offline { opacity: 0.5; }
 .peer-badge {
-  flex: none; font-size: 11px; padding: 3px 8px; border-radius: 999px;
+  flex: none; font-size: 11px; border-radius: 999px;
+  display: inline-flex; align-items: center;
+  height: var(--control-h-sm); padding: 0 var(--space-md);
   border: 1px solid var(--line); color: var(--muted);
 }
 .peer-badge.ok { color: var(--accent); border-color: color-mix(in oklch, var(--accent) 55%, transparent); }
@@ -812,19 +990,19 @@ table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
 /* Sync dry run */
 .peer { flex-wrap: wrap; }
 .plan {
-  flex-basis: 100%; margin-top: 8px; padding-top: 8px;
+  flex-basis: 100%; margin-top: var(--space-sm); padding-top: var(--space-sm);
   border-top: 1px solid var(--line);
-  display: flex; flex-direction: column; gap: 3px;
+  display: flex; flex-direction: column; gap: var(--space-2xs);
 }
 .plan-row {
-  display: flex; justify-content: space-between; gap: 12px;
+  display: flex; justify-content: space-between; gap: var(--space-md);
   font-size: 12px; color: var(--muted);
 }
 .plan-row strong { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
-.plan .set-note { margin-top: 4px; font-size: 11px; }
+.plan .set-note { margin-top: var(--space-2xs); font-size: 11px; }
 .xfer-bar {
   height: 4px; border-radius: 999px; overflow: hidden;
-  background: var(--line); margin-top: 4px;
+  background: var(--line); margin-top: var(--space-2xs);
 }
 .xfer-fill {
   height: 100%; background: var(--accent);
@@ -832,21 +1010,27 @@ table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
 }
 
 /* Sync screen (Phase 5.7) */
+/* Pulled left by its own padding so the chevron, not the button box, lines
+   up with the section headings under it. */
 .sync-back {
-  align-self: flex-start; display: inline-flex; align-items: center; gap: 4px;
-  padding: 4px 9px 4px 6px; font-size: 12px; color: var(--muted);
+  align-self: flex-start; display: inline-flex; align-items: center;
+  gap: var(--space-2xs);
+  margin-left: calc(var(--space-sm) * -1);
+  padding: 0 var(--space-sm); font-size: 12px; color: var(--muted);
 }
 .sync-back:hover { color: var(--text); }
-.settings .set-control button { display: inline-flex; align-items: center; gap: 3px; }
+.settings .set-control button { display: inline-flex; align-items: center; gap: var(--space-2xs); }
 
 /* Selection tree: which playlists live on each device */
 .scope-tree {
-  margin: 4px 0 2px; padding: 6px 4px; max-height: 220px; overflow-y: auto;
-  border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2);
+  margin: var(--space-sm) 0 var(--space-3xs); padding: var(--space-xs) var(--space-2xs);
+  max-height: 220px; overflow-y: auto;
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel-2);
 }
 .scope-node {
-  display: flex; align-items: center; gap: 8px;
-  padding: 3px 6px; border-radius: 5px; font-size: 12.5px; cursor: pointer;
+  display: flex; align-items: center; gap: var(--space-sm);
+  padding: var(--space-2xs) var(--space-xs); border-radius: 5px;
+  font-size: 12.5px; cursor: pointer;
 }
 .scope-node:hover { background: var(--panel); }
 .scope-node input { accent-color: var(--accent); }
@@ -856,27 +1040,35 @@ table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
 .scope-node small { margin-left: auto; color: var(--muted); font-size: 11px; }
 
 /* Per-device history */
-.hist { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
-.hist li { display: flex; align-items: baseline; gap: 8px; font-size: 12px; color: var(--muted); }
+.hist {
+  list-style: none; margin: var(--space-sm) 0 0; padding: 0;
+  display: flex; flex-direction: column; gap: var(--space-3xs);
+}
+.hist li {
+  display: flex; align-items: baseline; gap: var(--space-sm);
+  font-size: 12px; color: var(--muted); min-height: 22px;
+}
 .hist li span { color: var(--text); }
 .hist li small { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hist li time { flex: none; font-variant-numeric: tabular-nums; }
 
 /* Pairing verification code */
-.pair-dialog { display: flex; flex-direction: column; gap: 14px; }
+.pair-dialog { display: flex; flex-direction: column; gap: var(--space-lg); }
 .pair-code {
   font-family: 'Cascadia Mono', monospace;
   font-size: 40px; font-weight: 700; letter-spacing: 10px;
   text-align: center; color: var(--accent);
-  padding: 18px 0 18px 10px; /* compensates for the letter-spacing of the last digit */
+  /* Left padding carries the trailing letter-spacing of the last digit, so
+     the block of digits is optically centred rather than geometrically. */
+  padding: var(--space-xl) 0 var(--space-xl) 10px;
   background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
   font-variant-numeric: tabular-nums;
 }
-.pair-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.pair-actions { display: flex; justify-content: flex-end; gap: var(--space-sm); }
 .pair-actions .primary { background: var(--accent); border-color: var(--accent); color: oklch(15% 0 0); }
 
 .switch {
-  width: 38px; height: 22px; border-radius: 999px; padding: 0;
+  width: 34px; height: 18px; min-height: 0; border-radius: 999px; padding: 0;
   border: 1px solid var(--line); background: var(--panel-2);
   position: relative; flex: none; cursor: pointer;
   transition: background 160ms var(--ease), border-color 160ms var(--ease);
@@ -884,19 +1076,32 @@ table.tracks th.col-drop-target { box-shadow: inset 2px 0 0 var(--accent); }
 .switch.on { background: var(--accent); border-color: var(--accent); }
 .switch-knob {
   position: absolute; top: 50%; left: 3px;
-  width: 15px; height: 15px; border-radius: 50%;
+  width: 12px; height: 12px; border-radius: 50%;
   background: var(--text); transform: translateY(-50%);
   transition: left 160ms var(--ease), background 160ms var(--ease);
 }
-.switch.on .switch-knob { left: 20px; background: var(--accent-ink); }
+/* `left` is measured from the padding box (34 minus the 1px border each
+   side = 32), so the on position is 32 − 12 − 3 = 17: the same 3px of
+   clearance as the off position. The track is thin on purpose — it reads as
+   a setting, not as a button. */
+.switch.on .switch-knob { left: 17px; background: var(--accent-ink); }
 /* Saved but currently overridden by another setting (gapless under an active
    crossfade). Dimmed rather than reset: the stored value is still the truth,
    it just isn't what's deciding right now. */
 .switch.off-duty { opacity: 0.4; cursor: default; }
 
-.swatches { display: flex; gap: 6px; }
+/* Narrower control track on a phone — still a track, so the column keeps a
+   single axis instead of every row finding its own edge. Declared after the
+   base `.settings` rule, not up in the responsive section: same specificity,
+   so source order is what decides which value wins. */
+@media (max-width: 680px) {
+  .settings { --set-control-col: 128px; }
+  .set-row { column-gap: var(--space-md); }
+}
+
+.swatches { display: flex; gap: var(--space-sm); }
 .swatch {
-  width: 20px; height: 20px; border-radius: 50%; padding: 0;
+  width: 20px; height: 20px; min-height: 0; border-radius: 50%; padding: 0;
   border: 2px solid transparent; cursor: pointer;
 }
 .swatch.on { border-color: var(--text); }

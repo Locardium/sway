@@ -87,7 +87,7 @@ fn run() -> Result<()> {
     std::fs::create_dir_all(&cfg.music_dir)
         .with_context(|| format!("could not create {}", cfg.music_dir.display()))?;
 
-    let db_file = cfg.data_dir.join("sway.sqlite");
+    let db_file = cfg.data_dir.join("db.sqlite");
     let conn = db::open(&db_file).with_context(|| format!("could not open {}", db_file.display()))?;
     // WAL checkpointing runs from its own connection, without slowing down writers.
     db::spawn_checkpointer(&db_file);

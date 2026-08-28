@@ -48,6 +48,7 @@ pub mod engine;
 pub mod hashing;
 pub mod id3_sanitize;
 pub mod import;
+mod internal_dir;
 pub mod manifest;
 pub mod merge;
 pub mod pairing;

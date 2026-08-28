@@ -1,6 +1,6 @@
 [package]
 name = "sway"
-version = "0.1.0"
+version = "1.0.0"
 description = "Sway — DJ player/organizer"
 edition = "2021"
 
@@ -69,6 +69,10 @@ windows = { version = "0.58", features = ["Networking_Connectivity"] }
 # were needed.
 env_logger = "0.11.11"
 rodio = { version = "0.19", features = ["symphonia-all"] }
+# One running copy: a second launch (double-click, file association, etc.)
+# should focus the existing window instead of opening a second player on the
+# same library/db.
+tauri-plugin-single-instance = "2"
 # How much battery is left (Phase 6.7). A desktop PC has none, and that's
 # not an error: it's the answer, and with it the screen knows it shouldn't
 # offer the option.
